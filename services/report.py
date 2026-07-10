@@ -3,74 +3,67 @@ class Report:
     def ai_summary(self, data):
 
         summary = []
+        direction = data.get("direction", "LONG")
+        long = direction == "LONG"
+        trend_bull = "Bullish" in data["trend"]
+        structure_bull = "Bullish" in data["structure"]
 
-        if "Bullish" in data["trend"]:
-            summary.append(
-                "• Higher timeframe trend is bullish."
-            )
+        if (long and trend_bull) or (not long and not trend_bull):
+            summary.append(f"• Higher timeframe trend is aligned with the {direction} setup.")
         else:
-            summary.append(
-                "• Higher timeframe trend is bearish."
-            )
+            summary.append(f"• Higher timeframe trend conflicts with the {direction} setup; this is counter-trend.")
 
-        if "Bullish" in data["structure"]:
-            summary.append(
-                "• Market structure supports continuation."
-            )
-        elif "Bearish" in data["structure"]:
-            summary.append(
-                "• Market structure remains bearish."
-            )
+        if (long and structure_bull) or (not long and not structure_bull):
+            summary.append(f"• Market structure supports the {direction} direction.")
+        else:
+            summary.append(f"• Market structure does not fully confirm the {direction} direction.")
 
         if "Bullish" in data["choch"]:
-            summary.append(
-                "• Bullish CHOCH detected."
-            )
+            summary.append("• Bullish CHOCH detected.")
+        elif "Bearish" in data["choch"]:
+            summary.append("• Bearish CHOCH detected.")
 
         if "Sell Side Sweep" in data["sweep"]:
-            summary.append(
-                "• Sell-side liquidity has been swept."
-            )
+            summary.append("• Sell-side liquidity has been swept.")
+        elif "Buy Side Sweep" in data["sweep"]:
+            summary.append("• Buy-side liquidity has been swept.")
 
         if "Bullish" in data["order_block"]:
-            summary.append(
-                "• Price is reacting from a Bullish Order Block."
-            )
+            summary.append("• Price is reacting from a Bullish Order Block.")
+        elif "Bearish" in data["order_block"]:
+            summary.append("• Price is reacting from a Bearish Order Block.")
 
         if "Bullish" in data["breaker"]:
-            summary.append(
-                "• Bullish Breaker Block is active."
-            )
+            summary.append("• Bullish Breaker Block is active.")
+        elif "Bearish" in data["breaker"]:
+            summary.append("• Bearish Breaker Block is active.")
 
         if "Bullish" in data["mitigation"]:
-            summary.append(
-                "• Mitigation Block remains valid."
-            )
+            summary.append("• Bullish Mitigation Block remains valid.")
+        elif "Bearish" in data["mitigation"]:
+            summary.append("• Bearish Mitigation Block remains valid.")
 
         if "Bullish" in data["fvg"]:
-            summary.append(
-                "• Bullish Fair Value Gap detected."
-            )
+            summary.append("• Bullish Fair Value Gap detected.")
+        elif "Bearish" in data["fvg"]:
+            summary.append("• Bearish Fair Value Gap detected.")
 
         if "Discount" in data["premium"]["zone"]:
-            summary.append(
-                "• Price trades in Discount."
-            )
+            summary.append("• Price trades in Discount.")
+        elif "Premium" in data["premium"]["zone"]:
+            summary.append("• Price trades in Premium.")
 
-        if "Bullish" in data["displacement"]:
-            summary.append(
-                "• Strong bullish displacement."
-            )
+        if "Weak Displacement" in data["displacement"]:
+            summary.append("• Displacement is weak, so momentum confirmation is limited.")
+        elif "Bullish" in data["displacement"]:
+            summary.append("• Strong bullish displacement is present.")
+        elif "Bearish" in data["displacement"]:
+            summary.append("• Strong bearish displacement is present.")
 
-        if "Spike" in data["volume"]:
-            summary.append(
-                "• Volume expansion confirms momentum."
-            )
-
-        if not summary:
-            summary.append(
-                "• No strong Smart Money confirmation."
-            )
+        if data.get("volume_ratio", 1.0) < 0.8:
+            summary.append("• Relative volume is below average.")
+        elif "Spike" in data["volume"]:
+            summary.append("• Volume expansion confirms momentum.")
 
         return "\n".join(summary)
 
@@ -202,9 +195,13 @@ ATR
 
 ━━━━━━━━━━━━━━━━━━
 
-🎲 Probability
+📐 Setup Score
 
-{data["probability"]}%
+{data["score"]}/100
+
+🔎 Confirmations
+
+{data["confirmations"]}
 
 ⭐ Trade Quality
 

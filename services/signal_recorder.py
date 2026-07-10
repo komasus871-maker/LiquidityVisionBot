@@ -29,9 +29,13 @@ class SignalRecorder:
         symbol: str,
         timeframe: str,
         analysis: dict[str, Any],
-        min_confidence: float = 15,
+        min_confidence: float = 58,
     ) -> int | None:
-        if analysis["recommendation"] == "🟡 WAIT" or analysis["confidence"] < min_confidence:
+        if (
+            analysis["recommendation"] == "🟡 WAIT"
+            or analysis["confidence"] < min_confidence
+            or analysis.get("rr", 0) < 1.5
+        ):
             return None
 
         features = {

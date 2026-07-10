@@ -27,6 +27,7 @@ class Scanner:
                 "confidence": result["confidence"],
                 "recommendation": result["recommendation"],
                 "rr": result["rr"],
+                "ranking_score": result["ranking_score"],
             }
 
         except Exception:

@@ -25,7 +25,7 @@ async def scanner_menu(message: Message):
         text += (
             f"{index}. 🪙 <b>{coin['symbol']}</b> — "
             f"{coin['recommendation']}\n"
-            f"   Confidence: {coin['confidence']}% | RR: 1:{coin['rr']}\n\n"
+            f"   Score: {coin['confidence']}/100 | RR: 1:{coin['rr']} | Rank: {coin['ranking_score']}\n\n"
         )
 
     await wait.edit_text(text)
