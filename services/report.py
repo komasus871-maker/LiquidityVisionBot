@@ -198,6 +198,9 @@ RR: 1:{fmt_number(data['rr'])}
 🧾 Signal ID
 {signal_text}
 
+👁 Observation ID
+{observation_text}
+
 ━━━━━━━━━━━━━━━━━━
 
 ⚠️ <i>Not financial advice. Always use proper risk management.</i>

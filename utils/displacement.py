@@ -32,7 +32,7 @@ class Displacement:
         composite = min(100.0, efficiency * 0.65 + min(expansion / 2.0, 1.0) * 100 * 0.35)
 
         if direction == "Neutral":
-            return f"⚪ Weak Displacement (0.0%, 0.0x)"
+            return "⚪ Weak Displacement (0.0%, 0.0x)"
         if composite >= 72 and expansion >= 1.35:
             level = "Strong"
             icon = "🟢" if direction == "Bullish" else "🔴"

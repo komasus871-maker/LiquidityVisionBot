@@ -119,6 +119,9 @@ class Analyzer:
         structure_ok = self._aligned(direction, raw["structure"])
         bos_ok = self._aligned(direction, raw["bos"])
         choch_ok = self._aligned(direction, raw["choch"])
+        ob_ok = self._aligned(direction, raw["order_block"])
+        breaker_ok = self._aligned(direction, raw["breaker"])
+        fvg_ok = self._aligned(direction, raw["fvg"])
         displacement_ok = self._aligned(direction, raw["displacement"])
         strong_adverse_displacement = (not displacement_ok) and "Strong" in raw["displacement"]
         moderate_adverse_displacement = (not displacement_ok) and "Moderate" in raw["displacement"]
