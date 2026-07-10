@@ -2,10 +2,12 @@ from aiogram import Router, F
 from aiogram.types import Message
 
 from database.signal_history import SignalHistory
+from database.observation_history import ObservationHistory
 from utils.price import fmt_price
 
 router = Router()
 history = SignalHistory()
+observations = ObservationHistory()
 
 
 def _status_icon(status: str) -> str:
@@ -20,6 +22,8 @@ async def journal_handler(message: Message):
     user_id = message.from_user.id
     stats = history.get_stats(user_id)
     recent = history.get_recent(user_id, limit=8)
+    obs_recent = observations.recent(user_id, limit=5)
+    observation_count = observations.count(user_id)
 
     recent_text = []
     for item in recent:
@@ -28,7 +32,12 @@ async def journal_handler(message: Message):
             f"   Entry {fmt_price(item['entry'])} | RR 1:{item['rr']:.2f} | MFE {float(item.get('max_profit_pct') or 0):.2f}%"
         )
 
-    timeline = "\n\n".join(recent_text) if recent_text else "Пока нет сохранённых сетапов. Анализ с подходящим статусом появится здесь автоматически."
+    timeline = "\n\n".join(recent_text) if recent_text else "Пока нет сохранённых торговых сетапов."
+    obs_text = "\n\n".join(
+        f"👁 <b>#{x['id']} {x['symbol']} {x['direction']}</b> — {x['execution_status']}\n"
+        f"   Direction {x['direction_score']:.1f} | Ready {x['readiness']:.1f} | Price {fmt_price(x['price'])}"
+        for x in obs_recent
+    ) or "Пока нет аналитических наблюдений."
 
     await message.answer(f"""
 📒 <b>Trade Journal PRO</b>
@@ -38,6 +47,7 @@ async def journal_handler(message: Message):
 ⚡ Active: {stats.get('active_count') or 0}
 ✅ Closed: {stats.get('closed_count') or 0}
 📚 Total tracked: {stats.get('total') or 0}
+👁 Observations: {observation_count}
 
 🏆 Win rate by TP1: {stats.get('win_rate') or 0}%
 🎯 TP1 rate: {stats.get('tp1_rate') or 0}%
@@ -55,4 +65,10 @@ async def journal_handler(message: Message):
 🕘 <b>Recent lifecycle</b>
 
 {timeline}
+
+━━━━━━━━━━━━━━━━━━
+
+👁 <b>Recent observations</b>
+
+{obs_text}
 """, parse_mode="HTML")

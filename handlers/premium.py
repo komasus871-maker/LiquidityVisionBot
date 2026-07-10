@@ -28,13 +28,30 @@ async def premium_screen(message: Message):
 • будущие probability и AI review-модули.
 """, parse_mode="HTML")
         return
+    await message.answer(
+        f"""👑 <b>Liquidity Vision Premium</b>
+
+Current plan: <b>FREE</b>
+
+<b>FREE</b>
+• до 20 отслеживаемых сетапов;
+• базовая история и Journal;
+• Scanner, Market, Fear и News;
+• базовый Explain.
+
+<b>PREMIUM — {PREMIUM_STARS} ⭐ / {PREMIUM_DAYS} дней</b>
+• до 200 отслеживаемых сетапов;
+• полная история;
+• Explain Pro;
+• расширенная статистика;
+• приоритетные lifecycle-уведомления;
+• будущие Probability, Similarity и Export-модули.
+""", parse_mode="HTML")
     await message.answer_invoice(
         title="Liquidity Vision Premium",
-        description=f"Premium на {PREMIUM_DAYS} дней: расширенная статистика, уведомления и будущие PRO-модули.",
-        payload=PAYLOAD,
-        currency="XTR",
-        prices=[LabeledPrice(label=f"Premium {PREMIUM_DAYS} дней", amount=PREMIUM_STARS)],
-        provider_token="",
+        description=f"Premium на {PREMIUM_DAYS} дней: расширенная статистика, уведомления и PRO-модули.",
+        payload=PAYLOAD, currency="XTR",
+        prices=[LabeledPrice(label=f"Premium {PREMIUM_DAYS} дней", amount=PREMIUM_STARS)], provider_token="",
     )
     await message.answer(f"💳 <b>Оплата криптовалютой</b>\n\n{CRYPTO_PAYMENT_TEXT}", parse_mode="HTML")
 

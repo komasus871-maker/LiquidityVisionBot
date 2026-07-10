@@ -25,6 +25,7 @@ class Report:
         triggers = "\n".join(f"• {item}" for item in data.get("triggers", [])) or "• Setup is ready under current conditions"
         alt = "\n".join(f"• {item}" for item in data.get("alternative_conditions", []))
         signal_text = data.get("signal_id") or "not recorded as executable trade"
+        observation_text = data.get("observation_id") or "not recorded"
         reasons = "\n".join(data["reasons"]) or "⚪ No decisive confluence"
         p = fmt_price
         return f"""

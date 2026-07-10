@@ -33,23 +33,30 @@ COIN_KEYWORDS = {
     "TON": ("toncoin", "telegram open network"),
 }
 
-HIGH_IMPACT = (
-    "fed", "federal reserve", "interest rate", "cpi", "inflation", "sec",
-    "etf approval", "etf rejection", "hack", "exploit", "bankruptcy",
-    "liquidation", "regulation", "lawsuit", "tariff", "war",
+HIGH_MARKET_PHRASES = (
+    "fomc", "federal reserve rate", "interest rate decision", "cpi", "consumer price index",
+    "ppi", "nonfarm payroll", "nfp", "sec approves", "sec rejects", "spot bitcoin etf",
+    "spot ethereum etf", "exchange hack", "bridge exploit", "bankruptcy filing", "trading halted",
+    "major liquidation", "crypto ban", "emergency fork", "network outage",
 )
-MEDIUM_IMPACT = (
-    "etf", "institutional", "whale", "upgrade", "mainnet", "airdrop",
-    "partnership", "listing", "delisting", "funding rate", "open interest",
+MEDIUM_MARKET_PHRASES = (
+    "etf inflow", "etf outflow", "institutional purchase", "whale transfer", "mainnet upgrade",
+    "hard fork", "token unlock", "airdrop", "partnership", "exchange listing", "exchange delisting",
+    "banking charter", "stablecoin regulation", "mica", "cftc", "lawsuit",
 )
-BULLISH_WORDS = (
-    "approval", "approved", "inflow", "adoption", "surge", "rally", "record high",
-    "partnership", "launch", "upgrade", "buy", "accumulate", "growth",
+CRYPTO_CONTEXT = (
+    "bitcoin", "btc", "ethereum", "ether", "eth", "crypto", "blockchain", "stablecoin",
+    "token", "defi", "exchange", "binance", "coinbase", "solana", "xrp", "etf",
 )
-BEARISH_WORDS = (
-    "rejection", "rejected", "outflow", "hack", "exploit", "lawsuit", "ban",
-    "crash", "plunge", "sell-off", "liquidation", "bankruptcy", "delist",
+BULLISH_PHRASES = (
+    "approved", "approval", "record inflow", "inflows rise", "adoption", "launches", "upgrade successful",
+    "buys bitcoin", "purchase bitcoin", "banking charter approval", "partnership", "integrates",
 )
+BEARISH_PHRASES = (
+    "rejected", "outflow", "hack", "exploit", "lawsuit", "ban", "network outage", "bankruptcy",
+    "delisting", "liquidation", "stolen", "scam", "fraud", "security breach",
+)
+
 
 
 @dataclass
@@ -107,12 +114,22 @@ class NewsEngine:
     @staticmethod
     def _classify(title: str) -> tuple[str, str, int, list[str]]:
         lowered = title.lower()
-        high_hits = sum(1 for x in HIGH_IMPACT if x in lowered)
-        medium_hits = sum(1 for x in MEDIUM_IMPACT if x in lowered)
-        bullish_hits = sum(1 for x in BULLISH_WORDS if x in lowered)
-        bearish_hits = sum(1 for x in BEARISH_WORDS if x in lowered)
+        coins = [coin for coin, keywords in COIN_KEYWORDS.items() if any(k in lowered for k in keywords)]
+        crypto_relevance = sum(1 for x in CRYPTO_CONTEXT if x in lowered) + (2 if coins else 0)
+        high_hits = sum(1 for x in HIGH_MARKET_PHRASES if x in lowered)
+        medium_hits = sum(1 for x in MEDIUM_MARKET_PHRASES if x in lowered)
+        bullish_hits = sum(1 for x in BULLISH_PHRASES if x in lowered)
+        bearish_hits = sum(1 for x in BEARISH_PHRASES if x in lowered)
 
-        impact = "🔴 HIGH" if high_hits else "🟡 MEDIUM" if medium_hits else "⚪ LOW"
+        # Macro events can be high impact without naming crypto; ordinary AI/banking stories cannot.
+        macro_high = any(x in lowered for x in ("fomc", "interest rate decision", "consumer price index", "nonfarm payroll", "cpi", "ppi"))
+        if high_hits and (crypto_relevance >= 1 or macro_high):
+            impact = "🔴 HIGH"
+        elif medium_hits and crypto_relevance >= 1:
+            impact = "🟡 MEDIUM"
+        else:
+            impact = "⚪ LOW"
+
         if bullish_hits > bearish_hits:
             sentiment = "🟢 Bullish"
         elif bearish_hits > bullish_hits:
@@ -120,10 +137,10 @@ class NewsEngine:
         else:
             sentiment = "⚪ Neutral"
 
-        confidence = 52 + high_hits * 18 + medium_hits * 9 + abs(bullish_hits - bearish_hits) * 8
-        confidence = max(45, min(95, confidence))
-        coins = [coin for coin, keywords in COIN_KEYWORDS.items() if any(k in lowered for k in keywords)]
-        if not coins and any(x in lowered for x in ("crypto", "market", "fed", "cpi", "inflation", "sec")):
+        impact_bonus = 25 if impact == "🔴 HIGH" else 13 if impact == "🟡 MEDIUM" else 0
+        confidence = 45 + impact_bonus + min(12, crypto_relevance * 3) + min(12, abs(bullish_hits - bearish_hits) * 6)
+        confidence = max(45, min(92, confidence))
+        if not coins and (crypto_relevance or macro_high):
             coins = ["MARKET"]
         return impact, sentiment, confidence, coins
 

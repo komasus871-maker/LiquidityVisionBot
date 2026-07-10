@@ -129,6 +129,37 @@ def create_tables():
         )
     """)
 
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_observations(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_telegram_id INTEGER,
+            notification_chat_id INTEGER,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            market_bias TEXT NOT NULL,
+            execution_status TEXT NOT NULL,
+            recommendation TEXT NOT NULL,
+            direction_score REAL NOT NULL,
+            entry_quality REAL NOT NULL,
+            risk_quality REAL NOT NULL,
+            readiness REAL NOT NULL,
+            directional_edge REAL NOT NULL,
+            price REAL NOT NULL,
+            preferred_entry_low REAL,
+            preferred_entry_high REAL,
+            setup_key TEXT,
+            features_json TEXT NOT NULL,
+            promoted_signal_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_observations_owner ON analysis_observations(owner_telegram_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_observations_symbol ON analysis_observations(symbol, timeframe)")
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(setup_key)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_telegram_id)")
