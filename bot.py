@@ -14,6 +14,10 @@ from handlers.analyze import router as analyze_router
 from handlers.profile import router as profile_router
 from handlers.scanner import router as scanner_router
 from handlers.menu import router as menu_router
+from handlers.fear import router as fear_router
+from handlers.market import router as market_router
+from handlers.news import router as news_router
+from handlers.journal import router as journal_router
 
 from database.database import create_tables
 from services.signal_tracker import SignalTracker
@@ -46,6 +50,10 @@ async def main():
     dp.include_router(analyze_router)
     dp.include_router(profile_router)
     dp.include_router(scanner_router)
+    dp.include_router(fear_router)
+    dp.include_router(market_router)
+    dp.include_router(news_router)
+    dp.include_router(journal_router)
     dp.include_router(menu_router)
 
     logging.info("Liquidity Vision started.")

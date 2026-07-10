@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import re
+from typing import Any
 
 from utils.indicators import ema, rsi, macd
 from utils.structure import Structure
@@ -17,18 +20,25 @@ from utils.atr import ATR
 
 class Analyzer:
     MIN_RR = 1.35
+    EDGE_NEUTRAL = 5.0
 
     @staticmethod
     def _volume_ratio(state: str) -> float:
-        m = re.search(r"\(([0-9.]+)x\)", state)
-        return float(m.group(1)) if m else 1.0
+        match = re.search(r"\(([0-9.]+)x\)", state)
+        return float(match.group(1)) if match else 1.0
 
     @staticmethod
     def _quality(score: float) -> str:
-        return "⭐⭐⭐⭐⭐" if score >= 82 else "⭐⭐⭐⭐" if score >= 70 else "⭐⭐⭐" if score >= 58 else "⭐⭐" if score >= 45 else "⭐"
+        if score >= 82: return "⭐⭐⭐⭐⭐"
+        if score >= 70: return "⭐⭐⭐⭐"
+        if score >= 58: return "⭐⭐⭐"
+        if score >= 45: return "⭐⭐"
+        return "⭐"
 
     @staticmethod
-    def _bias(direction: str, score: float) -> str:
+    def _bias(direction: str, score: float, edge: float) -> str:
+        if abs(edge) < Analyzer.EDGE_NEUTRAL:
+            return "⚪ Balanced / Two-Sided"
         if direction == "LONG":
             return "🟢 Strong Bullish" if score >= 72 else "🟢 Bullish" if score >= 54 else "🟡 Slightly Bullish"
         return "🔴 Strong Bearish" if score >= 72 else "🔴 Bearish" if score >= 54 else "🟡 Slightly Bearish"
@@ -36,17 +46,87 @@ class Analyzer:
     @staticmethod
     def _recommendation(direction: str, score: float, rr: float, confirmations: int, blockers: int) -> tuple[str, str]:
         side = "BUY" if direction == "LONG" else "SELL"
-        if score >= 78 and rr >= 2.2 and confirmations >= 6 and blockers == 0:
-            return (f"🔥 STRONG {side}", "🟢 READY")
-        if score >= 66 and rr >= 1.7 and confirmations >= 5 and blockers <= 1:
-            return (f"{'🟢' if direction == 'LONG' else '🔴'} {side}", "🟢 READY")
-        if score >= 55 and rr >= Analyzer.MIN_RR and confirmations >= 4:
-            return (f"🟡 CONDITIONAL {side}", "🟡 WAIT FOR TRIGGER")
-        if score >= 44:
-            return (f"📈 BULLISH BIAS" if direction == "LONG" else "📉 BEARISH BIAS", "🔵 WATCHLIST")
-        return ("⚪ NEUTRAL / NO EDGE", "⚪ OBSERVE")
+        icon = "🟢" if direction == "LONG" else "🔴"
+        if score >= 79 and rr >= 2.2 and confirmations >= 6 and blockers == 0:
+            return f"🔥 STRONG {side}", "🟢 READY"
+        if score >= 66 and rr >= 1.65 and confirmations >= 5 and blockers <= 1:
+            return f"{icon} {side}", "🟢 READY"
+        if score >= 53 and rr >= Analyzer.MIN_RR and confirmations >= 3:
+            return f"🟡 CONDITIONAL {side}", "🟡 WAIT FOR TRIGGER"
+        if score >= 39:
+            return ("📈 BULLISH BIAS" if direction == "LONG" else "📉 BEARISH BIAS"), "🔵 WATCHLIST"
+        return "⚪ NEUTRAL / NO EDGE", "⚪ OBSERVE"
+
+    @staticmethod
+    def _aligned(direction: str, text: str) -> bool:
+        return (direction == "LONG" and "Bullish" in text) or (direction == "SHORT" and "Bearish" in text)
+
+    def _side_score(self, direction: str, raw: dict[str, Any]) -> tuple[float, list[str], list[str], int]:
+        long = direction == "LONG"
+        points = 18.0
+        positives: list[str] = []
+        risks: list[str] = []
+        blockers = 0
+
+        def reward(name: str, condition: bool, weight: float):
+            nonlocal points
+            if condition:
+                points += weight
+                positives.append(f"✅ {name}")
+
+        def penalize(name: str, condition: bool, weight: float, blocker: bool = False):
+            nonlocal points, blockers
+            if condition:
+                points -= weight
+                risks.append(f"{'⛔' if blocker else '⚠️'} {name}")
+                blockers += 1 if blocker else 0
+
+        trend_ok = self._aligned(direction, raw["trend"])
+        structure_ok = self._aligned(direction, raw["structure"])
+        bos_ok = self._aligned(direction, raw["bos"])
+        choch_ok = self._aligned(direction, raw["choch"])
+        sweep_ok = (long and "Sell Side" in raw["sweep"]) or ((not long) and "Buy Side" in raw["sweep"])
+        ob_ok = self._aligned(direction, raw["order_block"])
+        breaker_ok = self._aligned(direction, raw["breaker"])
+        mitigation_ok = self._aligned(direction, raw["mitigation"])
+        fvg_ok = self._aligned(direction, raw["fvg"])
+        location_ok = (long and "Discount" in raw["premium"]["zone"]) or ((not long) and "Premium" in raw["premium"]["zone"])
+        displacement_ok = self._aligned(direction, raw["displacement"]) and "Weak" not in raw["displacement"]
+        macd_ok = (long and raw["macd_bullish"]) or ((not long) and not raw["macd_bullish"])
+
+        reward("Trend aligned", trend_ok, 11)
+        reward("Market structure aligned", structure_ok, 13)
+        reward("BOS confirmation", bos_ok, 11)
+        reward("CHOCH confirmation", choch_ok, 9)
+        reward("Liquidity sweep confirmation", sweep_ok, 10)
+        reward("Order Block confirmation", ob_ok, 9)
+        reward("Breaker Block confirmation", breaker_ok, 6)
+        reward("Mitigation Block confirmation", mitigation_ok, 6)
+        reward("Fair Value Gap confirmation", fvg_ok, 8)
+        reward("Premium/Discount location aligned", location_ok, 7)
+        reward("Displacement confirmation", displacement_ok, 7)
+        reward("Momentum aligned", macd_ok, 5)
+        reward("Healthy relative volume", raw["volume_ratio"] >= 0.85, 4)
+
+        penalize("Counter-trend context", not trend_ok, 5)
+        penalize("Structure conflicts with direction", not structure_ok and "Range" not in raw["structure"], 6, True)
+        penalize("Weak displacement", "Weak" in raw["displacement"], 3)
+        penalize(f"Low relative volume ({raw['volume_ratio']}x)", raw["volume_ratio"] < 0.55, 4, True)
+        penalize(f"Below-average volume ({raw['volume_ratio']}x)", 0.55 <= raw["volume_ratio"] < 0.85, 2)
+        penalize(f"RSI overbought ({raw['rsi']:.1f})", long and raw["rsi"] >= 72, 5, True)
+        penalize(f"RSI oversold ({raw['rsi']:.1f})", (not long) and raw["rsi"] <= 28, 5, True)
+        penalize("LONG entry is in Premium", long and "Premium" in raw["premium"]["zone"], 5, True)
+        penalize("SHORT entry is in Discount", (not long) and "Discount" in raw["premium"]["zone"], 5, True)
+
+        return max(0.0, min(100.0, points)), positives, risks, blockers
 
     def analyze(self, df):
+        # Use confirmed candles when provider exposes confirmation state.
+        if "confirm" in df.columns:
+            confirmed = df[df["confirm"].astype(str) == "1"]
+            if len(confirmed) >= 220:
+                df = confirmed.copy()
+
         structure = Structure(df); choch = CHOCH(df); liquidity = Liquidity(df); sweep = Sweep(df)
         order_blocks = OrderBlocks(df); breaker = BreakerBlock(df); mitigation = MitigationBlock(df)
         fvg = FVG(df); premium = PremiumDiscount(df); volume = VolumeProfile(df)
@@ -57,117 +137,80 @@ class Analyzer:
         rsi_value = float(rsi(df).iloc[-1]); macd_line, signal = macd(df)
         macd_now = float(macd_line.iloc[-1]); signal_now = float(signal.iloc[-1])
 
-        trend = "🟢 Bullish" if ema50 > ema200 else "🔴 Bearish"
-        macd_state = "🟢 Bullish" if macd_now > signal_now else "🔴 Bearish"
-        structure_state = structure.market_structure(); bos = structure.bos(); choch_state = choch.analyze()
-        liquidity_state = liquidity.analyze(); sweep_state = sweep.analyze(); order_block = order_blocks.analyze()
-        breaker_block = breaker.analyze(); mitigation_block = mitigation.analyze(); fvg_state = fvg.analyze()
-        premium_state = premium.analyze(); volume_state = volume.analyze(); displacement_state = displacement.analyze()
-        atr_state = atr.analyze(); volume_ratio = self._volume_ratio(volume_state)
-
-        bull = bear = 0.0
-        def add(text, weight):
-            nonlocal bull, bear
-            if "Bullish" in text: bull += weight
-            elif "Bearish" in text: bear += weight
-
-        add(trend, 14); add(structure_state, 18); add(bos, 13); add(choch_state, 11)
-        if "Sell Side Sweep" in sweep_state: bull += 13
-        elif "Buy Side Sweep" in sweep_state: bear += 13
-        add(order_block, 13); add(breaker_block, 8); add(mitigation_block, 8); add(fvg_state, 10)
-        if "Discount" in premium_state["zone"]: bull += 8
-        elif "Premium" in premium_state["zone"]: bear += 8
-        if "Strong Bullish" in displacement_state: bull += 10
-        elif "Strong Bearish" in displacement_state: bear += 10
-        elif "Moderate Bullish" in displacement_state: bull += 5
-        elif "Moderate Bearish" in displacement_state: bear += 5
-        if macd_now > signal_now: bull += 5
-        else: bear += 5
-        if 45 <= rsi_value <= 68 and macd_now > signal_now: bull += 6
-        elif 32 <= rsi_value <= 55 and macd_now < signal_now: bear += 6
-
-        direction = "LONG" if bull >= bear else "SHORT"
-        long = direction == "LONG"
-        stop = atr_state["long_stop"] if long else atr_state["short_stop"]
-        tp1, tp2, tp3 = atr_state["long_tp"] if long else atr_state["short_tp"]
-        risk = abs(close - stop); rr = round(abs(tp3 - close) / risk, 2) if risk else 0.0
-
-        aligned = {
-            "Trend aligned": (long and "Bullish" in trend) or (not long and "Bearish" in trend),
-            "Market structure aligned": (long and "Bullish" in structure_state) or (not long and "Bearish" in structure_state),
-            "BOS confirmation": (long and "Bullish" in bos) or (not long and "Bearish" in bos),
-            "CHOCH confirmation": (long and "Bullish" in choch_state) or (not long and "Bearish" in choch_state),
-            "Liquidity sweep confirmation": (long and "Sell Side Sweep" in sweep_state) or (not long and "Buy Side Sweep" in sweep_state),
-            "Order Block confirmation": (long and "Bullish" in order_block) or (not long and "Bearish" in order_block),
-            "Breaker Block confirmation": (long and "Bullish" in breaker_block) or (not long and "Bearish" in breaker_block),
-            "Mitigation Block confirmation": (long and "Bullish" in mitigation_block) or (not long and "Bearish" in mitigation_block),
-            "Fair Value Gap confirmation": (long and "Bullish" in fvg_state) or (not long and "Bearish" in fvg_state),
-            "Premium/Discount location aligned": (long and "Discount" in premium_state["zone"]) or (not long and "Premium" in premium_state["zone"]),
-            "Displacement confirmation": (long and ("Strong Bullish" in displacement_state or "Moderate Bullish" in displacement_state)) or (not long and ("Strong Bearish" in displacement_state or "Moderate Bearish" in displacement_state)),
-            "Momentum aligned": (long and macd_now > signal_now and rsi_value < 72) or (not long and macd_now < signal_now and rsi_value > 28),
+        raw = {
+            "price": close,
+            "trend": "🟢 Bullish" if ema50 > ema200 else "🔴 Bearish",
+            "structure": structure.market_structure(), "bos": structure.bos(), "choch": choch.analyze(),
+            "liquidity": liquidity.analyze(), "sweep": sweep.analyze(), "order_block": order_blocks.analyze(),
+            "breaker": breaker.analyze(), "mitigation": mitigation.analyze(), "fvg": fvg.analyze(),
+            "premium": premium.analyze(), "volume": volume.analyze(), "displacement": displacement.analyze(),
+            "atr": atr.analyze(), "ema50": ema50, "ema200": ema200, "rsi": rsi_value,
+            "macd": "🟢 Bullish" if macd_now > signal_now else "🔴 Bearish", "macd_bullish": macd_now > signal_now,
         }
-        reasons = [f"✅ {k}" for k, v in aligned.items() if v]
-        confirmations = len(reasons)
+        raw["volume_ratio"] = self._volume_ratio(raw["volume"])
 
-        directional_strength = abs(bull - bear)
-        total_evidence = max(bull + bear, 1)
-        dominance = abs(bull - bear) / total_evidence * 100
-        score = 35 + directional_strength * 0.55 + dominance * 0.25
-        conflicts = []; blockers = 0
+        long_base, long_pos, long_risks, long_blockers = self._side_score("LONG", raw)
+        short_base, short_pos, short_risks, short_blockers = self._side_score("SHORT", raw)
+        edge = round(long_base - short_base, 1)
+        direction = "LONG" if edge > 0 else "SHORT" if edge < 0 else ("LONG" if raw["macd_bullish"] else "SHORT")
 
-        if not aligned["Trend aligned"]:
-            score -= 7; conflicts.append("⚠️ Counter-trend context")
-        if not aligned["Market structure aligned"]:
-            score -= 7; blockers += 1; conflicts.append("⚠️ Structure conflicts with direction")
-        if "Weak" in displacement_state:
-            score -= 3; conflicts.append("⚠️ Weak displacement")
-        if volume_ratio < 0.65:
-            score -= 5; blockers += 1; conflicts.append(f"⚠️ Low relative volume ({volume_ratio}x)")
-        elif volume_ratio < 0.85:
-            score -= 2; conflicts.append(f"⚠️ Below-average volume ({volume_ratio}x)")
-        if long and rsi_value >= 72:
-            score -= 6; blockers += 1; conflicts.append(f"⚠️ RSI overbought ({rsi_value:.1f})")
-        elif not long and rsi_value <= 28:
-            score -= 6; blockers += 1; conflicts.append(f"⚠️ RSI oversold ({rsi_value:.1f})")
-        if long and "Premium" in premium_state["zone"]:
-            score -= 7; blockers += 1; conflicts.append("⚠️ LONG entry is in Premium")
-        elif not long and "Discount" in premium_state["zone"]:
-            score -= 7; blockers += 1; conflicts.append("⚠️ SHORT entry is in Discount")
+        long = direction == "LONG"
+        stop = raw["atr"]["long_stop"] if long else raw["atr"]["short_stop"]
+        tp1, tp2, tp3 = raw["atr"]["long_tp"] if long else raw["atr"]["short_tp"]
+        risk = abs(close - stop)
+        rr = round(abs(tp3 - close) / risk, 2) if risk > 0 else 0.0
+        rr = min(rr, 12.0)  # cap display/ranking outliers; geometry remains in levels
+
+        score = long_base if long else short_base
+        positives = long_pos if long else short_pos
+        risks = long_risks if long else short_risks
+        blockers = long_blockers if long else short_blockers
+        confirmations = len(positives)
         if rr < self.MIN_RR:
-            score -= 10; blockers += 1; conflicts.append(f"⛔ RR below 1:{self.MIN_RR}")
-
+            score -= 10; blockers += 1; risks.append(f"⛔ RR below 1:{self.MIN_RR}")
         score = round(max(0.0, min(100.0, score)), 1)
-        recommendation, execution_status = self._recommendation(direction, score, rr, confirmations, blockers)
 
-        trigger = []
+        recommendation, execution_status = self._recommendation(direction, score, rr, confirmations, blockers)
+        if abs(edge) < self.EDGE_NEUTRAL and score < 58:
+            recommendation, execution_status = "⚖️ TWO-SIDED / NO CLEAR EDGE", "🔵 WATCHLIST"
+
+        alternative_direction = "SHORT" if direction == "LONG" else "LONG"
+        alternative_score = round(short_base if direction == "LONG" else long_base, 1)
+        alternative_conditions = []
+        if alternative_direction == "SHORT":
+            alternative_conditions = ["Bearish BOS/CHOCH", "Rejection from premium or bearish imbalance", "Bearish displacement with volume"]
+        else:
+            alternative_conditions = ["Bullish BOS/CHOCH", "Reaction from discount or bullish imbalance", "Bullish displacement with volume"]
+
+        triggers = []
         if execution_status != "🟢 READY":
-            if not aligned["BOS confirmation"] and not aligned["CHOCH confirmation"]:
-                trigger.append("Wait for BOS or CHOCH in the setup direction")
-            if "Weak" in displacement_state:
-                trigger.append("Require a moderate/strong displacement candle")
-            if volume_ratio < 0.85:
-                trigger.append("Prefer volume recovery above 0.85x")
-            if long and "Premium" in premium_state["zone"]:
-                trigger.append("Prefer a pullback toward equilibrium/discount")
-            if not long and "Discount" in premium_state["zone"]:
-                trigger.append("Prefer a retracement toward equilibrium/premium")
-            if not trigger:
-                trigger.append("Wait for one additional independent confirmation")
+            if not any("BOS confirmation" in x or "CHOCH confirmation" in x for x in positives):
+                triggers.append("Wait for BOS or CHOCH in the setup direction")
+            if "Weak" in raw["displacement"]:
+                triggers.append("Require a moderate/strong displacement candle")
+            if raw["volume_ratio"] < 0.85:
+                triggers.append("Prefer confirmed volume above 0.85x")
+            if long and "Premium" in raw["premium"]["zone"]:
+                triggers.append("Prefer a pullback toward equilibrium/discount")
+            if (not long) and "Discount" in raw["premium"]["zone"]:
+                triggers.append("Prefer a retracement toward equilibrium/premium")
+            if not triggers:
+                triggers.append("Wait for one additional independent confirmation")
 
         rr_component = min(rr / 4.0, 1.0) * 100
-        ranking_score = round(score * 0.55 + rr_component * 0.20 + min(confirmations / 8, 1) * 100 * 0.20 + (5 if execution_status == "🟢 READY" else 0), 2)
+        edge_component = min(abs(edge) / 30.0, 1.0) * 100
+        ranking_score = round(score * 0.50 + rr_component * 0.18 + min(confirmations / 8, 1) * 100 * 0.18 + edge_component * 0.09 + (5 if execution_status == "🟢 READY" else 0), 2)
 
         return {
-            "price": close, "trend": trend, "structure": structure_state, "bos": bos, "choch": choch_state,
-            "liquidity": liquidity_state, "sweep": sweep_state, "order_block": order_block,
-            "breaker": breaker_block, "mitigation": mitigation_block, "fvg": fvg_state,
-            "premium": premium_state, "volume": volume_state, "volume_ratio": volume_ratio,
-            "displacement": displacement_state, "atr": atr_state, "ema50": ema50, "ema200": ema200,
-            "rsi": rsi_value, "macd": macd_state, "entry": close, "stop": stop,
-            "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr": rr, "direction": direction,
-            "bull_score": round(bull, 2), "bear_score": round(bear, 2), "score": score,
-            "probability": score, "confidence": score, "confirmations": confirmations,
-            "ranking_score": ranking_score, "quality": self._quality(score), "market_bias": self._bias(direction, score),
-            "recommendation": recommendation, "execution_status": execution_status,
-            "reasons": reasons + conflicts, "triggers": trigger, "blockers": blockers,
+            **raw,
+            "entry": close, "stop": stop, "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr": rr,
+            "direction": direction, "primary_scenario": direction, "alternative_scenario": alternative_direction,
+            "alternative_score": alternative_score, "alternative_conditions": alternative_conditions,
+            "long_score": round(long_base, 1), "short_score": round(short_base, 1), "directional_edge": edge,
+            "bull_score": round(long_base, 2), "bear_score": round(short_base, 2),
+            "score": score, "probability": score, "confidence": score, "confirmations": confirmations,
+            "ranking_score": ranking_score, "quality": self._quality(score),
+            "market_bias": self._bias(direction, score, edge), "recommendation": recommendation,
+            "execution_status": execution_status, "reasons": positives + risks, "triggers": triggers,
+            "blockers": blockers,
         }

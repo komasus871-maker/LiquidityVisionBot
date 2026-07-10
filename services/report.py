@@ -1,32 +1,31 @@
+from utils.price import fmt_price, fmt_number
+
+
 class Report:
     def ai_summary(self, data):
-        summary = []
         direction = data["direction"]
-        long = direction == "LONG"
-        summary.append(f"• Market bias: {data['market_bias']}.")
-        summary.append(f"• Execution status: {data['execution_status']}.")
+        summary = [
+            f"• Market bias: {data['market_bias']}.",
+            f"• Primary scenario: {direction} ({data['score']}/100).",
+            f"• Alternative scenario: {data['alternative_scenario']} ({data['alternative_score']}/100).",
+            f"• Directional edge: {data['directional_edge']:+.1f} points.",
+            f"• Execution status: {data['execution_status']}.",
+        ]
         if "Counter-trend" in " ".join(data["reasons"]):
-            summary.append(f"• The {direction} idea is counter-trend and requires stronger confirmation.")
+            summary.append(f"• The {direction} idea is counter-trend and needs stronger confirmation.")
         else:
             summary.append(f"• Trend context supports the {direction} scenario.")
-        if "Bullish" in data["structure"] and long or "Bearish" in data["structure"] and not long:
-            summary.append("• Market structure agrees with the directional bias.")
-        if "Sell Side Sweep" in data["sweep"]:
-            summary.append("• Sell-side liquidity has been swept.")
-        elif "Buy Side Sweep" in data["sweep"]:
-            summary.append("• Buy-side liquidity has been swept.")
-        if "Bullish" in data["fvg"]:
-            summary.append("• A bullish Fair Value Gap is active.")
-        elif "Bearish" in data["fvg"]:
-            summary.append("• A bearish Fair Value Gap is active.")
-        summary.append(f"• Price location: {data['premium']['zone'].replace('🔴 ', '').replace('🟢 ', '').replace('🟡 ', '')} ({data['premium']['premium']}% of range).")
+        summary.append(f"• Price location: {data['premium']['zone'].split(' ', 1)[-1]} ({data['premium']['premium']}% of range).")
         if data["triggers"]:
             summary.append(f"• Best next confirmation: {data['triggers'][0]}.")
         return "\n".join(summary)
 
     def build(self, data):
         triggers = "\n".join(f"• {item}" for item in data.get("triggers", [])) or "• Setup is ready under current conditions"
+        alt = "\n".join(f"• {item}" for item in data.get("alternative_conditions", []))
         signal_text = data.get("signal_id") or "not recorded as executable trade"
+        reasons = "\n".join(data["reasons"]) or "⚪ No decisive confluence"
+        p = fmt_price
         return f"""
 📊 <b>Liquidity Vision</b>
 
@@ -35,16 +34,23 @@ class Report:
 🧭 <b>Market Bias</b>
 {data['market_bias']}
 
+🎯 <b>Primary Scenario</b>
+{data['direction']} — {data['recommendation']}
+
+🔁 <b>Alternative Scenario</b>
+{data['alternative_scenario']} — {data['alternative_score']}/100
+
+⚖️ <b>Directional Balance</b>
+LONG {data['long_score']} / SHORT {data['short_score']}
+Edge: {data['directional_edge']:+.1f}
+
 🎬 <b>Execution Status</b>
 {data['execution_status']}
-
-💡 <b>Recommendation</b>
-{data['recommendation']}
 
 ━━━━━━━━━━━━━━━━━━
 
 💰 Price
-{data['price']:.2f}
+{p(data['price'])}
 
 📈 Trend
 {data['trend']}
@@ -87,12 +93,12 @@ Range Position
 {data['premium']['premium']}%
 
 Range Low / EQ / High
-{data['premium']['low']} / {data['premium']['equilibrium']} / {data['premium']['high']}
+{p(data['premium']['low'])} / {p(data['premium']['equilibrium'])} / {p(data['premium']['high'])}
 
 ━━━━━━━━━━━━━━━━━━
 
 📉 EMA50 / EMA200
-{data['ema50']:.2f} / {data['ema200']:.2f}
+{p(data['ema50'])} / {p(data['ema200'])}
 
 ⚡ RSI
 {data['rsi']:.2f}
@@ -107,17 +113,17 @@ Range Low / EQ / High
 {data['displacement']}
 
 ATR
-{data['atr']['atr']}
+{p(data['atr']['atr'])}
 
 ━━━━━━━━━━━━━━━━━━
 
 🎯 Trade Plan
-Entry: {data['entry']:.2f}
-Stop: {data['stop']:.2f}
-TP1: {data['tp1']:.2f}
-TP2: {data['tp2']:.2f}
-TP3: {data['tp3']:.2f}
-RR: 1:{data['rr']}
+Entry: {p(data['entry'])}
+Stop: {p(data['stop'])}
+TP1: {p(data['tp1'])}
+TP2: {p(data['tp2'])}
+TP3: {p(data['tp3'])}
+RR: 1:{fmt_number(data['rr'])}
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -136,12 +142,17 @@ RR: 1:{data['rr']}
 ━━━━━━━━━━━━━━━━━━
 
 🧠 Confluence & Risks
-{"\n".join(data['reasons'])}
+{reasons}
 
 ━━━━━━━━━━━━━━━━━━
 
 🔔 Activation Conditions
 {triggers}
+
+━━━━━━━━━━━━━━━━━━
+
+🔄 Alternative Activation
+{alt}
 
 ━━━━━━━━━━━━━━━━━━
 
