@@ -10,6 +10,7 @@ class Report:
             f"• Alternative scenario: {data['alternative_scenario']} ({data['alternative_score']}/100).",
             f"• Directional edge: {data['directional_edge']:+.1f} points.",
             f"• Execution status: {data['execution_status']}.",
+            f"• Direction / Entry / Risk / Readiness: {data['direction_score']}/{data['entry_quality']}/{data['risk_quality']}/{data['execution_readiness']}.",
         ]
         if "Counter-trend" in " ".join(data["reasons"]):
             summary.append(f"• The {direction} idea is counter-trend and needs stronger confirmation.")
@@ -46,6 +47,12 @@ Edge: {data['directional_edge']:+.1f}
 
 🎬 <b>Execution Status</b>
 {data['execution_status']}
+
+📊 <b>Execution Intelligence</b>
+Direction: {data['direction_score']}/100
+Entry Quality: {data['entry_quality']}/100
+Risk Quality: {data['risk_quality']}/100
+Readiness: {data['execution_readiness']}/100
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -118,7 +125,8 @@ ATR
 ━━━━━━━━━━━━━━━━━━
 
 🎯 Trade Plan
-Entry: {p(data['entry'])}
+Current Entry: {p(data['entry'])}
+Preferred Zone: {p(data['preferred_entry_low'])} - {p(data['preferred_entry_high'])}
 Stop: {p(data['stop'])}
 TP1: {p(data['tp1'])}
 TP2: {p(data['tp2'])}

@@ -2,28 +2,30 @@ from aiogram import Router, F
 from aiogram.types import Message
 from database.signal_history import SignalHistory
 
-router = Router()
-history = SignalHistory()
+router = Router(); history = SignalHistory()
 
 
 @router.message(F.text == "📒 Journal")
 async def journal_handler(message: Message):
     stats = history.get_stats()
-    await message.answer(
-        f"""
-📒 <b>Signal Journal</b>
+    total = stats.get('total') or 0
+    tp2_rate = round((stats.get('tp2_hits') or 0) / total * 100, 2) if total else 0
+    tp3_rate = round((stats.get('tp3_hits') or 0) / total * 100, 2) if total else 0
+    await message.answer(f"""
+📒 <b>Trade Journal PRO</b>
 
-All signals: {stats.get('total') or 0}
-Open: {stats.get('open_count') or 0}
-TP1 hits: {stats.get('tp1_hits') or 0}
-TP2 hits: {stats.get('tp2_hits') or 0}
-TP3 hits: {stats.get('tp3_hits') or 0}
-Stops: {stats.get('stop_hits') or 0}
-TP1 hit rate: {stats.get('tp1_rate') or 0}%
-Average MFE: {round(stats.get('avg_mfe') or 0, 2)}%
-Average MAE: {round(stats.get('avg_mae') or 0, 2)}%
+👀 Watching: {stats.get('watching_count') or 0}
+⚡ Active: {stats.get('active_count') or 0}
+✅ Closed: {stats.get('closed_count') or 0}
+📚 Total tracked: {total}
 
-Статистика будет становиться точнее по мере накопления завершённых сигналов.
-""",
-        parse_mode="HTML",
-    )
+🎯 TP1 rate: {stats.get('tp1_rate') or 0}%
+🎯 TP2 rate: {tp2_rate}%
+🎯 TP3 rate: {tp3_rate}%
+🛑 Stops: {stats.get('stop_hits') or 0}
+
+📈 Average MFE: {round(stats.get('avg_mfe') or 0, 2)}%
+📉 Average MAE: {round(stats.get('avg_mae') or 0, 2)}%
+
+Статистика разделяет наблюдаемые сетапы и реально активированные сделки.
+""", parse_mode="HTML")

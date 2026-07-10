@@ -25,10 +25,10 @@ class SignalHistory:
                     bull_score, bear_score, recommendation, setup_key,
                     features_json, reasons_json, max_profit_pct,
                     max_drawdown_pct
-                ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                 """,
                 (
-                    signal["symbol"], signal["timeframe"], signal["side"],
+                    signal["symbol"], signal["timeframe"], signal["side"], signal.get("status", "WATCHING"),
                     now, now, signal["entry"], signal["stop"],
                     signal["tp1"], signal["tp2"], signal["tp3"],
                     signal["rr"], signal["confidence"], signal["bull_score"],
@@ -42,7 +42,7 @@ class SignalHistory:
     def get_open(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM signals WHERE status = 'OPEN' ORDER BY created_at ASC"
+                "SELECT * FROM signals WHERE status IN ('OPEN','WATCHING','ACTIVE','TP1','TP2') ORDER BY created_at ASC"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -87,7 +87,9 @@ class SignalHistory:
                 """
                 SELECT
                     COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) AS open_count,
+                    SUM(CASE WHEN status = 'WATCHING' THEN 1 ELSE 0 END) AS watching_count,
+                    SUM(CASE WHEN status IN ('OPEN','ACTIVE','TP1','TP2') THEN 1 ELSE 0 END) AS active_count,
+                    SUM(CASE WHEN status IN ('TP3','STOP','INVALIDATED','EXPIRED') THEN 1 ELSE 0 END) AS closed_count,
                     SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS tp1_hits,
                     SUM(CASE WHEN tp2_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS tp2_hits,
                     SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS tp3_hits,
@@ -98,6 +100,7 @@ class SignalHistory:
                 """
             ).fetchone()
         data = dict(row)
+        data['open_count'] = (data.get('watching_count') or 0) + (data.get('active_count') or 0)
         total = data["total"] or 0
         data["tp1_rate"] = round((data["tp1_hits"] or 0) / total * 100, 2) if total else 0
         return data

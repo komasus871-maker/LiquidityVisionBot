@@ -34,4 +34,5 @@ class SignalRecorder:
             "confidence": analysis["confidence"], "bull_score": analysis["bull_score"],
             "bear_score": analysis["bear_score"], "recommendation": analysis["recommendation"],
             "setup_key": self._setup_key(analysis), "features": features, "reasons": analysis["reasons"],
+            "status": "ACTIVE" if analysis.get("execution_status") == "🟢 READY" else "WATCHING",
         })

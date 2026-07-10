@@ -34,7 +34,7 @@ def create_tables():
             symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
             side TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'OPEN',
+            status TEXT NOT NULL DEFAULT 'WATCHING',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             closed_at TEXT,
