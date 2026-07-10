@@ -3,13 +3,11 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 
 from keyboards.analyze import analyze_keyboard
-from keyboards.analysis_actions import analysis_actions
 
 from services.market import Market
 from services.analyzer import Analyzer
 from services.report import Report
 from services.signal_recorder import SignalRecorder
-from services.probability_foundation import ProbabilityFoundation
 
 router = Router()
 
@@ -17,7 +15,6 @@ market = Market()
 analyzer = Analyzer()
 report = Report()
 recorder = SignalRecorder()
-probability = ProbabilityFoundation(recorder.history)
 
 
 @router.message(F.text == "📊 Analyze")
@@ -48,9 +45,6 @@ async def analyze_callback(callback: CallbackQuery):
         df = await market.get_klines(symbol)
 
         analysis = analyzer.analyze(df)
-        setup_key = recorder._setup_key(analysis)
-        stats = probability.for_setup(setup_key, "1h", analysis["direction"])
-        analysis["historical_probability"] = probability.as_dict(stats)
         signal_id = recorder.record(symbol=symbol, timeframe="1h", analysis=analysis, owner_telegram_id=callback.from_user.id, notification_chat_id=callback.message.chat.id)
         analysis["signal_id"] = signal_id
 
@@ -60,8 +54,7 @@ async def analyze_callback(callback: CallbackQuery):
 
             text,
 
-            parse_mode="HTML",
-            reply_markup=analysis_actions(symbol, signal_id)
+            parse_mode="HTML"
 
         )
 
@@ -104,9 +97,6 @@ async def analyze(message: Message):
         df = await market.get_klines(symbol)
 
         analysis = analyzer.analyze(df)
-        setup_key = recorder._setup_key(analysis)
-        stats = probability.for_setup(setup_key, "1h", analysis["direction"])
-        analysis["historical_probability"] = probability.as_dict(stats)
         signal_id = recorder.record(symbol=symbol, timeframe="1h", analysis=analysis, owner_telegram_id=message.from_user.id, notification_chat_id=message.chat.id)
         analysis["signal_id"] = signal_id
 
@@ -116,8 +106,7 @@ async def analyze(message: Message):
 
             text,
 
-            parse_mode="HTML",
-            reply_markup=analysis_actions(symbol, signal_id)
+            parse_mode="HTML"
 
         )
 

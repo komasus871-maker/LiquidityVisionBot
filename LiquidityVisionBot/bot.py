@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
@@ -19,8 +20,6 @@ from handlers.market import router as market_router
 from handlers.news import router as news_router
 from handlers.journal import router as journal_router
 from handlers.premium import router as premium_router
-from handlers.explain import router as explain_router
-from handlers.dashboard import router as dashboard_router
 
 from database.database import create_tables
 from services.signal_tracker import SignalTracker
@@ -51,8 +50,6 @@ async def main():
     dp.include_router(help_router)
     dp.include_router(price_router)
     dp.include_router(analyze_router)
-    dp.include_router(explain_router)
-    dp.include_router(dashboard_router)
     dp.include_router(profile_router)
     dp.include_router(scanner_router)
     dp.include_router(fear_router)
@@ -64,7 +61,12 @@ async def main():
 
     logging.info("Liquidity Vision started.")
 
-    tracker = SignalTracker(interval_seconds=60, bot=bot)
+    tracker = SignalTracker(
+        interval_seconds=int(os.getenv("SIGNAL_CHECK_INTERVAL", "60")),
+        batch_size=int(os.getenv("SIGNAL_MONITOR_BATCH", "25")),
+        concurrency=int(os.getenv("SIGNAL_MONITOR_CONCURRENCY", "5")),
+        bot=bot,
+    )
     tracker_task = asyncio.create_task(tracker.run_forever())
 
     await bot.delete_webhook(
@@ -74,7 +76,12 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        tracker.stop()
         tracker_task.cancel()
+        try:
+            await tracker_task
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()
 
 

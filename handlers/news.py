@@ -1,19 +1,76 @@
-from aiogram import Router, F
+from __future__ import annotations
+
+from html import escape
+
+from aiogram import F, Router
 from aiogram.types import Message
+
 from services.news import NewsEngine
 
 router = Router()
 engine = NewsEngine()
 
 
+def _format_news(items: list[dict]) -> str:
+    if not items:
+        return (
+            "📰 <b>News Intelligence</b>\n\n"
+            "Не удалось получить новости прямо сейчас. Источники могут временно быть недоступны. "
+            "Попробуй ещё раз через несколько минут."
+        )
+
+    high = sum(1 for x in items if x.get("impact") == "🔴 HIGH")
+    bullish = sum(1 for x in items if "Bullish" in x.get("sentiment", ""))
+    bearish = sum(1 for x in items if "Bearish" in x.get("sentiment", ""))
+    if bullish > bearish:
+        overall = "🟢 Bullish tilt"
+    elif bearish > bullish:
+        overall = "🔴 Bearish tilt"
+    else:
+        overall = "⚪ Mixed / Neutral"
+
+    chunks = [
+        "📰 <b>News Intelligence</b>",
+        "",
+        f"High impact: <b>{high}</b>",
+        f"Headline sentiment: <b>{overall}</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for index, item in enumerate(items[:8], start=1):
+        coins = ", ".join(item.get("coins") or ["General market"])
+        title = escape(item.get("title", "Untitled"))
+        source = escape(item.get("source", "Unknown"))
+        url = item.get("url", "")
+        linked_title = f'<a href="{escape(url, quote=True)}">{title}</a>' if url else title
+        chunks.extend([
+            "",
+            f"{index}. {item.get('impact', '⚪ LOW')} · {item.get('sentiment', '⚪ Neutral')}",
+            f"<b>{linked_title}</b>",
+            f"Coins: {escape(coins)}",
+            f"Impact confidence: {int(item.get('confidence', 50))}%",
+            f"Source: {source}",
+        ])
+
+    chunks.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "<i>News classification is heuristic and is not financial advice.</i>",
+    ])
+    return "\n".join(chunks)
+
+
 @router.message(F.text == "📰 News")
 async def news_handler(message: Message):
-    items = await engine.latest()
-    if not items or items[0].get("title") == "Coming Soon":
-        await message.answer(
-            "📰 <b>News Intelligence</b>\n\nМодуль источников пока не подключён. Архитектура готова: далее добавим RSS/API, оценку bullish/bearish impact, важность и привязку к монетам.",
+    waiting = await message.answer("📰 Загружаю и оцениваю последние новости…")
+    try:
+        items = await engine.latest(limit=10)
+        await waiting.edit_text(_format_news(items), parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as exc:
+        await waiting.edit_text(
+            "📰 <b>News Intelligence</b>\n\n"
+            "Источники сейчас недоступны или вернули некорректный ответ. "
+            f"Ошибка: <code>{escape(type(exc).__name__)}</code>",
             parse_mode="HTML",
         )
-        return
-    text = "📰 <b>Latest Market News</b>\n\n" + "\n\n".join(f"• {x['title']}" for x in items[:10])
-    await message.answer(text, parse_mode="HTML")

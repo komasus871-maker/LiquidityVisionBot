@@ -18,16 +18,7 @@ class SignalRecorder:
         executable = {"🟢 READY", "🟡 WAIT FOR TRIGGER", "🎯 WAIT FOR PULLBACK", "🔄 REVERSAL WATCH"}
         if analysis.get("execution_status") not in executable:
             return None
-        status_text = analysis.get("execution_status")
-        thresholds = {
-            "🟢 READY": 58.0,
-            "🟡 WAIT FOR TRIGGER": 54.0,
-            "🎯 WAIT FOR PULLBACK": 48.0,
-            "🔄 REVERSAL WATCH": 50.0,
-        }
-        required_score = max(float(min_confidence) if status_text in {"🟢 READY", "🟡 WAIT FOR TRIGGER"} else 0.0,
-                             thresholds.get(status_text, 101.0))
-        if analysis.get("confidence", 0) < required_score or analysis.get("rr", 0) < 1.35:
+        if analysis.get("confidence", 0) < min_confidence or analysis.get("rr", 0) < 1.35:
             return None
 
         if owner_telegram_id is not None:

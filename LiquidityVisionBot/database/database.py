@@ -78,7 +78,13 @@ def create_tables():
             tp3_hit_at TEXT,
             stop_hit_at TEXT,
             last_notified_status TEXT,
-            notification_chat_id INTEGER
+            notification_chat_id INTEGER,
+            monitoring_worker_id TEXT,
+            monitoring_lock_until TEXT,
+            last_checked_at TEXT,
+            next_check_at TEXT,
+            consecutive_errors INTEGER DEFAULT 0,
+            last_monitor_error TEXT
         )
     """)
 
@@ -100,6 +106,12 @@ def create_tables():
         "preferred_entry_high": "REAL",
         "last_notified_status": "TEXT",
         "notification_chat_id": "INTEGER",
+        "monitoring_worker_id": "TEXT",
+        "monitoring_lock_until": "TEXT",
+        "last_checked_at": "TEXT",
+        "next_check_at": "TEXT",
+        "consecutive_errors": "INTEGER DEFAULT 0",
+        "last_monitor_error": "TEXT",
     }.items():
         _add_column(conn, "signals", name, definition)
 
@@ -129,10 +141,24 @@ def create_tables():
         )
     """)
 
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS monitor_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worker_id TEXT NOT NULL,
+            checked_count INTEGER NOT NULL DEFAULT 0,
+            succeeded_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(setup_key)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_telegram_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_events_signal ON signal_events(signal_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_monitor_due ON signals(status,next_check_at,monitoring_lock_until)")
     conn.commit()
     conn.close()
 

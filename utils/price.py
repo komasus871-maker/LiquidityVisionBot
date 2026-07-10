@@ -15,7 +15,11 @@ def decimals_for_price(value: float) -> int:
         return 6
     if value >= 0.001:
         return 7
-    return 8
+    if value >= 0.0001:
+        return 9
+    if value >= 0.00001:
+        return 10
+    return 12
 
 
 def fmt_price(value: float) -> str:

@@ -4,44 +4,28 @@ from utils.price import fmt_price, fmt_number
 class Report:
     def ai_summary(self, data):
         direction = data["direction"]
-        reasons = data.get("reasons", [])
-        positives = [r.replace("✅", "", 1).strip() for r in reasons if r.startswith("✅")]
-        warnings = [r.replace("⚠️", "", 1).strip() for r in reasons if r.startswith("⚠️")]
-        blockers = [r.replace("⛔", "", 1).strip() for r in reasons if r.startswith("⛔")]
-        location = data["premium"]["zone"].split(" ", 1)[-1]
-        preferred = f"{fmt_price(data['preferred_entry_low'])}–{fmt_price(data['preferred_entry_high'])}"
-
-        lines = [
-            f"• <b>{direction}</b> is primary because {', '.join(positives[:3]).lower() if positives else 'the directional score has a measurable edge'}.",
-            f"• Current execution status is <b>{data['execution_status']}</b>; direction is {data['direction_score']}/100 while entry quality is {data['entry_quality']}/100.",
-            f"• Price is in <b>{location}</b>; preferred execution zone is <b>{preferred}</b>.",
+        summary = [
+            f"• Market bias: {data['market_bias']}.",
+            f"• Primary scenario: {direction} ({data['score']}/100).",
+            f"• Alternative scenario: {data['alternative_scenario']} ({data['alternative_score']}/100).",
+            f"• Directional edge: {data['directional_edge']:+.1f} points.",
+            f"• Execution status: {data['execution_status']}.",
+            f"• Direction / Entry / Risk / Readiness: {data['direction_score']}/{data['entry_quality']}/{data['risk_quality']}/{data['execution_readiness']}.",
         ]
-        if blockers:
-            lines.append(f"• Main blocker: <b>{blockers[0]}</b>.")
-        elif warnings:
-            lines.append(f"• Main risk: <b>{warnings[0]}</b>.")
-        if data.get("triggers"):
-            lines.append(f"• Best next confirmation: <b>{data['triggers'][0]}</b>.")
-        lines.append(f"• Scenario invalidation is defined by Stop at <b>{fmt_price(data['stop'])}</b> or opposite structural confirmation.")
-        return "\n".join(lines)
+        if "Counter-trend" in " ".join(data["reasons"]):
+            summary.append(f"• The {direction} idea is counter-trend and needs stronger confirmation.")
+        else:
+            summary.append(f"• Trend context supports the {direction} scenario.")
+        summary.append(f"• Price location: {data['premium']['zone'].split(' ', 1)[-1]} ({data['premium']['premium']}% of range).")
+        if data["triggers"]:
+            summary.append(f"• Best next confirmation: {data['triggers'][0]}.")
+        return "\n".join(summary)
 
     def build(self, data):
         triggers = "\n".join(f"• {item}" for item in data.get("triggers", [])) or "• Setup is ready under current conditions"
         alt = "\n".join(f"• {item}" for item in data.get("alternative_conditions", []))
         signal_text = data.get("signal_id") or "not recorded as executable trade"
         reasons = "\n".join(data["reasons"]) or "⚪ No decisive confluence"
-        probability = data.get("historical_probability") or {}
-        if probability.get("sample_size", 0) >= 30:
-            probability_text = (
-                f"Samples: {probability['sample_size']}\n"
-                f"TP1 {probability['tp1_rate']}% | TP2 {probability['tp2_rate']}% | "
-                f"TP3 {probability['tp3_rate']}% | Stop {probability['stop_rate']}%"
-            )
-        else:
-            probability_text = (
-                f"Samples: {probability.get('sample_size', 0)}\n"
-                "Collecting data — minimum 30 completed similar setups required."
-            )
         p = fmt_price
         return f"""
 📊 <b>Liquidity Vision</b>
@@ -180,12 +164,7 @@ RR: 1:{fmt_number(data['rr'])}
 
 ━━━━━━━━━━━━━━━━━━
 
-📊 <b>Historical Probability</b>
-{probability_text}
-
-━━━━━━━━━━━━━━━━━━
-
-🤖 <b>AI Analyst Summary</b>
+🤖 AI Summary
 {self.ai_summary(data)}
 
 ━━━━━━━━━━━━━━━━━━
