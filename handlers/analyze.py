@@ -1,3 +1,4 @@
+import json
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -198,9 +199,18 @@ async def watch_callback(callback: CallbackQuery):
     _, symbol, timeframe = callback.data.split(":", 2)
     added = user_watchlist.add(callback.from_user.id, symbol, timeframe)
     if added:
-        await callback.answer("Добавлено в Watchlist ⭐", show_alert=True)
+        await callback.answer("Добавлено. Автомониторинг запущен ⭐", show_alert=True)
     else:
-        await callback.answer("Уже находится в Watchlist", show_alert=True)
+        await callback.answer("Уже отслеживается", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("unwatch:"))
+async def unwatch_callback(callback: CallbackQuery):
+    _, symbol, timeframe = callback.data.split(":", 2)
+    removed = user_watchlist.remove(callback.from_user.id, symbol, timeframe)
+    user_watchlist.clear_state(callback.from_user.id, symbol, timeframe)
+    await callback.answer("Удалено из Watchlist" if removed else "Уже удалено", show_alert=True)
+    await callback.message.answer("⭐ Watchlist обновлён. Нажмите кнопку Watchlist, чтобы открыть актуальный список.")
 
 
 @router.message(F.text == "⭐ Watchlist")
@@ -214,11 +224,29 @@ async def watchlist_view(message: Message):
         )
         return
 
-    lines = ["⭐ <b>Your Watchlist</b>", ""]
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    lines = ["⭐ <b>Your Watchlist · Auto Monitor</b>", ""]
+    kb = InlineKeyboardBuilder()
     for index, row in enumerate(rows, 1):
-        lines.append(f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}")
-    lines.append("\nИспользуйте /analyze ТИКЕР ТФ для быстрого обновления.")
-    await message.answer("\n".join(lines), parse_mode="HTML")
+        status = "Initializing"
+        score = "—"
+        ready = "—"
+        if row["snapshot_json"]:
+            try:
+                snap = json.loads(row["snapshot_json"])
+                status = snap.get("execution_status") or "WATCHLIST"
+                score = f"{float(snap.get('direction_score') or 0):.1f}"
+                ready = f"{float(snap.get('readiness') or 0):.1f}"
+            except Exception:
+                pass
+        lines.append(
+            f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}\n"
+            f"   {status} · Direction {score} · Ready {ready}"
+        )
+        kb.button(text=f"🗑 {row['symbol']} {row['timeframe'].upper()}", callback_data=f"unwatch:{row['symbol']}:{row['timeframe']}")
+    kb.adjust(2)
+    lines.append("\nБот проверяет список автоматически и пишет только при существенных изменениях.")
+    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb.as_markup())
 
 
 @router.message(Command("analyze"))
