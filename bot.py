@@ -23,6 +23,7 @@ from handlers.premium import router as premium_router
 from database.database import create_tables
 from services.signal_tracker import SignalTracker
 from services.observation_monitor import ObservationMonitor
+from services.health_server import start_health_server
 
 
 logging.basicConfig(
@@ -32,6 +33,8 @@ logging.basicConfig(
 
 
 async def main():
+
+    health_runner = await start_health_server()
 
     logging.info("Creating database...")
     create_tables()
@@ -73,9 +76,24 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        # Stop background workers first so they cannot use the bot session
+        # while it is being closed.
+        if hasattr(tracker, "stop"):
+            tracker.stop()
+        if hasattr(observation_monitor, "stop"):
+            observation_monitor.stop()
+
         tracker_task.cancel()
         observation_task.cancel()
+        await asyncio.gather(
+            tracker_task,
+            observation_task,
+            return_exceptions=True,
+        )
+
         await bot.session.close()
+        await health_runner.cleanup()
+        logging.info("Liquidity Vision stopped cleanly.")
 
 
 if __name__ == "__main__":
