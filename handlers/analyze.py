@@ -1,4 +1,3 @@
-import json
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -94,59 +93,11 @@ async def cancel_universal(message: Message, state: FSMContext):
 
 @router.message(UniversalAnalyzeState.waiting_symbol)
 async def universal_symbol_received(message: Message, state: FSMContext):
-    """Accept a plain ticker and remain robust when commands arrive during FSM input.
-
-    Aiogram state handlers can receive `/analyze BTC` while the user is still in
-    `waiting_symbol`. Previously the entire command was passed to the symbol resolver,
-    causing a misleading "invalid ticker" error.
-    """
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("❌ Введите тикер, например BTC, TAO или PEPE.")
-        return
-
-    lowered = text.lower()
-    is_inline_command = lowered.startswith("/analyze") or lowered.startswith("-analyze")
-
-    if is_inline_command:
-        args = text.split()
-        if len(args) < 2:
-            await message.answer(
-                "Использование:\n"
-                "/analyze BTC\n"
-                "/analyze SUI 4h\n"
-                "/analyze PEPE 15m"
-            )
-            return
-
-        raw_symbol = args[1]
-        timeframe = args[2].lower() if len(args) >= 3 else "1h"
-        if timeframe not in {"15m", "1h", "4h", "1d"}:
-            await message.answer("Поддерживаемые таймфреймы: 15m, 1h, 4h, 1d")
-            return
-
-        try:
-            resolved = await resolver.resolve(raw_symbol, interval=timeframe)
-            await state.clear()
-            await _send_analysis(
-                message,
-                resolved.base,
-                timeframe,
-                message.from_user.id,
-                message.chat.id,
-            )
-        except ValueError as exc:
-            await message.answer(f"❌ {exc}\n\nПопробуйте другой тикер или /cancel.")
-        except Exception as exc:
-            await message.answer(f"❌ Ошибка анализа\n\n{exc}")
-        return
-
     try:
-        resolved = await resolver.resolve(text, interval="1h")
+        resolved = await resolver.resolve(message.text, interval="1h")
     except ValueError as exc:
         await message.answer(f"❌ {exc}\n\nПопробуйте другой тикер или /cancel.")
         return
-
 
     await state.clear()
     await message.answer(
@@ -247,18 +198,9 @@ async def watch_callback(callback: CallbackQuery):
     _, symbol, timeframe = callback.data.split(":", 2)
     added = user_watchlist.add(callback.from_user.id, symbol, timeframe)
     if added:
-        await callback.answer("Добавлено. Автомониторинг запущен ⭐", show_alert=True)
+        await callback.answer("Добавлено в Watchlist ⭐", show_alert=True)
     else:
-        await callback.answer("Уже отслеживается", show_alert=True)
-
-
-@router.callback_query(F.data.startswith("unwatch:"))
-async def unwatch_callback(callback: CallbackQuery):
-    _, symbol, timeframe = callback.data.split(":", 2)
-    removed = user_watchlist.remove(callback.from_user.id, symbol, timeframe)
-    user_watchlist.clear_state(callback.from_user.id, symbol, timeframe)
-    await callback.answer("Удалено из Watchlist" if removed else "Уже удалено", show_alert=True)
-    await callback.message.answer("⭐ Watchlist обновлён. Нажмите кнопку Watchlist, чтобы открыть актуальный список.")
+        await callback.answer("Уже находится в Watchlist", show_alert=True)
 
 
 @router.message(F.text == "⭐ Watchlist")
@@ -272,36 +214,16 @@ async def watchlist_view(message: Message):
         )
         return
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    lines = ["⭐ <b>Your Watchlist · Auto Monitor</b>", ""]
-    kb = InlineKeyboardBuilder()
+    lines = ["⭐ <b>Your Watchlist</b>", ""]
     for index, row in enumerate(rows, 1):
-        status = "Initializing"
-        score = "—"
-        ready = "—"
-        if row["snapshot_json"]:
-            try:
-                snap = json.loads(row["snapshot_json"])
-                status = snap.get("execution_status") or "WATCHLIST"
-                score = f"{float(snap.get('direction_score') or 0):.1f}"
-                ready = f"{float(snap.get('readiness') or 0):.1f}"
-            except Exception:
-                pass
-        lines.append(
-            f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}\n"
-            f"   {status} · Direction {score} · Ready {ready}"
-        )
-        kb.button(text=f"🗑 {row['symbol']} {row['timeframe'].upper()}", callback_data=f"unwatch:{row['symbol']}:{row['timeframe']}")
-    kb.adjust(2)
-    lines.append("\nБот проверяет список автоматически и пишет только при существенных изменениях.")
-    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb.as_markup())
+        lines.append(f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}")
+    lines.append("\nИспользуйте /analyze ТИКЕР ТФ для быстрого обновления.")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("analyze"))
-async def analyze(message: Message, state: FSMContext):
-    # A command must always override any unfinished universal-analyze dialogue.
-    await state.clear()
-    args = (message.text or "").split()
+async def analyze(message: Message):
+    args = message.text.split()
     if len(args) < 2:
         await message.answer(
             "Использование:\n"

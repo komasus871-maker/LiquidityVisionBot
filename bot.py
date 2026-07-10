@@ -24,7 +24,6 @@ from database.database import create_tables
 from services.signal_tracker import SignalTracker
 from services.observation_monitor import ObservationMonitor
 from services.health_server import start_health_server
-from services.watch_engine import WatchEngine
 
 
 logging.basicConfig(
@@ -69,8 +68,6 @@ async def main():
     tracker_task = asyncio.create_task(tracker.run_forever())
     observation_monitor = ObservationMonitor(bot=bot)
     observation_task = asyncio.create_task(observation_monitor.run_forever())
-    watch_engine = WatchEngine(bot=bot)
-    watch_task = asyncio.create_task(watch_engine.run_forever())
 
     await bot.delete_webhook(
         drop_pending_updates=True
@@ -85,15 +82,12 @@ async def main():
             tracker.stop()
         if hasattr(observation_monitor, "stop"):
             observation_monitor.stop()
-        watch_engine.stop()
 
         tracker_task.cancel()
         observation_task.cancel()
-        watch_task.cancel()
         await asyncio.gather(
             tracker_task,
             observation_task,
-            watch_task,
             return_exceptions=True,
         )
 

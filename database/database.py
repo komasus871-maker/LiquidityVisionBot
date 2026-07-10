@@ -167,20 +167,6 @@ def create_tables():
             UNIQUE(telegram_id, symbol, timeframe)
         )
     """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS watch_states(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            snapshot_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            last_notified_at TEXT,
-            UNIQUE(telegram_id, symbol, timeframe)
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)")
-
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_observations_owner ON analysis_observations(owner_telegram_id)")
