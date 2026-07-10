@@ -45,7 +45,7 @@ async def analyze_callback(callback: CallbackQuery):
         df = await market.get_klines(symbol)
 
         analysis = analyzer.analyze(df)
-        signal_id = recorder.record(symbol=symbol, timeframe="1h", analysis=analysis)
+        signal_id = recorder.record(symbol=symbol, timeframe="1h", analysis=analysis, owner_telegram_id=callback.from_user.id, notification_chat_id=callback.message.chat.id)
         analysis["signal_id"] = signal_id
 
         text = report.build(analysis)
@@ -97,7 +97,7 @@ async def analyze(message: Message):
         df = await market.get_klines(symbol)
 
         analysis = analyzer.analyze(df)
-        signal_id = recorder.record(symbol=symbol, timeframe="1h", analysis=analysis)
+        signal_id = recorder.record(symbol=symbol, timeframe="1h", analysis=analysis, owner_telegram_id=message.from_user.id, notification_chat_id=message.chat.id)
         analysis["signal_id"] = signal_id
 
         text = report.build(analysis)

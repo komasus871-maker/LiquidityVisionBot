@@ -18,6 +18,7 @@ from handlers.fear import router as fear_router
 from handlers.market import router as market_router
 from handlers.news import router as news_router
 from handlers.journal import router as journal_router
+from handlers.premium import router as premium_router
 
 from database.database import create_tables
 from services.signal_tracker import SignalTracker
@@ -54,11 +55,12 @@ async def main():
     dp.include_router(market_router)
     dp.include_router(news_router)
     dp.include_router(journal_router)
+    dp.include_router(premium_router)
     dp.include_router(menu_router)
 
     logging.info("Liquidity Vision started.")
 
-    tracker = SignalTracker(interval_seconds=60)
+    tracker = SignalTracker(interval_seconds=60, bot=bot)
     tracker_task = asyncio.create_task(tracker.run_forever())
 
     await bot.delete_webhook(

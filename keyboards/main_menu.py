@@ -19,7 +19,9 @@ def main_keyboard():
 
         "📒 Journal",
 
-        "👤 Profile"
+        "👤 Profile",
+
+        "👑 Premium"
 
     ]
 
