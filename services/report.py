@@ -1,235 +1,159 @@
 class Report:
-
     def ai_summary(self, data):
-
         summary = []
-        direction = data.get("direction", "LONG")
+        direction = data["direction"]
         long = direction == "LONG"
-        trend_bull = "Bullish" in data["trend"]
-        structure_bull = "Bullish" in data["structure"]
-
-        if (long and trend_bull) or (not long and not trend_bull):
-            summary.append(f"• Higher timeframe trend is aligned with the {direction} setup.")
+        summary.append(f"• Market bias: {data['market_bias']}.")
+        summary.append(f"• Execution status: {data['execution_status']}.")
+        if "Counter-trend" in " ".join(data["reasons"]):
+            summary.append(f"• The {direction} idea is counter-trend and requires stronger confirmation.")
         else:
-            summary.append(f"• Higher timeframe trend conflicts with the {direction} setup; this is counter-trend.")
-
-        if (long and structure_bull) or (not long and not structure_bull):
-            summary.append(f"• Market structure supports the {direction} direction.")
-        else:
-            summary.append(f"• Market structure does not fully confirm the {direction} direction.")
-
-        if "Bullish" in data["choch"]:
-            summary.append("• Bullish CHOCH detected.")
-        elif "Bearish" in data["choch"]:
-            summary.append("• Bearish CHOCH detected.")
-
+            summary.append(f"• Trend context supports the {direction} scenario.")
+        if "Bullish" in data["structure"] and long or "Bearish" in data["structure"] and not long:
+            summary.append("• Market structure agrees with the directional bias.")
         if "Sell Side Sweep" in data["sweep"]:
             summary.append("• Sell-side liquidity has been swept.")
         elif "Buy Side Sweep" in data["sweep"]:
             summary.append("• Buy-side liquidity has been swept.")
-
-        if "Bullish" in data["order_block"]:
-            summary.append("• Price is reacting from a Bullish Order Block.")
-        elif "Bearish" in data["order_block"]:
-            summary.append("• Price is reacting from a Bearish Order Block.")
-
-        if "Bullish" in data["breaker"]:
-            summary.append("• Bullish Breaker Block is active.")
-        elif "Bearish" in data["breaker"]:
-            summary.append("• Bearish Breaker Block is active.")
-
-        if "Bullish" in data["mitigation"]:
-            summary.append("• Bullish Mitigation Block remains valid.")
-        elif "Bearish" in data["mitigation"]:
-            summary.append("• Bearish Mitigation Block remains valid.")
-
         if "Bullish" in data["fvg"]:
-            summary.append("• Bullish Fair Value Gap detected.")
+            summary.append("• A bullish Fair Value Gap is active.")
         elif "Bearish" in data["fvg"]:
-            summary.append("• Bearish Fair Value Gap detected.")
-
-        if "Discount" in data["premium"]["zone"]:
-            summary.append("• Price trades in Discount.")
-        elif "Premium" in data["premium"]["zone"]:
-            summary.append("• Price trades in Premium.")
-
-        if "Weak Displacement" in data["displacement"]:
-            summary.append("• Displacement is weak, so momentum confirmation is limited.")
-        elif "Bullish" in data["displacement"]:
-            summary.append("• Strong bullish displacement is present.")
-        elif "Bearish" in data["displacement"]:
-            summary.append("• Strong bearish displacement is present.")
-
-        if data.get("volume_ratio", 1.0) < 0.8:
-            summary.append("• Relative volume is below average.")
-        elif "Spike" in data["volume"]:
-            summary.append("• Volume expansion confirms momentum.")
-
+            summary.append("• A bearish Fair Value Gap is active.")
+        summary.append(f"• Price location: {data['premium']['zone'].replace('🔴 ', '').replace('🟢 ', '').replace('🟡 ', '')} ({data['premium']['premium']}% of range).")
+        if data["triggers"]:
+            summary.append(f"• Best next confirmation: {data['triggers'][0]}.")
         return "\n".join(summary)
 
     def build(self, data):
-
+        triggers = "\n".join(f"• {item}" for item in data.get("triggers", [])) or "• Setup is ready under current conditions"
+        signal_text = data.get("signal_id") or "not recorded as executable trade"
         return f"""
 📊 <b>Liquidity Vision</b>
 
 ━━━━━━━━━━━━━━━━━━
 
-💰 Price
-{data["price"]:.2f}
+🧭 <b>Market Bias</b>
+{data['market_bias']}
+
+🎬 <b>Execution Status</b>
+{data['execution_status']}
+
+💡 <b>Recommendation</b>
+{data['recommendation']}
 
 ━━━━━━━━━━━━━━━━━━
+
+💰 Price
+{data['price']:.2f}
 
 📈 Trend
-
-{data["trend"]}
+{data['trend']}
 
 🏗 Structure
-
-{data["structure"]}
+{data['structure']}
 
 🔨 BOS
-
-{data["bos"]}
+{data['bos']}
 
 🔄 CHOCH
-
-{data["choch"]}
-
-━━━━━━━━━━━━━━━━━━
-
-💧 Liquidity
-
-{data["liquidity"]}
-
-🌊 Sweep
-
-{data["sweep"]}
+{data['choch']}
 
 ━━━━━━━━━━━━━━━━━━
+
+💧 External Liquidity
+{data['liquidity']}
+
+🌊 Liquidity Event
+{data['sweep']}
 
 📦 Order Block
-
-{data["order_block"]}
+{data['order_block']}
 
 🧱 Breaker
-
-{data["breaker"]}
+{data['breaker']}
 
 🛡 Mitigation
-
-{data["mitigation"]}
+{data['mitigation']}
 
 🟨 FVG
-
-{data["fvg"]}
-
-━━━━━━━━━━━━━━━━━━
-
-💎 Premium / Discount
-
-{data["premium"]["zone"]}
-
-Premium %
-
-{data["premium"]["premium"]}%
-
-Equilibrium
-
-{data["premium"]["equilibrium"]}
+{data['fvg']}
 
 ━━━━━━━━━━━━━━━━━━
 
-📉 EMA50
+💎 Dealing Range Location
+{data['premium']['zone']}
 
-{data["ema50"]:.2f}
+Range Position
+{data['premium']['premium']}%
 
-📉 EMA200
+Range Low / EQ / High
+{data['premium']['low']} / {data['premium']['equilibrium']} / {data['premium']['high']}
 
-{data["ema200"]:.2f}
+━━━━━━━━━━━━━━━━━━
+
+📉 EMA50 / EMA200
+{data['ema50']:.2f} / {data['ema200']:.2f}
 
 ⚡ RSI
-
-{data["rsi"]:.2f}
+{data['rsi']:.2f}
 
 📊 MACD
-
-{data["macd"]}
+{data['macd']}
 
 📦 Volume
-
-{data["volume"]}
+{data['volume']}
 
 🚀 Displacement
-
-{data["displacement"]}
+{data['displacement']}
 
 ATR
-
-{data["atr"]["atr"]}
+{data['atr']['atr']}
 
 ━━━━━━━━━━━━━━━━━━
 
-🎯 Entry
-
-{data["entry"]:.2f}
-
-🛑 Stop
-
-{data["stop"]:.2f}
-
-🎯 TP1
-
-{data["tp1"]:.2f}
-
-🎯 TP2
-
-{data["tp2"]:.2f}
-
-🎯 TP3
-
-{data["tp3"]:.2f}
-
-⚖ RR
-
-1:{data["rr"]}
+🎯 Trade Plan
+Entry: {data['entry']:.2f}
+Stop: {data['stop']:.2f}
+TP1: {data['tp1']:.2f}
+TP2: {data['tp2']:.2f}
+TP3: {data['tp3']:.2f}
+RR: 1:{data['rr']}
 
 ━━━━━━━━━━━━━━━━━━
 
 📐 Setup Score
-
-{data["score"]}/100
+{data['score']}/100
 
 🔎 Confirmations
-
-{data["confirmations"]}
+{data['confirmations']}
 
 ⭐ Trade Quality
+{data['quality']}
 
-{data["quality"]}
-
-💡 Recommendation
-
-{data["recommendation"]}
+🏅 Scanner Rank
+{data['ranking_score']}
 
 ━━━━━━━━━━━━━━━━━━
 
-🧠 Confluence
+🧠 Confluence & Risks
+{"\n".join(data['reasons'])}
 
-{"\n".join(data["reasons"])}
+━━━━━━━━━━━━━━━━━━
+
+🔔 Activation Conditions
+{triggers}
 
 ━━━━━━━━━━━━━━━━━━
 
 🤖 AI Summary
-
 {self.ai_summary(data)}
 
 ━━━━━━━━━━━━━━━━━━
 
 🧾 Signal ID
-{data.get("signal_id") or "not saved (WAIT)"}
+{signal_text}
 
 ━━━━━━━━━━━━━━━━━━
 
-⚠️ <i>Not financial advice.
-Always use proper risk management.</i>
+⚠️ <i>Not financial advice. Always use proper risk management.</i>
 """

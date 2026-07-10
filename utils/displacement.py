@@ -1,145 +1,46 @@
 class Displacement:
+    """Measures candle expansion using body efficiency and body-vs-average."""
 
     def __init__(self, df):
-
         self.df = df
 
-    def body(self, candle):
+    @staticmethod
+    def body(candle):
+        return abs(float(candle["close"]) - float(candle["open"]))
 
-        return abs(
-
-            candle["close"]
-
-            -
-
-            candle["open"]
-
-        )
-
-    def range(self, candle):
-
-        return (
-
-            candle["high"]
-
-            -
-
-            candle["low"]
-
-        )
+    @staticmethod
+    def candle_range(candle):
+        return max(float(candle["high"]) - float(candle["low"]), 0.0)
 
     def average_body(self, period=20):
-
         candles = self.df.tail(period)
+        values = [self.body(c) for _, c in candles.iterrows()]
+        return sum(values) / len(values) if values else 0.0
 
-        bodies = []
-
-        for _, candle in candles.iterrows():
-
-            bodies.append(
-
-                self.body(candle)
-
-            )
-
-        return sum(bodies) / len(bodies)
-
-    def bullish(self):
-
+    def metrics(self):
         candle = self.df.iloc[-1]
-
+        body = self.body(candle)
+        rng = self.candle_range(candle)
         avg = self.average_body()
-
-        return (
-
-            candle["close"] >
-
-            candle["open"]
-
-            and
-
-            self.body(candle)
-
-            >
-
-            avg * 2
-
-        )
-
-    def bearish(self):
-
-        candle = self.df.iloc[-1]
-
-        avg = self.average_body()
-
-        return (
-
-            candle["close"] <
-
-            candle["open"]
-
-            and
-
-            self.body(candle)
-
-            >
-
-            avg * 2
-
-        )
-
-    def strength(self):
-
-        candle = self.df.iloc[-1]
-
-        rng = self.range(candle)
-
-        if rng == 0:
-
-            return 0
-
-        return round(
-
-            self.body(candle)
-
-            /
-
-            rng
-
-            *
-
-            100,
-
-            2
-
-        )
+        efficiency = body / rng * 100 if rng else 0.0
+        expansion = body / avg if avg else 0.0
+        direction = "Bullish" if candle["close"] > candle["open"] else "Bearish" if candle["close"] < candle["open"] else "Neutral"
+        return direction, round(efficiency, 2), round(expansion, 2)
 
     def analyze(self):
+        direction, efficiency, expansion = self.metrics()
+        composite = min(100.0, efficiency * 0.65 + min(expansion / 2.0, 1.0) * 100 * 0.35)
 
-        if self.bullish():
+        if direction == "Neutral":
+            return f"⚪ Weak Displacement (0.0%, 0.0x)"
+        if composite >= 72 and expansion >= 1.35:
+            level = "Strong"
+            icon = "🟢" if direction == "Bullish" else "🔴"
+        elif composite >= 48 and expansion >= 0.9:
+            level = "Moderate"
+            icon = "🟡"
+        else:
+            level = "Weak"
+            icon = "⚪"
 
-            return (
-
-                f"🟢 Bullish Displacement "
-
-                f"({self.strength()}%)"
-
-            )
-
-        if self.bearish():
-
-            return (
-
-                f"🔴 Bearish Displacement "
-
-                f"({self.strength()}%)"
-
-            )
-
-        return (
-
-            f"⚪ Weak Displacement "
-
-            f"({self.strength()}%)"
-
-        )
+        return f"{icon} {level} {direction} Displacement ({efficiency}%, {expansion}x)"
