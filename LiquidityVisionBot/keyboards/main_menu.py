@@ -9,6 +9,8 @@ def main_keyboard():
 
         "📊 Analyze",
 
+        "📊 Dashboard",
+
         "🔥 Scanner",
 
         "📈 Market",
