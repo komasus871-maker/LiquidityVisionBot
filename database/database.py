@@ -157,6 +157,18 @@ def create_tables():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_watchlist(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL DEFAULT '1h',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(telegram_id, symbol, timeframe)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)")
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_observations_owner ON analysis_observations(owner_telegram_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_observations_symbol ON analysis_observations(symbol, timeframe)")
 

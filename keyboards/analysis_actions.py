@@ -2,11 +2,12 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-def analysis_actions_keyboard(symbol: str) -> InlineKeyboardMarkup:
+def analysis_actions_keyboard(symbol: str, timeframe: str = "1h") -> InlineKeyboardMarkup:
     symbol = symbol.upper().strip()
     kb = InlineKeyboardBuilder()
     kb.button(text="🧠 Explain Pro", callback_data=f"explain_{symbol}")
     kb.button(text="🧩 Similar Setups", callback_data=f"similar_{symbol}")
+    kb.button(text="⭐ Watch", callback_data=f"watch:{symbol}:{timeframe}")
     kb.button(text="🔄 Refresh", callback_data=f"refresh_{symbol}")
-    kb.adjust(2, 1)
+    kb.adjust(2, 2)
     return kb.as_markup()

@@ -9,6 +9,8 @@ def main_keyboard():
 
         "📊 Analyze",
 
+        "🔍 Analyze Coin",
+
         "🔥 Scanner",
 
         "📈 Market",
@@ -18,6 +20,8 @@ def main_keyboard():
         "📰 News",
 
         "📒 Journal",
+
+        "⭐ Watchlist",
 
         "👤 Profile",
 
