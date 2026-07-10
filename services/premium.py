@@ -39,9 +39,19 @@ class PremiumService:
                 active = False
         return {"active": active, "tier": row[1] or "FREE", "until": until, "notifications": bool(row[3])}
 
-    def record_payment(self, telegram_id: int, payment) -> None:
+    def record_payment(self, telegram_id: int, payment) -> bool:
+        charge_id = payment.telegram_payment_charge_id
         with connect() as conn:
+            existing = conn.execute("SELECT id FROM payments WHERE telegram_payment_charge_id=?", (charge_id,)).fetchone()
+            if existing:
+                return False
             conn.execute("""INSERT INTO payments(telegram_id,provider,payload,amount,currency,telegram_payment_charge_id,provider_payment_charge_id,created_at)
                           VALUES(?,?,?,?,?,?,?,?)""",
                          (telegram_id, "TELEGRAM_STARS", payment.invoice_payload, payment.total_amount, payment.currency,
-                          payment.telegram_payment_charge_id, payment.provider_payment_charge_id, datetime.now(timezone.utc).isoformat()))
+                          charge_id, payment.provider_payment_charge_id, datetime.now(timezone.utc).isoformat()))
+        return True
+
+    def payment_history(self, telegram_id: int, limit: int = 5) -> list[dict]:
+        with connect() as conn:
+            rows = conn.execute("SELECT provider,amount,currency,created_at FROM payments WHERE telegram_id=? ORDER BY id DESC LIMIT ?", (telegram_id, limit)).fetchall()
+        return [dict(row) for row in rows]

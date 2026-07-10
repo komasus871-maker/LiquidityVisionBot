@@ -164,6 +164,7 @@ def create_tables():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(setup_key)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_telegram_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_events_signal ON signal_events(signal_id)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge ON payments(telegram_payment_charge_id) WHERE telegram_payment_charge_id IS NOT NULL")
     conn.commit()
     conn.close()
 

@@ -22,6 +22,7 @@ from handlers.premium import router as premium_router
 
 from database.database import create_tables
 from services.signal_tracker import SignalTracker
+from services.observation_monitor import ObservationMonitor
 
 
 logging.basicConfig(
@@ -62,6 +63,8 @@ async def main():
 
     tracker = SignalTracker(interval_seconds=60, bot=bot)
     tracker_task = asyncio.create_task(tracker.run_forever())
+    observation_monitor = ObservationMonitor(bot=bot)
+    observation_task = asyncio.create_task(observation_monitor.run_forever())
 
     await bot.delete_webhook(
         drop_pending_updates=True
@@ -71,6 +74,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         tracker_task.cancel()
+        observation_task.cancel()
         await bot.session.close()
 
 

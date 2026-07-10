@@ -68,3 +68,10 @@ class ObservationHistory:
         with connect() as conn:
             row = conn.execute("SELECT COUNT(*) FROM analysis_observations WHERE owner_telegram_id=?", (owner_telegram_id,)).fetchone()
         return int(row[0] or 0)
+
+    def pending(self, limit: int = 50):
+        with connect() as conn:
+            rows = conn.execute("""SELECT * FROM analysis_observations
+                                  WHERE promoted_signal_id IS NULL AND owner_telegram_id IS NOT NULL
+                                  ORDER BY updated_at ASC LIMIT ?""", (limit,)).fetchall()
+        return [dict(x) for x in rows]

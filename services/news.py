@@ -54,7 +54,11 @@ BULLISH_PHRASES = (
 )
 BEARISH_PHRASES = (
     "rejected", "outflow", "hack", "exploit", "lawsuit", "ban", "network outage", "bankruptcy",
-    "delisting", "liquidation", "stolen", "scam", "fraud", "security breach",
+    "delisting", "liquidation", "stolen", "scam", "fraud", "security breach", "charges filed",
+)
+NEUTRALIZING_PHRASES = (
+    "clears hurdle", "wins approval", "final approval", "recognizes authority", "to find bugs",
+    "security audit", "oversight board", "researchers warn",
 )
 
 
@@ -120,6 +124,8 @@ class NewsEngine:
         medium_hits = sum(1 for x in MEDIUM_MARKET_PHRASES if x in lowered)
         bullish_hits = sum(1 for x in BULLISH_PHRASES if x in lowered)
         bearish_hits = sum(1 for x in BEARISH_PHRASES if x in lowered)
+        if any(x in lowered for x in NEUTRALIZING_PHRASES):
+            bearish_hits = max(0, bearish_hits - 1)
 
         # Macro events can be high impact without naming crypto; ordinary AI/banking stories cannot.
         macro_high = any(x in lowered for x in ("fomc", "interest rate decision", "consumer price index", "nonfarm payroll", "cpi", "ppi"))

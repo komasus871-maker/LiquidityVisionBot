@@ -20,12 +20,27 @@ def _format_news(items: list[dict]) -> str:
         )
 
     high = sum(1 for x in items if x.get("impact") == "🔴 HIGH")
-    bullish = sum(1 for x in items if "Bullish" in x.get("sentiment", ""))
-    bearish = sum(1 for x in items if "Bearish" in x.get("sentiment", ""))
-    if bullish > bearish:
+    impact_weights = {"🔴 HIGH": 3, "🟡 MEDIUM": 2, "⚪ LOW": 1}
+    sentiment_score = 0
+    directional_weight = 0
+    for item in items:
+        weight = impact_weights.get(item.get("impact", "⚪ LOW"), 1)
+        sentiment = item.get("sentiment", "")
+        if "Bullish" in sentiment:
+            sentiment_score += weight
+            directional_weight += weight
+        elif "Bearish" in sentiment:
+            sentiment_score -= weight
+            directional_weight += weight
+    ratio = (sentiment_score / directional_weight) if directional_weight else 0
+    if ratio >= 0.45:
         overall = "🟢 Bullish tilt"
-    elif bearish > bullish:
+    elif ratio <= -0.45:
         overall = "🔴 Bearish tilt"
+    elif ratio > 0.12:
+        overall = "🟡 Slight bullish / mostly neutral"
+    elif ratio < -0.12:
+        overall = "🟠 Slight bearish / mostly neutral"
     else:
         overall = "⚪ Mixed / Neutral"
 

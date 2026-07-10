@@ -186,22 +186,39 @@ class Analyzer:
             and ready_edge
         )
 
+        liquidity_reversal = (long and "Sell Side Sweep" in raw["liquidity"]) or ((not long) and "Buy Side Sweep" in raw["liquidity"])
+        location_reversal = (long and position <= 38) or ((not long) and position >= 62)
+        opposing_trend = not trend_ok
         reversal_evidence = sum((
-            int(not trend_ok), int(choch_ok),
-            int((long and "Sell Side" in raw["sweep"]) or ((not long) and "Buy Side" in raw["sweep"])),
-            int(self._aligned(direction, raw["breaker"])),
-            int(self._aligned(direction, raw["order_block"])),
+            int(opposing_trend),
+            int(choch_ok),
+            int(bos_ok and opposing_trend),
+            int(liquidity_reversal),
+            int(displacement_ok and "Strong" in raw["displacement"]),
+            int(location_reversal and (ob_ok or breaker_ok or fvg_ok)),
         ))
+
+        pullback_valid = (
+            direction_score >= 52
+            and abs(edge) >= 12
+            and risk_quality >= 55
+            and not balanced
+        )
+        reversal_valid = (
+            reversal_evidence >= 2
+            and 48 <= direction_score < 58
+            and abs(edge) >= 10
+        )
 
         if balanced:
             status, category = "🔵 WATCHLIST", "WATCHLIST"
         elif can_be_ready:
             status, category = "🟢 READY", "READY_NOW"
-        elif blocking_entry:
+        elif blocking_entry and pullback_valid:
             status, category = "🎯 WAIT FOR PULLBACK", "PULLBACK"
-        elif direction_score >= 58:
+        elif direction_score >= 58 and abs(edge) >= 10:
             status, category = "🟡 WAIT FOR TRIGGER", "CONFIRMATION"
-        elif reversal_evidence >= 2 and 45 <= direction_score < 58:
+        elif reversal_valid:
             status, category = "🔄 REVERSAL WATCH", "REVERSAL"
         else:
             status, category = "🔵 WATCHLIST", "WATCHLIST"
