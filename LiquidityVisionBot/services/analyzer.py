@@ -78,6 +78,10 @@ class Analyzer:
         fvg_ok = self._aligned(direction, raw["fvg"])
         location_ok = (long and "Discount" in raw["premium"]["zone"]) or ((not long) and "Premium" in raw["premium"]["zone"])
         displacement_ok = self._aligned(direction, raw["displacement"]) and "Weak" not in raw["displacement"]
+        adverse_displacement = (not self._aligned(direction, raw["displacement"])) and any(
+            strength in raw["displacement"] for strength in ("Moderate", "Strong")
+        )
+        strong_adverse_displacement = (not self._aligned(direction, raw["displacement"])) and "Strong" in raw["displacement"]
         macd_ok = (long and raw["macd_bullish"]) or ((not long) and not raw["macd_bullish"])
 
         reward("Trend aligned", trend_ok, 11)
@@ -97,6 +101,7 @@ class Analyzer:
         penalize("Counter-trend context", not trend_ok, 5)
         penalize("Structure conflicts with direction", not structure_ok and "Range" not in raw["structure"], 6, True)
         penalize("Weak displacement", "Weak" in raw["displacement"], 3)
+        penalize("Displacement conflicts with direction", adverse_displacement, 7, strong_adverse_displacement)
         penalize(f"Low relative volume ({raw['volume_ratio']}x)", raw["volume_ratio"] < 0.55, 4, True)
         penalize(f"Below-average volume ({raw['volume_ratio']}x)", 0.55 <= raw["volume_ratio"] < 0.85, 2)
         penalize(f"RSI overbought ({raw['rsi']:.1f})", long and raw["rsi"] >= 72, 5, True)
@@ -105,11 +110,19 @@ class Analyzer:
         penalize("SHORT entry is in Discount", (not long) and "Discount" in raw["premium"]["zone"], 5, True)
         return max(0.0, min(100.0, points)), positives, risks, blockers
 
-    def _execution_metrics(self, direction: str, raw: dict[str, Any], direction_score: float, rr: float, blockers: int):
+    def _execution_metrics(self, direction: str, raw: dict[str, Any], direction_score: float, rr: float, blockers: int, edge: float):
         long = direction == "LONG"
         position = float(raw["premium"].get("premium", 50))
         volume = raw["volume_ratio"]
         rsi_value = raw["rsi"]
+        trend_ok = self._aligned(direction, raw["trend"])
+        structure_ok = self._aligned(direction, raw["structure"])
+        bos_ok = self._aligned(direction, raw["bos"])
+        choch_ok = self._aligned(direction, raw["choch"])
+        displacement_ok = self._aligned(direction, raw["displacement"])
+        strong_adverse_displacement = (not displacement_ok) and "Strong" in raw["displacement"]
+        moderate_adverse_displacement = (not displacement_ok) and "Moderate" in raw["displacement"]
+        balanced = abs(edge) < self.EDGE_NEUTRAL
 
         entry_quality = 72.0
         if long:
@@ -122,6 +135,8 @@ class Analyzer:
             elif position >= 62: entry_quality += 12
         if (long and rsi_value >= 72) or ((not long) and rsi_value <= 28): entry_quality -= 14
         if "Weak" in raw["displacement"]: entry_quality -= 10
+        if moderate_adverse_displacement: entry_quality -= 12
+        if strong_adverse_displacement: entry_quality -= 24
         if volume < 0.55: entry_quality -= 12
         elif volume < 0.85: entry_quality -= 5
         entry_quality = round(max(0, min(100, entry_quality)), 1)
@@ -131,6 +146,8 @@ class Analyzer:
         elif rr < 2: risk_quality -= 18
         elif rr >= 3: risk_quality += 8
         risk_quality -= blockers * 8
+        if strong_adverse_displacement: risk_quality -= 18
+        elif moderate_adverse_displacement: risk_quality -= 8
         if raw["atr"]["atr"] / raw["price"] > 0.03: risk_quality -= 10
         risk_quality = round(max(0, min(100, risk_quality)), 1)
 
@@ -138,6 +155,12 @@ class Analyzer:
         blocking_entry = (long and position >= 80) or ((not long) and position <= 20)
         if blocking_entry:
             readiness = min(readiness, 54.0)
+        if strong_adverse_displacement:
+            readiness = min(readiness, 49.0)
+        if not trend_ok and not (bos_ok or choch_ok):
+            readiness = min(readiness, 59.0)
+        if balanced:
+            readiness = min(readiness, 56.0)
 
         low = float(raw["premium"]["low"]); eq = float(raw["premium"]["equilibrium"]); high = float(raw["premium"]["high"])
         atr = float(raw["atr"]["atr"])
@@ -150,13 +173,35 @@ class Analyzer:
         if zone_low > zone_high:
             zone_low, zone_high = sorted((zone_low, zone_high))
 
-        if readiness >= 68 and not blocking_entry and blockers == 0:
+        ready_structure = structure_ok and (trend_ok or bos_ok or choch_ok)
+        ready_momentum = not strong_adverse_displacement
+        ready_edge = abs(edge) >= 10
+        can_be_ready = (
+            readiness >= 68
+            and direction_score >= 58
+            and not blocking_entry
+            and blockers == 0
+            and ready_structure
+            and ready_momentum
+            and ready_edge
+        )
+
+        reversal_evidence = sum((
+            int(not trend_ok), int(choch_ok),
+            int((long and "Sell Side" in raw["sweep"]) or ((not long) and "Buy Side" in raw["sweep"])),
+            int(self._aligned(direction, raw["breaker"])),
+            int(self._aligned(direction, raw["order_block"])),
+        ))
+
+        if balanced:
+            status, category = "🔵 WATCHLIST", "WATCHLIST"
+        elif can_be_ready:
             status, category = "🟢 READY", "READY_NOW"
         elif blocking_entry:
             status, category = "🎯 WAIT FOR PULLBACK", "PULLBACK"
         elif direction_score >= 58:
             status, category = "🟡 WAIT FOR TRIGGER", "CONFIRMATION"
-        elif abs(direction_score - 50) <= 8:
+        elif reversal_evidence >= 2 and 45 <= direction_score < 58:
             status, category = "🔄 REVERSAL WATCH", "REVERSAL"
         else:
             status, category = "🔵 WATCHLIST", "WATCHLIST"
@@ -211,10 +256,12 @@ class Analyzer:
             score -= 10; blockers += 1; risks.append(f"⛔ RR below 1:{self.MIN_RR}")
         score = round(max(0.0, min(100.0, score)), 1)
 
-        entry_quality, risk_quality, readiness, execution_status, opportunity_category, zone_low, zone_high = self._execution_metrics(direction, raw, score, rr, blockers)
+        entry_quality, risk_quality, readiness, execution_status, opportunity_category, zone_low, zone_high = self._execution_metrics(direction, raw, score, rr, blockers, edge)
 
         side = "BUY" if long else "SELL"; icon = "🟢" if long else "🔴"
-        if readiness >= 78 and score >= 76:
+        if abs(edge) < self.EDGE_NEUTRAL:
+            recommendation = "⚖️ TWO-SIDED / NO CLEAR EDGE"
+        elif readiness >= 78 and score >= 76 and execution_status == "🟢 READY":
             recommendation = f"🔥 STRONG {side}"
         elif execution_status == "🟢 READY":
             recommendation = f"{icon} {side}"
@@ -222,8 +269,6 @@ class Analyzer:
             recommendation = f"🎯 {side} ON PULLBACK"
         elif score >= 55:
             recommendation = f"🟡 CONDITIONAL {side}"
-        elif abs(edge) < self.EDGE_NEUTRAL:
-            recommendation = "⚖️ TWO-SIDED / NO CLEAR EDGE"
         else:
             recommendation = "📈 BULLISH BIAS" if long else "📉 BEARISH BIAS"
 
