@@ -94,11 +94,59 @@ async def cancel_universal(message: Message, state: FSMContext):
 
 @router.message(UniversalAnalyzeState.waiting_symbol)
 async def universal_symbol_received(message: Message, state: FSMContext):
+    """Accept a plain ticker and remain robust when commands arrive during FSM input.
+
+    Aiogram state handlers can receive `/analyze BTC` while the user is still in
+    `waiting_symbol`. Previously the entire command was passed to the symbol resolver,
+    causing a misleading "invalid ticker" error.
+    """
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Введите тикер, например BTC, TAO или PEPE.")
+        return
+
+    lowered = text.lower()
+    is_inline_command = lowered.startswith("/analyze") or lowered.startswith("-analyze")
+
+    if is_inline_command:
+        args = text.split()
+        if len(args) < 2:
+            await message.answer(
+                "Использование:\n"
+                "/analyze BTC\n"
+                "/analyze SUI 4h\n"
+                "/analyze PEPE 15m"
+            )
+            return
+
+        raw_symbol = args[1]
+        timeframe = args[2].lower() if len(args) >= 3 else "1h"
+        if timeframe not in {"15m", "1h", "4h", "1d"}:
+            await message.answer("Поддерживаемые таймфреймы: 15m, 1h, 4h, 1d")
+            return
+
+        try:
+            resolved = await resolver.resolve(raw_symbol, interval=timeframe)
+            await state.clear()
+            await _send_analysis(
+                message,
+                resolved.base,
+                timeframe,
+                message.from_user.id,
+                message.chat.id,
+            )
+        except ValueError as exc:
+            await message.answer(f"❌ {exc}\n\nПопробуйте другой тикер или /cancel.")
+        except Exception as exc:
+            await message.answer(f"❌ Ошибка анализа\n\n{exc}")
+        return
+
     try:
-        resolved = await resolver.resolve(message.text, interval="1h")
+        resolved = await resolver.resolve(text, interval="1h")
     except ValueError as exc:
         await message.answer(f"❌ {exc}\n\nПопробуйте другой тикер или /cancel.")
         return
+
 
     await state.clear()
     await message.answer(
@@ -250,8 +298,10 @@ async def watchlist_view(message: Message):
 
 
 @router.message(Command("analyze"))
-async def analyze(message: Message):
-    args = message.text.split()
+async def analyze(message: Message, state: FSMContext):
+    # A command must always override any unfinished universal-analyze dialogue.
+    await state.clear()
+    args = (message.text or "").split()
     if len(args) < 2:
         await message.answer(
             "Использование:\n"
