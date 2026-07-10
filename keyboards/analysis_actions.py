@@ -6,6 +6,7 @@ def analysis_actions_keyboard(symbol: str) -> InlineKeyboardMarkup:
     symbol = symbol.upper().strip()
     kb = InlineKeyboardBuilder()
     kb.button(text="🧠 Explain Pro", callback_data=f"explain_{symbol}")
+    kb.button(text="🧩 Similar Setups", callback_data=f"similar_{symbol}")
     kb.button(text="🔄 Refresh", callback_data=f"refresh_{symbol}")
-    kb.adjust(2)
+    kb.adjust(2, 1)
     return kb.as_markup()

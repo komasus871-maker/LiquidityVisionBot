@@ -21,6 +21,25 @@ class Report:
             summary.append(f"• Best next confirmation: {data['triggers'][0]}.")
         return "\n".join(summary)
 
+    def probability_summary(self, data):
+        exact = data.get("historical_probability") or {}
+        similar = data.get("similar_stats") or {}
+        exact_samples = int(exact.get("samples") or 0)
+        similar_samples = int(similar.get("samples") or 0)
+        if exact_samples >= 5:
+            return (
+                f"Exact setup samples: {exact_samples} | Reliability: {exact.get('reliability', 'Insufficient')}\n"
+                f"TP1 {exact.get('tp1_rate', 0)}% · TP2 {exact.get('tp2_rate', 0)}% · "
+                f"TP3 {exact.get('tp3_rate', 0)}% · Stop {exact.get('stop_rate', 0)}%"
+            )
+        if similar_samples:
+            return (
+                f"Similar completed setups: {similar_samples} | Reliability: {similar.get('reliability', 'Insufficient')}\n"
+                f"TP1 {similar.get('tp1_rate', 0)}% · TP2 {similar.get('tp2_rate', 0)}% · "
+                f"TP3 {similar.get('tp3_rate', 0)}% · Stop {similar.get('stop_rate', 0)}%"
+            )
+        return "Collecting completed setup history. No statistical probability is available yet."
+
     def build(self, data):
         triggers = "\n".join(f"• {item}" for item in data.get("triggers", [])) or "• Setup is ready under current conditions"
         alt = "\n".join(f"• {item}" for item in data.get("alternative_conditions", []))
@@ -28,6 +47,7 @@ class Report:
         observation_text = data.get("observation_id") or "not recorded"
         reasons = "\n".join(data["reasons"]) or "⚪ No decisive confluence"
         p = fmt_price
+        probability_text = self.probability_summary(data)
         return f"""
 📊 <b>Liquidity Vision</b>
 
@@ -167,6 +187,11 @@ RR: 1:{fmt_number(data['rr'])}
 
 🤖 AI Summary
 {self.ai_summary(data)}
+
+━━━━━━━━━━━━━━━━━━
+
+📚 <b>Historical Intelligence</b>
+{probability_text}
 
 ━━━━━━━━━━━━━━━━━━
 

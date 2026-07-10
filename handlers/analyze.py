@@ -10,6 +10,8 @@ from services.analyzer import Analyzer
 from services.report import Report
 from services.signal_recorder import SignalRecorder
 from services.explainer import Explainer
+from services.probability_engine import ProbabilityEngine
+from services.similarity_report import SimilarityReport
 
 router = Router()
 
@@ -18,11 +20,20 @@ analyzer = Analyzer()
 report = Report()
 recorder = SignalRecorder()
 explainer = Explainer()
+probability_engine = ProbabilityEngine()
+similarity_report = SimilarityReport()
 
 
 async def _run_analysis(symbol: str):
     df = await market.get_klines(symbol)
-    return analyzer.analyze(df)
+    analysis = analyzer.analyze(df)
+    setup_key = recorder._setup_key(analysis)
+    return probability_engine.enrich(
+        analysis,
+        symbol=symbol,
+        timeframe="1h",
+        setup_key=setup_key,
+    )
 
 
 @router.message(F.text == "📊 Analyze")
@@ -89,6 +100,21 @@ async def explain_callback(callback: CallbackQuery):
         )
     except Exception as e:
         await callback.message.answer(f"❌ Не удалось построить Explain Pro\n\n{e}")
+
+
+@router.callback_query(F.data.startswith("similar_"))
+async def similar_callback(callback: CallbackQuery):
+    symbol = callback.data.replace("similar_", "").upper()
+    await callback.answer("Ищу похожие сетапы…")
+    try:
+        analysis = await _run_analysis(symbol)
+        await callback.message.answer(
+            similarity_report.build(symbol, analysis),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        await callback.message.answer(f"❌ Не удалось найти похожие сетапы\n\n{e}")
 
 
 @router.message(Command("analyze"))

@@ -114,16 +114,30 @@ class SignalTracker:
         common = {"current_price": price, "max_profit_pct": max_profit, "max_drawdown_pct": max_drawdown}
 
         if self._stop_hit(side, price, stop):
+            signal.update(common)
             await self._transition(signal, "STOP", price, stop_hit_at=now, closed_at=now, **common)
             return
-        if not signal.get("tp1_hit_at") and self._reached(side, price, float(signal["tp1"])):
-            await self._transition(signal, "TP1", price, tp1_hit_at=now, **common)
+
+        # Handle gaps and fast moves without waiting one monitor cycle per target.
+        if not signal.get("tp3_hit_at") and self._reached(side, price, float(signal["tp3"])):
+            common.update({
+                "tp1_hit_at": signal.get("tp1_hit_at") or now,
+                "tp2_hit_at": signal.get("tp2_hit_at") or now,
+                "tp3_hit_at": now,
+                "closed_at": now,
+            })
+            signal.update(common)
+            await self._transition(signal, "TP3", price, **common)
             return
         if not signal.get("tp2_hit_at") and self._reached(side, price, float(signal["tp2"])):
-            await self._transition(signal, "TP2", price, tp2_hit_at=now, **common)
+            common.update({"tp1_hit_at": signal.get("tp1_hit_at") or now, "tp2_hit_at": now})
+            signal.update(common)
+            await self._transition(signal, "TP2", price, **common)
             return
-        if not signal.get("tp3_hit_at") and self._reached(side, price, float(signal["tp3"])):
-            await self._transition(signal, "TP3", price, tp3_hit_at=now, closed_at=now, **common)
+        if not signal.get("tp1_hit_at") and self._reached(side, price, float(signal["tp1"])):
+            common.update({"tp1_hit_at": now})
+            signal.update(common)
+            await self._transition(signal, "TP1", price, **common)
             return
         self.history.update_lifecycle(signal["id"], **common)
 

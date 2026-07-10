@@ -1,4 +1,5 @@
 from typing import Any
+import re
 from database.signal_history import SignalHistory
 from services.premium import PremiumService
 from database.observation_history import ObservationHistory
@@ -12,8 +13,20 @@ class SignalRecorder:
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
-        parts = [analysis.get("structure"), analysis.get("choch"), analysis.get("sweep"), analysis.get("order_block"), analysis.get("premium", {}).get("zone")]
-        return " | ".join(str(p).replace("✅", "").strip() for p in parts if p)
+        parts = [
+            analysis.get("structure"), analysis.get("choch"), analysis.get("sweep"),
+            analysis.get("order_block"), analysis.get("premium", {}).get("zone"),
+        ]
+        normalized = []
+        for part in parts:
+            if not part:
+                continue
+            text = str(part).replace("✅", "").strip()
+            text = re.sub(r"\([^)]*\)", "", text)
+            text = re.sub(r"[-+]?\d+(?:\.\d+)?", "", text)
+            text = re.sub(r"\s+", " ", text).strip(" -|")
+            normalized.append(text)
+        return " | ".join(normalized)
 
     def record(self, *, symbol: str, timeframe: str, analysis: dict[str, Any], owner_telegram_id: int | None = None,
                notification_chat_id: int | None = None, min_confidence: float = 54) -> int | None:

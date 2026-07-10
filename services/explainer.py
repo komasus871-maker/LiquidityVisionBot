@@ -59,6 +59,25 @@ class Explainer:
         else:
             edge_explanation = "The primary scenario has a strong directional advantage over the alternative."
 
+        exact = data.get("historical_probability") or {}
+        similar = data.get("similar_stats") or {}
+        if int(exact.get("samples") or 0) >= 5:
+            historical_text = (
+                f"Exact completed samples: {int(exact.get('samples') or 0)}\n"
+                f"TP1 {exact.get('tp1_rate', 0)}% · TP2 {exact.get('tp2_rate', 0)}% · "
+                f"TP3 {exact.get('tp3_rate', 0)}% · Stop {exact.get('stop_rate', 0)}%\n"
+                f"Reliability: {exact.get('reliability', 'Insufficient')}"
+            )
+        elif int(similar.get("samples") or 0) > 0:
+            historical_text = (
+                f"Similar completed setups: {int(similar.get('samples') or 0)}\n"
+                f"TP1 {similar.get('tp1_rate', 0)}% · TP2 {similar.get('tp2_rate', 0)}% · "
+                f"TP3 {similar.get('tp3_rate', 0)}% · Stop {similar.get('stop_rate', 0)}%\n"
+                f"Reliability: {similar.get('reliability', 'Insufficient')}"
+            )
+        else:
+            historical_text = "No completed historical sample yet. The system is collecting outcomes."
+
         if data.get("execution_status") == "🟢 READY":
             execution_view = "The setup currently passes the execution filters, but risk management remains mandatory."
         elif data.get("execution_status") == "🎯 WAIT FOR PULLBACK":
@@ -116,6 +135,11 @@ Invalidation / stop reference: {fmt_price(stop)}
 
 🔄 <b>What would strengthen {escape(opposite)}</b>
 {alternative_text}
+
+━━━━━━━━━━━━━━━━━━
+
+📚 <b>Historical intelligence</b>
+{escape(historical_text)}
 
 ━━━━━━━━━━━━━━━━━━
 
