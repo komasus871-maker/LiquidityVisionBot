@@ -8,6 +8,7 @@ from database.observation_history import ObservationHistory
 from services.market import Market
 from services.analyzer import Analyzer
 from services.signal_recorder import SignalRecorder
+from services.analysis_runtime import run_analysis
 
 
 class ObservationMonitor:
@@ -18,12 +19,16 @@ class ObservationMonitor:
         self.market = Market()
         self.analyzer = Analyzer()
         self.recorder = SignalRecorder()
+        self._stop = asyncio.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
 
     async def check_once(self) -> None:
         for observation in self.history.pending(limit=40):
             try:
                 df = await self.market.get_klines(observation["symbol"], observation["timeframe"])
-                analysis = self.analyzer.analyze(df)
+                analysis = await run_analysis(self.analyzer, df)
                 signal_id = self.recorder.record(
                     symbol=observation["symbol"], timeframe=observation["timeframe"], analysis=analysis,
                     owner_telegram_id=observation["owner_telegram_id"],
@@ -38,6 +43,9 @@ class ObservationMonitor:
                 logging.warning("Observation monitor failed for %s: %s", observation.get("symbol"), exc)
 
     async def run_forever(self) -> None:
-        while True:
+        while not self._stop.is_set():
             await self.check_once()
-            await asyncio.sleep(self.interval_seconds)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+            except asyncio.TimeoutError:
+                pass

@@ -11,6 +11,7 @@ from services.analyzer import Analyzer
 from services.market import Market
 from services.probability_engine import ProbabilityEngine
 from services.signal_recorder import SignalRecorder
+from services.analysis_runtime import run_analysis
 
 
 class WatchEngine:
@@ -115,7 +116,7 @@ class WatchEngine:
             symbol, timeframe = row["symbol"], row["timeframe"]
             try:
                 df = await self.market.get_klines(symbol, interval=timeframe)
-                analysis = self.analyzer.analyze(df)
+                analysis = await run_analysis(self.analyzer, df)
                 setup_key = self.recorder._setup_key(analysis)
                 analysis["timeframe"] = timeframe
                 analysis = self.probability.enrich(analysis, symbol=symbol, timeframe=timeframe, setup_key=setup_key)

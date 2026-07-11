@@ -17,6 +17,7 @@ from services.probability_engine import ProbabilityEngine
 from services.similarity_report import SimilarityReport
 from services.symbol_resolver import SymbolResolver
 from services.user_watchlist import UserWatchlist
+from services.analysis_runtime import run_analysis
 
 router = Router()
 
@@ -37,7 +38,7 @@ class UniversalAnalyzeState(StatesGroup):
 
 async def _run_analysis(symbol: str, timeframe: str = "1h"):
     df = await market.get_klines(symbol, interval=timeframe)
-    analysis = analyzer.analyze(df)
+    analysis = await run_analysis(analyzer, df)
     setup_key = recorder._setup_key(analysis)
     analysis["timeframe"] = timeframe
     return probability_engine.enrich(
@@ -93,8 +94,36 @@ async def cancel_universal(message: Message, state: FSMContext):
 
 @router.message(UniversalAnalyzeState.waiting_symbol)
 async def universal_symbol_received(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("❌ Введите тикер или /cancel.")
+        return
+
+    # Commands must keep working even while the FSM is waiting for a plain
+    # ticker. This prevents `/analyze TAO` from being parsed as one invalid
+    # symbol after the Analyze Coin button was pressed earlier.
+    normalized = raw.lstrip("-").strip()
+    if normalized.lower().startswith("/analyze"):
+        parts = normalized.split()
+        if len(parts) < 2:
+            await message.answer("Использование: /analyze BTC или /analyze SUI 4h")
+            return
+        timeframe = parts[2].lower() if len(parts) >= 3 else "1h"
+        if timeframe not in {"15m", "1h", "4h", "1d"}:
+            await message.answer("Поддерживаемые таймфреймы: 15m, 1h, 4h, 1d")
+            return
+        await state.clear()
+        try:
+            resolved = await resolver.resolve(parts[1], interval=timeframe)
+            progress = await message.answer(f"🔄 Анализирую <b>{resolved.display}</b> · {timeframe.upper()}…", parse_mode="HTML")
+            await _send_analysis(message, resolved.base, timeframe, message.from_user.id, message.chat.id)
+            await progress.delete()
+        except Exception as exc:
+            await message.answer(f"❌ Ошибка\n\n{exc}")
+        return
+
     try:
-        resolved = await resolver.resolve(message.text, interval="1h")
+        resolved = await resolver.resolve(raw, interval="1h")
     except ValueError as exc:
         await message.answer(f"❌ {exc}\n\nПопробуйте другой тикер или /cancel.")
         return

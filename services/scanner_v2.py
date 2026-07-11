@@ -3,6 +3,7 @@ import asyncio
 from services.symbols import Symbols
 from services.market import Market
 from services.analyzer import Analyzer
+from services.analysis_runtime import run_analysis
 
 
 class ScannerV2:
@@ -21,7 +22,7 @@ class ScannerV2:
 
             df = await self.market.get_klines(symbol)
 
-            result = self.analyzer.analyze(df)
+            result = await run_analysis(self.analyzer, df)
 
             return symbol, result
 
