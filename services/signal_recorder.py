@@ -5,6 +5,7 @@ from services.premium import PremiumService
 from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.database import acquire_lease, release_lease
+from services.trade_manager import TradeManager
 
 
 class SignalRecorder:
@@ -13,6 +14,7 @@ class SignalRecorder:
         self.premium = PremiumService()
         self.observations = ObservationHistory()
         self.candidates = CandidateHistory()
+        self.trade_manager = TradeManager()
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
@@ -88,7 +90,7 @@ class SignalRecorder:
             existing = self.history.reconcile_open_market(owner_telegram_id, payload["symbol"], timeframe)
             return int(existing["id"]) if existing and existing.get("side") == payload["side"] else None
         try:
-            self.history.reconcile_open_market(owner_telegram_id, payload["symbol"], timeframe)
+            self.trade_manager.reconcile_market(owner_telegram_id, payload["symbol"], timeframe)
             open_market = self.history.get_open_market(owner_telegram_id, payload["symbol"], timeframe)
             live_trade = next((x for x in open_market if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
             same_side = [x for x in open_market if x.get("side") == payload["side"]]

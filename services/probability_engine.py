@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -25,6 +26,8 @@ class SimilarCase:
     stop_hit: bool
     mfe: float
     mae: float
+    duration_minutes: float = 0.0
+    realized_r: float = 0.0
 
 
 class ProbabilityEngine:
@@ -139,7 +142,7 @@ class ProbabilityEngine:
                 """
                 SELECT id,symbol,timeframe,side,status,features_json,
                        tp1_hit_at,tp2_hit_at,tp3_hit_at,stop_hit_at,
-                       max_profit_pct,max_drawdown_pct
+                       max_profit_pct,max_drawdown_pct,created_at,closed_at,realized_r
                 FROM signals
                 WHERE side=? AND timeframe=?
                   AND status IN ('TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED')
@@ -159,6 +162,13 @@ class ProbabilityEngine:
                 similarity = min(100.0, similarity + 5.0)
             if similarity < minimum_similarity:
                 continue
+            duration_minutes = 0.0
+            try:
+                from datetime import datetime
+                if row["created_at"] and row["closed_at"]:
+                    duration_minutes = max(0.0, (datetime.fromisoformat(str(row["closed_at"])) - datetime.fromisoformat(str(row["created_at"]))).total_seconds() / 60)
+            except (TypeError, ValueError):
+                duration_minutes = 0.0
             found.append(
                 SimilarCase(
                     signal_id=int(row["id"]),
@@ -173,10 +183,71 @@ class ProbabilityEngine:
                     stop_hit=bool(row["stop_hit_at"]),
                     mfe=round(float(row["max_profit_pct"] or 0), 2),
                     mae=round(float(row["max_drawdown_pct"] or 0), 2),
+                    duration_minutes=round(duration_minutes, 1),
+                    realized_r=round(float(row["realized_r"] or 0), 2),
                 )
             )
         found.sort(key=lambda item: item.similarity, reverse=True)
         return found[:limit]
+
+    @staticmethod
+    def _wilson_interval(successes: float, n: float, z: float = 1.96) -> tuple[float, float]:
+        if n <= 0:
+            return 0.0, 0.0
+        p = max(0.0, min(1.0, successes / n))
+        denominator = 1 + z * z / n
+        centre = (p + z * z / (2 * n)) / denominator
+        margin = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n) / denominator
+        return max(0.0, (centre - margin) * 100), min(100.0, (centre + margin) * 100)
+
+    def weighted_stats(self, cases: list[SimilarCase]) -> dict[str, Any]:
+        """Similarity-weighted alpha estimate with honest uncertainty.
+
+        This is not a predictive model. It is a transparent historical estimate
+        whose effective sample size shrinks when matches are weak or uneven.
+        """
+        if not cases:
+            return {
+                "samples": 0, "effective_samples": 0.0, "tp1_rate": 0.0, "tp2_rate": 0.0,
+                "tp3_rate": 0.0, "stop_rate": 0.0, "tp1_low": 0.0, "tp1_high": 0.0,
+                "stop_low": 0.0, "stop_high": 0.0, "avg_similarity": 0.0,
+                "avg_mfe": 0.0, "avg_mae": 0.0, "avg_duration_minutes": 0.0,
+                "avg_realized_r": 0.0, "reliability": "Insufficient", "estimated": False,
+            }
+        weights = [max(0.05, (case.similarity / 100.0) ** 2) for case in cases]
+        total_w = sum(weights)
+        sum_w2 = sum(w * w for w in weights)
+        effective_n = (total_w * total_w / sum_w2) if sum_w2 else 0.0
+
+        def rate(attr: str) -> float:
+            return sum(w * (1.0 if getattr(case, attr) else 0.0) for w, case in zip(weights, cases)) / total_w
+
+        tp1 = rate("tp1_hit")
+        tp2 = rate("tp2_hit")
+        tp3 = rate("tp3_hit")
+        stop = rate("stop_hit")
+        tp1_low, tp1_high = self._wilson_interval(tp1 * effective_n, effective_n)
+        stop_low, stop_high = self._wilson_interval(stop * effective_n, effective_n)
+        reliability = self._reliability(int(effective_n))
+        return {
+            "samples": len(cases),
+            "effective_samples": round(effective_n, 1),
+            "tp1_rate": round(tp1 * 100, 1),
+            "tp2_rate": round(tp2 * 100, 1),
+            "tp3_rate": round(tp3 * 100, 1),
+            "stop_rate": round(stop * 100, 1),
+            "tp1_low": round(tp1_low, 1),
+            "tp1_high": round(tp1_high, 1),
+            "stop_low": round(stop_low, 1),
+            "stop_high": round(stop_high, 1),
+            "avg_similarity": round(sum(w * case.similarity for w, case in zip(weights, cases)) / total_w, 1),
+            "avg_mfe": round(sum(w * case.mfe for w, case in zip(weights, cases)) / total_w, 2),
+            "avg_mae": round(sum(w * case.mae for w, case in zip(weights, cases)) / total_w, 2),
+            "avg_duration_minutes": round(sum(w * case.duration_minutes for w, case in zip(weights, cases)) / total_w, 1),
+            "avg_realized_r": round(sum(w * case.realized_r for w, case in zip(weights, cases)) / total_w, 2),
+            "reliability": reliability,
+            "estimated": effective_n >= 3,
+        }
 
     def similar_stats(self, cases: list[SimilarCase]) -> dict[str, Any]:
         samples = len(cases)
@@ -245,7 +316,7 @@ class ProbabilityEngine:
             limit=50,
             minimum_similarity=25.0,
         )
-        similar = self.similar_stats(cases)
+        similar = self.weighted_stats(cases)
         source = "exact" if exact["samples"] >= self.MIN_DISPLAY_SAMPLE else "similar"
         chosen = exact if source == "exact" else similar
         return {
@@ -259,4 +330,12 @@ class ProbabilityEngine:
             "sufficient": bool(chosen.get("sufficient")),
             "avg_mfe": float(chosen.get("avg_mfe") or 0),
             "avg_mae": float(chosen.get("avg_mae") or 0),
+            "effective_samples": float(chosen.get("effective_samples") or chosen.get("samples") or 0),
+            "tp1_low": float(chosen.get("tp1_low") or 0),
+            "tp1_high": float(chosen.get("tp1_high") or 0),
+            "stop_low": float(chosen.get("stop_low") or 0),
+            "stop_high": float(chosen.get("stop_high") or 0),
+            "avg_duration_minutes": float(chosen.get("avg_duration_minutes") or 0),
+            "avg_realized_r": float(chosen.get("avg_realized_r") or 0),
+            "estimated": bool(chosen.get("estimated", int(chosen.get("samples") or 0) >= self.MIN_DISPLAY_SAMPLE)),
         }

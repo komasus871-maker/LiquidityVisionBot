@@ -12,11 +12,13 @@ from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.signal_history import SignalHistory
 from utils.price import fmt_price
+from services.trade_manager import TradeManager
 
 router = Router()
 history = SignalHistory()
 observations = ObservationHistory()
 candidates = CandidateHistory()
+trade_manager = TradeManager()
 
 
 def _status_icon(status: str) -> str:
@@ -56,6 +58,9 @@ def _event_details(raw: str | None) -> dict:
 @router.message(F.text == "📒 Journal")
 async def journal_handler(message: Message):
     user_id = message.from_user.id
+    # Journal is also an integrity checkpoint, so stale duplicate active plans
+    # never remain visible after a deployment or race.
+    trade_manager.reconcile_owner(user_id)
     stats = history.get_stats(user_id)
     recent = history.get_recent(user_id, limit=8)
     obs_recent = observations.recent(user_id, limit=5)

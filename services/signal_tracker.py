@@ -15,6 +15,7 @@ from database.signal_history import SignalHistory
 from services.market import Market
 from services.notifier import Notifier
 from services.trade_intelligence import TradeIntelligenceEngine
+from services.trade_manager import TradeManager
 
 
 class SignalTracker:
@@ -24,6 +25,7 @@ class SignalTracker:
         self.market = Market()
         self.notifier = Notifier(bot)
         self.intelligence = TradeIntelligenceEngine()
+        self.trade_manager = TradeManager()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.auto_break_even = os.getenv("AUTO_BREAK_EVEN_AFTER_TP1", "true").lower() in {"1", "true", "yes", "on"}
         self.progress_interval = max(300, int(os.getenv("TRADE_PROGRESS_INTERVAL", "900")))
@@ -77,6 +79,8 @@ class SignalTracker:
         runtime_started("signal_tracker")
         processed = errors = 0
         try:
+            # Repair any race/legacy duplicates before lifecycle processing.
+            self.trade_manager.reconcile_all()
             for signal in self.history.get_open():
                 processed += 1
                 try:
