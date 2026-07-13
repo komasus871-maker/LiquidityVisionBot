@@ -216,6 +216,62 @@ class SignalHistory:
                 self._add_event_conn(conn, signal_id, "INVALIDATED", price, {"reason": "direction_flip"})
         return len(rows)
 
+
+    def reconcile_open_market(self, owner_telegram_id: int | None, symbol: str, timeframe: str) -> dict[str, Any] | None:
+        """Keep exactly one open plan for a market and close legacy/race duplicates.
+
+        The earliest trade at the most advanced lifecycle stage wins. This preserves
+        the trade that was actually active first instead of replacing it with a later
+        opposite signal created by a race between monitor workers.
+        """
+        rows = self.get_open_market(owner_telegram_id, symbol, timeframe)
+        if not rows:
+            return None
+        priority = {"TP2": 5, "TP1": 4, "ACTIVE": 3, "TRIGGERED": 2, "WATCHING": 1}
+
+        def _time_key(row: dict[str, Any]) -> str:
+            return str(row.get("activated_at") or row.get("triggered_at") or row.get("created_at") or "9999")
+
+        top_priority = max(priority.get(str(row.get("status")), 0) for row in rows)
+        finalists = [row for row in rows if priority.get(str(row.get("status")), 0) == top_priority]
+        keep = min(finalists, key=lambda row: (_time_key(row), int(row.get("id") or 0)))
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            for row in rows:
+                if int(row["id"]) == int(keep["id"]):
+                    continue
+                price = row.get("current_price") if row.get("current_price") is not None else row.get("entry")
+                conn.execute(
+                    "UPDATE signals SET status='INVALIDATED', invalidated_at=?, closed_at=?, updated_at=?, result='DUPLICATE_CONSOLIDATED' WHERE id=?",
+                    (now, now, now, row["id"]),
+                )
+                self._add_event_conn(
+                    conn, int(row["id"]), "DUPLICATE_RECONCILED", price,
+                    {"kept_signal_id": int(keep["id"]), "reason": "market_integrity"},
+                )
+        return self.get_by_id(int(keep["id"]))
+
+    def manual_stop(self, signal_id: int, *, owner_telegram_id: int, reason: str = "MANUAL_STOP") -> dict[str, Any] | None:
+        """Stop tracking an open plan without counting it as a market stop-loss."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM signals WHERE id=? AND owner_telegram_id=?",
+                (signal_id, owner_telegram_id),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            if str(item.get("status")) not in OPEN_STATUSES:
+                return item
+            price = item.get("current_price") if item.get("current_price") is not None else item.get("entry")
+            conn.execute(
+                "UPDATE signals SET status='INVALIDATED', invalidated_at=?, closed_at=?, updated_at=?, exit_price=?, result=? WHERE id=?",
+                (now, now, now, price, reason, signal_id),
+            )
+            self._add_event_conn(conn, signal_id, "INVALIDATED", price, {"reason": reason})
+        return self.get_by_id(signal_id)
+
     def get_stats(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
         where = ""
         params: tuple[Any, ...] = ()

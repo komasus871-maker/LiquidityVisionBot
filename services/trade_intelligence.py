@@ -150,31 +150,52 @@ class TradeIntelligenceEngine:
         current_move = ((price - entry) / max(abs(entry), 1e-12) * 100) * (1 if side == "LONG" else -1)
         mfe_giveback = max(0.0, mfe - current_move)
 
-        confidence = base_confidence
-        confidence += max(-16, min(12, current_r * 9))
-        confidence -= max(0, risk_used - 60) * 0.28
-        confidence -= min(14, mfe_giveback * 3.0)
+        raw_confidence = base_confidence
+        raw_confidence += max(-16, min(12, current_r * 9))
+        raw_confidence -= max(0, risk_used - 60) * 0.28
+        raw_confidence -= min(14, mfe_giveback * 3.0)
         if signal.get("tp1_hit_at"):
-            confidence += 5
+            raw_confidence += 5
         if signal.get("break_even_at"):
-            confidence += 4
-        confidence = round(self._clamp(confidence), 1)
+            raw_confidence += 4
+        raw_confidence = self._clamp(raw_confidence)
 
-        previous_confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or confidence)
+        previous_confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or raw_confidence)
+        # Exponential smoothing prevents 40→78→43 oscillations on every candle.
+        # Near-stop states react faster so critical deterioration is never hidden.
+        alpha = 0.65 if risk_used >= 85 else 0.35
+        confidence = round(self._clamp(previous_confidence * (1 - alpha) + raw_confidence * alpha), 1)
         confidence_delta = round(confidence - previous_confidence, 1)
 
-        health_score = confidence
-        health_score -= max(0, risk_used - 55) * 0.35
-        health_score += max(-12, min(10, current_r * 7))
-        health_score -= min(18, mfe_giveback * 4)
-        health_score = round(self._clamp(health_score), 1)
-        health = self._health_label(health_score)
+        raw_health = confidence
+        raw_health -= max(0, risk_used - 55) * 0.35
+        raw_health += max(-12, min(10, current_r * 7))
+        raw_health -= min(18, mfe_giveback * 4)
+        raw_health = self._clamp(raw_health)
+        previous_health_score = float(signal.get("health_score") or raw_health)
+        health_score = round(self._clamp(previous_health_score * 0.65 + raw_health * 0.35), 1)
         previous_health = str(signal.get("trade_health") or "")
+        candidate_health = self._health_label(health_score)
+
+        # Four-point hysteresis around category borders keeps health from flipping
+        # STABLE↔WEAKENING every minute on tiny price moves.
+        health = candidate_health
+        if previous_health:
+            boundaries = {"🟢 HEALTHY": 78, "🟡 STABLE": 60, "🟠 WEAKENING": 42, "🔴 AT RISK": 0}
+            prev_min = boundaries.get(previous_health, 0)
+            if previous_health == "🟢 HEALTHY" and health_score >= 74:
+                health = previous_health
+            elif previous_health == "🟡 STABLE" and 56 <= health_score < 82:
+                health = previous_health
+            elif previous_health == "🟠 WEAKENING" and 38 <= health_score < 64:
+                health = previous_health
+            elif previous_health == "🔴 AT RISK" and health_score < 46:
+                health = previous_health
 
         reasons: list[str] = []
         if previous_health and previous_health != health:
             reasons.append(f"Trade health changed: {previous_health} → {health}")
-        threshold = 8.0
+        threshold = 10.0
         if abs(confidence_delta) >= threshold:
             reasons.append(f"Confidence changed: {previous_confidence:.0f}% → {confidence:.0f}%")
         previous_risk = float(signal.get("last_risk_used") or 0)

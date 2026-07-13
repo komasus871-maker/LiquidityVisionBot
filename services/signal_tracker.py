@@ -6,7 +6,7 @@ import logging
 import os
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 
@@ -249,7 +249,18 @@ class SignalTracker:
 
         if snapshot.alert_reasons:
             signature = "|".join(snapshot.alert_reasons)
-            if signature != str(signal.get("last_alert_signature") or ""):
+            last_alert_at = signal.get("last_intelligence_notified_at")
+            cooldown_ok = True
+            if last_alert_at:
+                try:
+                    parsed = datetime.fromisoformat(str(last_alert_at))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    cooldown_ok = datetime.now(timezone.utc) - parsed >= timedelta(minutes=15)
+                except (TypeError, ValueError):
+                    cooldown_ok = True
+            critical = snapshot.health == "🔴 AT RISK" or any("90%" in reason for reason in snapshot.alert_reasons)
+            if signature != str(signal.get("last_alert_signature") or "") and (cooldown_ok or critical):
                 await self.notifier.smart_alert(signal, price, snapshot.alert_reasons)
                 alerted_at = now
                 alert_fields = {

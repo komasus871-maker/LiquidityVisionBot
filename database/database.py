@@ -323,7 +323,12 @@ def create_tables() -> None:
                 ORDER BY id DESC
             """, (owner_key, symbol, timeframe)).fetchall()
             rows = [dict(r) for r in rows]
-            keep = max(rows, key=lambda r: (priority.get(str(r.get("status")), 0), int(r.get("id") or 0)))
+            top_priority = max(priority.get(str(r.get("status")), 0) for r in rows)
+            finalists = [r for r in rows if priority.get(str(r.get("status")), 0) == top_priority]
+            keep = min(
+                finalists,
+                key=lambda r: (str(r.get("activated_at") or r.get("triggered_at") or r.get("created_at") or "9999"), int(r.get("id") or 0)),
+            )
             for row in rows:
                 if int(row["id"]) == int(keep["id"]):
                     continue
