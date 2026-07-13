@@ -1,22 +1,20 @@
+from __future__ import annotations
+
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from database.database import DATABASE_NAME
+from database.database import connect
 
 OPEN_STATUSES = ("WATCHING", "TRIGGERED", "ACTIVE", "TP1", "TP2")
-CLOSED_STATUSES = ("TP3", "STOP", "INVALIDATED", "EXPIRED")
+CLOSED_STATUSES = ("TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED")
 
 
 class SignalHistory:
-    """SQLite repository for signals, lifecycle events and statistics."""
+    """Repository for signals, lifecycle events and statistics."""
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DATABASE_NAME, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+    def _connect(self):
+        return connect()
 
     def find_duplicate(self, owner_telegram_id: int | None, symbol: str, timeframe: str, side: str, hours: int = 24):
         threshold = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -32,155 +30,112 @@ class SignalHistory:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_open_market(self, owner_telegram_id: int | None, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM signals
+                   WHERE COALESCE(owner_telegram_id,0)=COALESCE(?,0)
+                     AND symbol=? AND timeframe=?
+                     AND status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
+                   ORDER BY CASE status
+                     WHEN 'TP2' THEN 5 WHEN 'TP1' THEN 4 WHEN 'ACTIVE' THEN 3
+                     WHEN 'TRIGGERED' THEN 2 ELSE 1 END DESC, id DESC""",
+                (owner_telegram_id, symbol, timeframe),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def invalidate_open(self, signal_id: int, reason: str, price: float | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute("SELECT current_price,entry,status FROM signals WHERE id=?", (signal_id,)).fetchone()
+            if not row or str(row[2]) not in OPEN_STATUSES:
+                return
+            event_price = price if price is not None else (row[0] if row[0] is not None else row[1])
+            conn.execute(
+                "UPDATE signals SET status='INVALIDATED', invalidated_at=?, closed_at=?, updated_at=?, result=? WHERE id=?",
+                (now, now, now, reason, signal_id),
+            )
+            self._add_event_conn(conn, signal_id, "DIRECTION_FLIPPED" if reason == "DIRECTION_FLIP" else "INVALIDATED", event_price, {"reason": reason})
+
     def save(self, signal: dict[str, Any]) -> int:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         expires_at = signal.get("expires_at") or (now_dt + timedelta(hours=72)).isoformat()
         with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO signals (
-                    owner_telegram_id, notification_chat_id,
-                    symbol, timeframe, side, status, created_at, updated_at, expires_at,
-                    entry, preferred_entry_low, preferred_entry_high,
-                    stop, tp1, tp2, tp3, rr, confidence,
-                    bull_score, bear_score, recommendation, setup_key,
-                    features_json, reasons_json, max_profit_pct, max_drawdown_pct,
-                    next_check_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
-                """,
-                (
-                    signal.get("owner_telegram_id"), signal.get("notification_chat_id"),
-                    signal["symbol"], signal["timeframe"], signal["side"], signal.get("status", "WATCHING"),
-                    now, now, expires_at, signal["entry"], signal.get("preferred_entry_low"),
-                    signal.get("preferred_entry_high"), signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"],
-                    signal["rr"], signal["confidence"], signal["bull_score"], signal["bear_score"],
-                    signal["recommendation"], signal["setup_key"],
-                    json.dumps(signal["features"], ensure_ascii=False),
-                    json.dumps(signal["reasons"], ensure_ascii=False),
-                    now,
-                ),
+            params = (
+                signal.get("owner_telegram_id"), signal.get("notification_chat_id"), signal["symbol"],
+                signal["timeframe"], signal["side"], signal.get("status", "WATCHING"), now, now, expires_at,
+                signal["entry"], signal.get("preferred_entry_low"), signal.get("preferred_entry_high"),
+                signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"],
+                signal["confidence"], signal["bull_score"], signal["bear_score"], signal["recommendation"],
+                signal["setup_key"], json.dumps(signal["features"], ensure_ascii=False),
+                json.dumps(signal["reasons"], ensure_ascii=False),
             )
-            signal_id = int(cursor.lastrowid)
+            if conn.postgres:
+                row = conn.execute(
+                    """
+                    INSERT INTO signals (
+                        owner_telegram_id, notification_chat_id, symbol, timeframe, side, status,
+                        created_at, updated_at, expires_at, entry, preferred_entry_low, preferred_entry_high,
+                        stop, tp1, tp2, tp3, rr, confidence, bull_score, bear_score, recommendation,
+                        setup_key, features_json, reasons_json, max_profit_pct, max_drawdown_pct
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0) RETURNING id
+                    """,
+                    params,
+                ).fetchone()
+                signal_id = int(row[0])
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO signals (
+                        owner_telegram_id, notification_chat_id, symbol, timeframe, side, status,
+                        created_at, updated_at, expires_at, entry, preferred_entry_low, preferred_entry_high,
+                        stop, tp1, tp2, tp3, rr, confidence, bull_score, bear_score, recommendation,
+                        setup_key, features_json, reasons_json, max_profit_pct, max_drawdown_pct
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
+                    """,
+                    params,
+                )
+                signal_id = int(cur.lastrowid)
             self._add_event_conn(conn, signal_id, "CREATED", signal.get("entry"), {"status": signal.get("status", "WATCHING")})
             return signal_id
 
     def refresh_duplicate(self, signal_id: int, signal: dict[str, Any]) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute(
-                """UPDATE signals SET updated_at=?, recommendation=?, confidence=?, bull_score=?, bear_score=?,
-                   preferred_entry_low=?, preferred_entry_high=?, stop=?, tp1=?, tp2=?, tp3=?, rr=?,
-                   features_json=?, reasons_json=?, next_check_at=? WHERE id=?""",
-                (now, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
-                 signal.get("preferred_entry_low"), signal.get("preferred_entry_high"), signal["stop"], signal["tp1"],
-                 signal["tp2"], signal["tp3"], signal["rr"], json.dumps(signal["features"], ensure_ascii=False),
-                 json.dumps(signal["reasons"], ensure_ascii=False), now, signal_id),
+            existing_row = conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
+            if not existing_row:
+                return signal_id
+            existing = dict(existing_row)
+            # Once price entered the zone, the trading plan is immutable.
+            if existing.get("status") in {"TRIGGERED", "ACTIVE", "TP1", "TP2"}:
+                conn.execute(
+                    "UPDATE signals SET updated_at=?, recommendation=?, confidence=?, bull_score=?, bear_score=?, features_json=?, reasons_json=? WHERE id=?",
+                    (now, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
+                     json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False), signal_id),
+                )
+                return signal_id
+
+            desired_status = signal.get("status", "WATCHING")
+            old_plan = {k: existing.get(k) for k in ("entry","preferred_entry_low","preferred_entry_high","stop","tp1","tp2","tp3")}
+            new_plan = {k: signal.get(k) for k in old_plan}
+            changed = any(
+                old_plan[k] is None != (new_plan[k] is None) or
+                (old_plan[k] is not None and new_plan[k] is not None and abs(float(old_plan[k])-float(new_plan[k])) > max(abs(float(old_plan[k]))*1e-6, 1e-12))
+                for k in old_plan
             )
-            self._add_event_conn(conn, signal_id, "REFRESHED", signal.get("entry"), {})
+            conn.execute(
+                """UPDATE signals SET updated_at=?, status=?, recommendation=?, confidence=?, bull_score=?, bear_score=?,
+                   entry=?, preferred_entry_low=?, preferred_entry_high=?, stop=?, tp1=?, tp2=?, tp3=?, rr=?,
+                   features_json=?, reasons_json=? WHERE id=?""",
+                (now, desired_status, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
+                 signal["entry"], signal.get("preferred_entry_low"), signal.get("preferred_entry_high"), signal["stop"],
+                 signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"],
+                 json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False), signal_id),
+            )
+            if changed:
+                self._add_event_conn(conn, signal_id, "PLAN_UPDATED", signal.get("entry"), {"old": old_plan, "new": new_plan})
         return signal_id
-
-    def claim_due(self, worker_id: str, limit: int = 25, lease_seconds: int = 90) -> list[dict[str, Any]]:
-        """Atomically lease due signals to one monitor instance.
-
-        This prevents duplicate lifecycle transitions when Render briefly runs two
-        instances during a deploy or a worker restarts mid-cycle.
-        """
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat()
-        lock_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                """SELECT id FROM signals
-                   WHERE status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
-                     AND (next_check_at IS NULL OR next_check_at <= ?)
-                     AND (monitoring_lock_until IS NULL OR monitoring_lock_until < ?)
-                   ORDER BY COALESCE(next_check_at, created_at) ASC
-                   LIMIT ?""",
-                (now, now, limit),
-            ).fetchall()
-            ids = [int(row["id"]) for row in rows]
-            if not ids:
-                conn.commit()
-                return []
-            placeholders = ",".join("?" for _ in ids)
-            conn.execute(
-                f"""UPDATE signals
-                    SET monitoring_worker_id=?, monitoring_lock_until=?
-                    WHERE id IN ({placeholders})""",
-                (worker_id, lock_until, *ids),
-            )
-            claimed = conn.execute(
-                f"SELECT * FROM signals WHERE id IN ({placeholders}) ORDER BY id",
-                ids,
-            ).fetchall()
-            conn.commit()
-        return [dict(row) for row in claimed]
-
-    def release_claim(
-        self,
-        signal_id: int,
-        worker_id: str,
-        *,
-        next_check_seconds: int = 60,
-        error: str | None = None,
-    ) -> None:
-        now_dt = datetime.now(timezone.utc)
-        next_check = (now_dt + timedelta(seconds=max(10, next_check_seconds))).isoformat()
-        with self._connect() as conn:
-            if error:
-                conn.execute(
-                    """UPDATE signals SET monitoring_worker_id=NULL, monitoring_lock_until=NULL,
-                       last_checked_at=?, next_check_at=?, consecutive_errors=COALESCE(consecutive_errors,0)+1,
-                       last_monitor_error=? WHERE id=? AND monitoring_worker_id=?""",
-                    (now_dt.isoformat(), next_check, error[:1000], signal_id, worker_id),
-                )
-            else:
-                conn.execute(
-                    """UPDATE signals SET monitoring_worker_id=NULL, monitoring_lock_until=NULL,
-                       last_checked_at=?, next_check_at=?, consecutive_errors=0, last_monitor_error=NULL
-                       WHERE id=? AND monitoring_worker_id=?""",
-                    (now_dt.isoformat(), next_check, signal_id, worker_id),
-                )
-
-    def transition_if_current(
-        self,
-        signal_id: int,
-        expected_statuses: tuple[str, ...],
-        new_status: str,
-        price: float,
-        details: dict[str, Any] | None = None,
-        **fields: Any,
-    ) -> bool:
-        """Compare-and-set lifecycle transition with event creation in one transaction."""
-        allowed = {
-            "current_price", "max_profit_pct", "max_drawdown_pct", "tp1_hit_at", "tp2_hit_at",
-            "tp3_hit_at", "stop_hit_at", "closed_at", "triggered_at", "activated_at", "invalidated_at",
-            "last_notified_status",
-        }
-        updates = {key: value for key, value in fields.items() if key in allowed}
-        updates["status"] = new_status
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        placeholders = ",".join("?" for _ in expected_statuses)
-        sql_set = ", ".join(f"{key}=?" for key in updates)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            current = conn.execute("SELECT status FROM signals WHERE id=?", (signal_id,)).fetchone()
-            if not current or current["status"] not in expected_statuses:
-                conn.rollback()
-                return False
-            cursor = conn.execute(
-                f"UPDATE signals SET {sql_set} WHERE id=? AND status IN ({placeholders})",
-                (*updates.values(), signal_id, *expected_statuses),
-            )
-            if cursor.rowcount != 1:
-                conn.rollback()
-                return False
-            event_details = {"from": current["status"], **(details or {})}
-            self._add_event_conn(conn, signal_id, new_status, price, event_details)
-            conn.commit()
-            return True
 
     def get_open(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -217,7 +172,13 @@ class SignalHistory:
         allowed = {
             "status", "current_price", "max_profit_pct", "max_drawdown_pct", "tp1_hit_at", "tp2_hit_at",
             "tp3_hit_at", "stop_hit_at", "closed_at", "triggered_at", "activated_at", "invalidated_at",
-            "last_notified_status", "last_checked_at", "next_check_at", "consecutive_errors", "last_monitor_error",
+            "last_notified_status", "effective_stop", "break_even_at", "exit_price",
+            "realized_r", "result", "highest_price", "lowest_price",
+            "last_progress_notified_at", "last_progress_bucket",
+            "pre_activation_max_profit_pct", "pre_activation_max_drawdown_pct", "plan_locked_at",
+            "dynamic_confidence", "previous_confidence", "trade_health", "health_score",
+            "intelligence_json", "last_intelligence_notified_at", "last_alert_signature",
+            "last_risk_used", "last_mfe_giveback",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -225,12 +186,120 @@ class SignalHistory:
         with self._connect() as conn:
             conn.execute(f"UPDATE signals SET {sql} WHERE id=?", (*updates.values(), signal_id))
 
-    def record_monitor_run(self, worker_id: str, checked: int, succeeded: int, failed: int, duration_ms: int) -> None:
+    def get_events(self, signal_id: int) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM signal_events WHERE signal_id=? ORDER BY id ASC",
+                (signal_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close_opposite_pending(self, owner_telegram_id: int | None, symbol: str, timeframe: str, side: str) -> int:
+        """Invalidate stale opposite pre-entry ideas before promoting a new direction."""
+        opposite = "SHORT" if side == "LONG" else "LONG"
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id,current_price,entry FROM signals
+                   WHERE COALESCE(owner_telegram_id,0)=COALESCE(?,0)
+                     AND symbol=? AND timeframe=? AND side=?
+                     AND status IN ('WATCHING','TRIGGERED')""",
+                (owner_telegram_id, symbol, timeframe, opposite),
+            ).fetchall()
+            for row in rows:
+                signal_id = int(row[0])
+                price = row[1] if row[1] is not None else row[2]
+                conn.execute(
+                    "UPDATE signals SET status='INVALIDATED', invalidated_at=?, closed_at=?, updated_at=?, result='DIRECTION_FLIP' WHERE id=?",
+                    (now, now, now, signal_id),
+                )
+                self._add_event_conn(conn, signal_id, "INVALIDATED", price, {"reason": "direction_flip"})
+        return len(rows)
+
+
+    def save_intelligence_snapshot(self, signal_id: int, snapshot: dict[str, Any]) -> None:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO monitor_runs(worker_id,checked_count,succeeded_count,failed_count,duration_ms,created_at)
-                   VALUES(?,?,?,?,?,?)""",
-                (worker_id, checked, succeeded, failed, duration_ms, datetime.now(timezone.utc).isoformat()),
+                """INSERT INTO intelligence_snapshots(
+                    signal_id,created_at,confidence,confidence_delta,health,health_score,
+                    trend,structure,liquidity,momentum,risk_used,distance_to_stop,mfe_giveback,
+                    commentary,reasons_json,component_deltas_json,snapshot_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    signal_id, snapshot.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                    float(snapshot.get("confidence") or 0), float(snapshot.get("confidence_delta") or 0),
+                    str(snapshot.get("health") or "🟡 STABLE"), float(snapshot.get("health_score") or 0),
+                    float(snapshot.get("trend") or 50), float(snapshot.get("structure") or 50),
+                    float(snapshot.get("liquidity") or 50), float(snapshot.get("momentum") or 50),
+                    float(snapshot.get("risk_used") or 0), float(snapshot.get("distance_to_stop") or 0),
+                    float(snapshot.get("mfe_giveback") or 0), str(snapshot.get("commentary") or ""),
+                    json.dumps(snapshot.get("alert_reasons") or [], ensure_ascii=False),
+                    json.dumps(snapshot.get("component_deltas") or {}, ensure_ascii=False),
+                    json.dumps(snapshot, ensure_ascii=False),
+                ),
+            )
+
+    def get_latest_intelligence_snapshot(self, signal_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT snapshot_json FROM intelligence_snapshots WHERE signal_id=? ORDER BY id DESC LIMIT 1",
+                (signal_id,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row[0] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    def get_intelligence_timeline(self, signal_id: int, limit: int = 12) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT created_at,confidence,confidence_delta,health,health_score,
+                          trend,structure,liquidity,momentum,reasons_json,component_deltas_json
+                   FROM intelligence_snapshots WHERE signal_id=? ORDER BY id DESC LIMIT ?""",
+                (signal_id, limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def save_learning_sample(self, signal_id: int) -> None:
+        signal = self.get_by_id(signal_id)
+        if not signal or str(signal.get("status")) not in CLOSED_STATUSES:
+            return
+        snapshot = self.get_latest_intelligence_snapshot(signal_id) or {}
+        created = signal.get("activated_at") or signal.get("triggered_at") or signal.get("created_at")
+        ended = signal.get("closed_at")
+        duration_minutes = 0
+        try:
+            start_dt = datetime.fromisoformat(str(created))
+            end_dt = datetime.fromisoformat(str(ended))
+            duration_minutes = max(0, int((end_dt - start_dt).total_seconds() // 60))
+        except (TypeError, ValueError):
+            pass
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO learning_samples(
+                    signal_id,symbol,timeframe,side,setup_key,result,status,duration_minutes,
+                    realized_r,mfe,mae,trend,structure,liquidity,momentum,confidence,
+                    health_score,features_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(signal_id) DO UPDATE SET
+                    result=excluded.result,status=excluded.status,duration_minutes=excluded.duration_minutes,
+                    realized_r=excluded.realized_r,mfe=excluded.mfe,mae=excluded.mae,
+                    trend=excluded.trend,structure=excluded.structure,liquidity=excluded.liquidity,
+                    momentum=excluded.momentum,confidence=excluded.confidence,
+                    health_score=excluded.health_score,features_json=excluded.features_json,
+                    created_at=excluded.created_at""",
+                (
+                    signal_id, signal.get("symbol"), signal.get("timeframe"), signal.get("side"),
+                    signal.get("setup_key"), signal.get("result"), signal.get("status"), duration_minutes,
+                    float(signal.get("realized_r") or 0), float(signal.get("max_profit_pct") or 0),
+                    float(signal.get("max_drawdown_pct") or 0), float(snapshot.get("trend") or 50),
+                    float(snapshot.get("structure") or 50), float(snapshot.get("liquidity") or 50),
+                    float(snapshot.get("momentum") or 50), float(snapshot.get("confidence") or 0),
+                    float(snapshot.get("health_score") or 0), signal.get("features_json") or "{}",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
 
     def get_stats(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
@@ -242,18 +311,20 @@ class SignalHistory:
         with self._connect() as conn:
             row = conn.execute(f"""
                 SELECT COUNT(*) total,
-                    SUM(status='WATCHING') watching_count,
-                    SUM(status='TRIGGERED') triggered_count,
-                    SUM(status IN ('ACTIVE','TP1','TP2')) active_count,
-                    SUM(status IN ('TP3','STOP','INVALIDATED','EXPIRED')) closed_count,
-                    SUM(tp1_hit_at IS NOT NULL) tp1_hits,
-                    SUM(tp2_hit_at IS NOT NULL) tp2_hits,
-                    SUM(tp3_hit_at IS NOT NULL) tp3_hits,
-                    SUM(stop_hit_at IS NOT NULL) stop_hits,
-                    SUM(status='INVALIDATED') invalidated_count,
-                    SUM(status='EXPIRED') expired_count,
+                    SUM(CASE WHEN status='WATCHING' THEN 1 ELSE 0 END) watching_count,
+                    SUM(CASE WHEN status='TRIGGERED' THEN 1 ELSE 0 END) triggered_count,
+                    SUM(CASE WHEN status IN ('ACTIVE','TP1','TP2') THEN 1 ELSE 0 END) active_count,
+                    SUM(CASE WHEN status IN ('TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED') THEN 1 ELSE 0 END) closed_count,
+                    SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp1_hits,
+                    SUM(CASE WHEN tp2_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp2_hits,
+                    SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp3_hits,
+                    SUM(CASE WHEN status='STOP' THEN 1 ELSE 0 END) stop_hits,
+                    SUM(CASE WHEN status='BREAKEVEN' THEN 1 ELSE 0 END) breakeven_count,
+                    SUM(CASE WHEN status='INVALIDATED' THEN 1 ELSE 0 END) invalidated_count,
+                    SUM(CASE WHEN status='EXPIRED' THEN 1 ELSE 0 END) expired_count,
                     AVG(CASE WHEN closed_at IS NOT NULL THEN max_profit_pct END) avg_mfe,
-                    AVG(CASE WHEN closed_at IS NOT NULL THEN max_drawdown_pct END) avg_mae
+                    AVG(CASE WHEN closed_at IS NOT NULL THEN max_drawdown_pct END) avg_mae,
+                    AVG(CASE WHEN closed_at IS NOT NULL THEN realized_r END) avg_realized_r
                 FROM signals {where}
             """, params).fetchone()
         data = dict(row)

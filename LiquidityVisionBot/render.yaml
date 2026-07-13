@@ -1,18 +1,42 @@
 services:
-  - type: worker
-    name: liquidity-vision-bot
+  - type: web
+    name: liquidityvisionbot-1
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: BOT_MODE
+        value: webhook
       - key: BOT_TOKEN
         sync: false
-      - key: DATA_DIR
-        value: data
+      - key: DATABASE_URL
+        sync: false
+      - key: REQUIRE_PERSISTENT_DB
+        value: "true"
+      - key: PGSSLMODE
+        value: require
+      - key: MONITOR_CRON_SECRET
+        sync: false
+      - key: WEBHOOK_BASE_URL
+        value: https://liquidityvisionbot-1.onrender.com
       - key: SIGNAL_CHECK_INTERVAL
         value: "60"
-      - key: SIGNAL_MONITOR_BATCH
-        value: "25"
-      - key: SIGNAL_MONITOR_CONCURRENCY
-        value: "5"
+      - key: OBSERVATION_CHECK_INTERVAL
+        value: "300"
+      - key: WATCHLIST_CHECK_INTERVAL
+        value: "300"
+      - key: ANALYSIS_CONCURRENCY
+        value: "2"
+      - key: SCANNER_CONCURRENCY
+        value: "4"
+      - key: SCANNER_CACHE_TTL
+        value: "30"
+      - key: PREMIUM_STARS
+        value: "199"
+      - key: PREMIUM_DAYS
+        value: "30"

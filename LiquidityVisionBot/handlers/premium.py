@@ -13,6 +13,7 @@ PAYLOAD = f"liquidity_vision_premium_{PREMIUM_DAYS}d"
 async def premium_screen(message: Message):
     add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     status = service.status(message.from_user.id)
+    history = service.payment_history(message.from_user.id)
     if status["active"]:
         await message.answer(f"""
 👑 <b>Liquidity Vision Premium</b>
@@ -20,6 +21,7 @@ async def premium_screen(message: Message):
 Статус: ✅ Активен
 Тариф: <b>{status['tier']}</b>
 До: <code>{status['until']}</code>
+Последних платежей: <b>{len(history)}</b>
 
 Включено:
 • расширенная история и статистика;
@@ -28,13 +30,30 @@ async def premium_screen(message: Message):
 • будущие probability и AI review-модули.
 """, parse_mode="HTML")
         return
+    await message.answer(
+        f"""👑 <b>Liquidity Vision Premium</b>
+
+Current plan: <b>FREE</b>
+
+<b>FREE</b>
+• до 20 отслеживаемых сетапов;
+• базовая история и Journal;
+• Scanner, Market, Fear и News;
+• базовый Explain.
+
+<b>PREMIUM — {PREMIUM_STARS} ⭐ / {PREMIUM_DAYS} дней</b>
+• до 200 отслеживаемых сетапов;
+• полная история;
+• Explain Pro;
+• расширенная статистика;
+• приоритетные lifecycle-уведомления;
+• будущие Probability, Similarity и Export-модули.
+""", parse_mode="HTML")
     await message.answer_invoice(
         title="Liquidity Vision Premium",
-        description=f"Premium на {PREMIUM_DAYS} дней: расширенная статистика, уведомления и будущие PRO-модули.",
-        payload=PAYLOAD,
-        currency="XTR",
-        prices=[LabeledPrice(label=f"Premium {PREMIUM_DAYS} дней", amount=PREMIUM_STARS)],
-        provider_token="",
+        description=f"Premium на {PREMIUM_DAYS} дней: расширенная статистика, уведомления и PRO-модули.",
+        payload=PAYLOAD, currency="XTR",
+        prices=[LabeledPrice(label=f"Premium {PREMIUM_DAYS} дней", amount=PREMIUM_STARS)], provider_token="",
     )
     await message.answer(f"💳 <b>Оплата криптовалютой</b>\n\n{CRYPTO_PAYMENT_TEXT}", parse_mode="HTML")
 
@@ -60,6 +79,10 @@ async def successful_payment(message: Message):
     payment = message.successful_payment
     if payment.invoice_payload != PAYLOAD or payment.currency != "XTR":
         return
-    service.record_payment(message.from_user.id, payment)
+    created = service.record_payment(message.from_user.id, payment)
+    if not created:
+        status = service.status(message.from_user.id)
+        await message.answer(f"ℹ️ Этот платёж уже обработан. Premium до: <code>{status.get('until')}</code>", parse_mode="HTML")
+        return
     until = service.grant(message.from_user.id)
     await message.answer(f"✅ <b>Premium активирован</b>\n\nДоступ действует до: <code>{until}</code>", parse_mode="HTML")

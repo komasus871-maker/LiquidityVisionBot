@@ -1,24 +1,56 @@
 from typing import Any
+import re
 from database.signal_history import SignalHistory
 from services.premium import PremiumService
+from database.observation_history import ObservationHistory
+from database.candidate_history import CandidateHistory
 
 
 class SignalRecorder:
     def __init__(self, history: SignalHistory | None = None):
         self.history = history or SignalHistory()
         self.premium = PremiumService()
+        self.observations = ObservationHistory()
+        self.candidates = CandidateHistory()
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
-        parts = [analysis.get("structure"), analysis.get("choch"), analysis.get("sweep"), analysis.get("order_block"), analysis.get("premium", {}).get("zone")]
-        return " | ".join(str(p).replace("✅", "").strip() for p in parts if p)
+        parts = [
+            analysis.get("structure"), analysis.get("choch"), analysis.get("sweep"),
+            analysis.get("order_block"), analysis.get("premium", {}).get("zone"),
+        ]
+        normalized = []
+        for part in parts:
+            if not part:
+                continue
+            text = str(part).replace("✅", "").strip()
+            text = re.sub(r"\([^)]*\)", "", text)
+            text = re.sub(r"[-+]?\d+(?:\.\d+)?", "", text)
+            text = re.sub(r"\s+", " ", text).strip(" -|")
+            normalized.append(text)
+        return " | ".join(normalized)
 
     def record(self, *, symbol: str, timeframe: str, analysis: dict[str, Any], owner_telegram_id: int | None = None,
                notification_chat_id: int | None = None, min_confidence: float = 54) -> int | None:
+        setup_key = self._setup_key(analysis)
+        observation_id = self.observations.save_or_update(
+            owner_telegram_id=owner_telegram_id, notification_chat_id=notification_chat_id,
+            symbol=symbol, timeframe=timeframe, analysis=analysis, setup_key=setup_key,
+        )
+        analysis["observation_id"] = observation_id
+
         executable = {"🟢 READY", "🟡 WAIT FOR TRIGGER", "🎯 WAIT FOR PULLBACK", "🔄 REVERSAL WATCH"}
-        if analysis.get("execution_status") not in executable:
+        status_name = analysis.get("execution_status")
+        status_minimums = {
+            "🟢 READY": 58,
+            "🟡 WAIT FOR TRIGGER": 56,
+            "🎯 WAIT FOR PULLBACK": 50,
+            "🔄 REVERSAL WATCH": 52,
+        }
+        if status_name not in executable:
             return None
-        if analysis.get("confidence", 0) < min_confidence or analysis.get("rr", 0) < 1.35:
+        required = max(min_confidence if status_name == "🟢 READY" else 0, status_minimums[status_name])
+        if analysis.get("confidence", 0) < required or analysis.get("rr", 0) < 1.35:
             return None
 
         if owner_telegram_id is not None:
@@ -28,12 +60,14 @@ class SignalRecorder:
             if open_count >= limit:
                 return None
 
-        status = "ACTIVE" if analysis.get("execution_status") == "🟢 READY" else "WATCHING"
+        status = "ACTIVE" if status_name == "🟢 READY" else "WATCHING"
         features = {key: analysis.get(key) for key in (
             "trend", "structure", "bos", "choch", "liquidity", "sweep", "order_block", "breaker",
             "mitigation", "fvg", "premium", "volume", "displacement", "rsi", "macd", "ema50", "ema200",
             "market_bias", "execution_status", "triggers", "direction_score", "entry_quality", "risk_quality",
-            "execution_readiness", "opportunity_category"
+            "execution_readiness", "opportunity_category", "direction_breakdown",
+            "strongest_drivers", "biggest_blockers", "ai_grade", "execution_bias",
+            "final_verdict", "score_components"
         )}
         payload = {
             "owner_telegram_id": owner_telegram_id, "notification_chat_id": notification_chat_id,
@@ -42,10 +76,60 @@ class SignalRecorder:
             "preferred_entry_high": analysis.get("preferred_entry_high"), "stop": analysis["stop"],
             "tp1": analysis["tp1"], "tp2": analysis["tp2"], "tp3": analysis["tp3"], "rr": analysis["rr"],
             "confidence": analysis["confidence"], "bull_score": analysis["bull_score"], "bear_score": analysis["bear_score"],
-            "recommendation": analysis["recommendation"], "setup_key": self._setup_key(analysis),
+            "recommendation": analysis["recommendation"], "setup_key": setup_key,
             "features": features, "reasons": analysis["reasons"], "status": status,
         }
-        duplicate = self.history.find_duplicate(owner_telegram_id, payload["symbol"], timeframe, payload["side"])
+        # One market may have only one open Trade. Opposite analysis becomes a Candidate
+        # while a live trade exists; it never creates a conflicting second signal.
+        open_market = self.history.get_open_market(owner_telegram_id, payload["symbol"], timeframe)
+        live_trade = next((x for x in open_market if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
+        same_side = [x for x in open_market if x.get("side") == payload["side"]]
+        opposite = [x for x in open_market if x.get("side") != payload["side"]]
+
+        if live_trade:
+            if live_trade.get("side") == payload["side"]:
+                # Refresh metadata only; the locked trade plan remains immutable.
+                signal_id = self.history.refresh_duplicate(int(live_trade["id"]), payload)
+                self.observations.promote(observation_id, signal_id)
+                self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
+                return signal_id
+            if owner_telegram_id is None:
+                return None
+            self.candidates.upsert(
+                owner_telegram_id=owner_telegram_id,
+                notification_chat_id=notification_chat_id,
+                symbol=payload["symbol"],
+                timeframe=timeframe,
+                side=payload["side"],
+                observation_id=observation_id,
+                blocked_by_signal_id=int(live_trade["id"]),
+                snapshot={"analysis": analysis, "payload": payload},
+            )
+            return None
+
+        # Pending direction flips replace the old pending plan. Same-side repeats update
+        # the existing row instead of creating another Signal ID.
+        for stale in opposite:
+            self.history.invalidate_open(int(stale["id"]), "DIRECTION_FLIP")
+        duplicate = same_side[0] if same_side else None
+        for extra in same_side[1:]:
+            self.history.invalidate_open(int(extra["id"]), "DUPLICATE_CONSOLIDATED")
         if duplicate:
-            return self.history.refresh_duplicate(duplicate["id"], payload)
-        return self.history.save(payload)
+            signal_id = self.history.refresh_duplicate(int(duplicate["id"]), payload)
+        else:
+            signal_id = self.history.save(payload)
+            if status == "ACTIVE":
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc).isoformat()
+                self.history.update_lifecycle(
+                    signal_id,
+                    activated_at=now,
+                    current_price=float(payload["entry"]),
+                    effective_stop=float(payload["stop"]),
+                    highest_price=float(payload["entry"]),
+                    lowest_price=float(payload["entry"]),
+                )
+        self.observations.promote(observation_id, signal_id)
+        if owner_telegram_id is not None:
+            self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
+        return signal_id
