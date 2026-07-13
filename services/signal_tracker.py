@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -7,8 +9,8 @@ from datetime import datetime, timezone
 
 from aiogram import Bot
 
+from database.database import acquire_lease, release_lease, runtime_finished, runtime_started
 from database.signal_history import SignalHistory
-from database.database import acquire_lease, release_lease, runtime_started, runtime_finished
 from services.market import Market
 from services.notifier import Notifier
 
@@ -20,6 +22,10 @@ class SignalTracker:
         self.market = Market()
         self.notifier = Notifier(bot)
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self.auto_break_even = os.getenv("AUTO_BREAK_EVEN_AFTER_TP1", "true").lower() in {"1", "true", "yes", "on"}
+        self.progress_interval = max(300, int(os.getenv("TRADE_PROGRESS_INTERVAL", "900")))
+        self.progress_step = max(10, int(os.getenv("TRADE_PROGRESS_STEP", "20")))
+        self._stop = asyncio.Event()
 
     @staticmethod
     def _reached(side: str, price: float, level: float) -> bool:
@@ -46,6 +52,22 @@ class SignalTracker:
         aligned = close_price > open_price if side == "LONG" else close_price < open_price
         return aligned and body_ratio >= 0.45
 
+    @staticmethod
+    def _r_multiple(side: str, entry: float, stop: float, price: float) -> float:
+        risk = abs(entry - stop)
+        if risk <= 0:
+            return 0.0
+        move = (price - entry) if side == "LONG" else (entry - price)
+        return move / risk
+
+    @staticmethod
+    def _target_progress(side: str, entry: float, target: float, price: float) -> float:
+        distance = abs(target - entry)
+        if distance <= 0:
+            return 0.0
+        move = (price - entry) if side == "LONG" else (entry - price)
+        return max(0.0, min(100.0, move / distance * 100))
+
     async def check_once(self) -> dict[str, int | bool]:
         if not acquire_lease("signal_tracker", self.owner_id, max(self.interval_seconds * 2, 120)):
             return {"skipped": True, "processed": 0, "errors": 0}
@@ -55,7 +77,7 @@ class SignalTracker:
             for signal in self.history.get_open():
                 processed += 1
                 try:
-                    df = await asyncio.wait_for(self.market.get_klines(signal["symbol"], "1m", 5), timeout=25)
+                    df = await asyncio.wait_for(self.market.get_klines(signal["symbol"], "1m", 6), timeout=25)
                     price = float(df["close"].iloc[-1])
                     await self._update(signal, price, df)
                 except Exception:
@@ -72,12 +94,39 @@ class SignalTracker:
     async def _transition(self, signal: dict, event: str, price: float, **fields) -> None:
         previous = signal["status"]
         fields["status"] = event
+        signal.update(fields)
+        signal["status"] = event
         self.history.update_lifecycle(signal["id"], **fields)
-        self.history.add_event(signal["id"], event, price, {"from": previous})
+        self.history.add_event(signal["id"], event, price, {"from": previous, **{k: v for k, v in fields.items() if k != "status"}})
         if signal.get("last_notified_status") != event:
             await self.notifier.lifecycle(signal, event, price)
             self.history.update_lifecycle(signal["id"], last_notified_status=event)
-        signal["status"] = event
+            signal["last_notified_status"] = event
+
+    async def _maybe_progress(self, signal: dict, price: float, now: str) -> None:
+        if signal["status"] not in {"ACTIVE", "TP1", "TP2"}:
+            return
+        progress = self._target_progress(signal["side"], float(signal["entry"]), float(signal["tp1"]), price)
+        bucket = int(progress // self.progress_step)
+        last_bucket = int(signal.get("last_progress_bucket") if signal.get("last_progress_bucket") is not None else -1)
+        due = False
+        last_at = signal.get("last_progress_notified_at")
+        if last_at:
+            try:
+                due = (datetime.now(timezone.utc) - datetime.fromisoformat(last_at)).total_seconds() >= self.progress_interval
+            except (ValueError, TypeError):
+                due = True
+        else:
+            due = True
+        if bucket > last_bucket or due:
+            await self.notifier.progress(signal, price)
+            self.history.update_lifecycle(
+                signal["id"],
+                last_progress_notified_at=now,
+                last_progress_bucket=bucket,
+            )
+            signal["last_progress_notified_at"] = now
+            signal["last_progress_bucket"] = bucket
 
     async def _update(self, signal: dict, price: float, df) -> None:
         now_dt = datetime.now(timezone.utc)
@@ -85,41 +134,64 @@ class SignalTracker:
         side = signal["side"]
         status = signal["status"]
         entry = float(signal["entry"])
-        stop = float(signal["stop"])
+        initial_stop = float(signal["stop"])
+        effective_stop = float(signal.get("effective_stop") or initial_stop)
 
         expires_at = signal.get("expires_at")
         if status in {"WATCHING", "TRIGGERED"} and expires_at:
             try:
                 if now_dt >= datetime.fromisoformat(expires_at):
-                    await self._transition(signal, "EXPIRED", price, closed_at=now)
+                    await self._transition(signal, "EXPIRED", price, closed_at=now, exit_price=price, result="EXPIRED")
                     return
             except ValueError:
                 pass
 
-        # Before activation, crossing the invalidation level cancels the idea rather than logging a trade loss.
-        if status in {"WATCHING", "TRIGGERED"} and self._stop_hit(side, price, stop):
-            await self._transition(signal, "INVALIDATED", price, invalidated_at=now, closed_at=now)
+        if status in {"WATCHING", "TRIGGERED"} and self._stop_hit(side, price, initial_stop):
+            await self._transition(
+                signal,
+                "INVALIDATED",
+                price,
+                invalidated_at=now,
+                closed_at=now,
+                exit_price=price,
+                result="INVALIDATED_BEFORE_ENTRY",
+            )
             return
 
         zone_low = signal.get("preferred_entry_low")
         zone_high = signal.get("preferred_entry_high")
         if status == "WATCHING":
             if self._in_zone(price, zone_low, zone_high):
-                await self._transition(signal, "TRIGGERED", price, triggered_at=now)
+                await self._transition(signal, "TRIGGERED", price, triggered_at=now, current_price=price)
                 return
-            # READY setups are stored as ACTIVE and never arrive here. Trigger-only ideas without a zone
-            # can activate when price trades through the planned entry.
             no_zone = zone_low is None or zone_high is None
             crossed_entry = price >= entry if side == "LONG" else price <= entry
             if no_zone and crossed_entry:
-                await self._transition(signal, "ACTIVE", price, activated_at=now)
+                await self._transition(
+                    signal,
+                    "ACTIVE",
+                    price,
+                    activated_at=now,
+                    current_price=price,
+                    highest_price=price,
+                    lowest_price=price,
+                    effective_stop=initial_stop,
+                )
                 return
 
         if status == "TRIGGERED":
-            # Use the latest completed directional 1m candle as a lightweight reaction confirmation.
             candle = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
             if self._directional_candle(side, candle):
-                await self._transition(signal, "ACTIVE", price, activated_at=now)
+                await self._transition(
+                    signal,
+                    "ACTIVE",
+                    price,
+                    activated_at=now,
+                    current_price=price,
+                    highest_price=price,
+                    lowest_price=price,
+                    effective_stop=initial_stop,
+                )
                 return
 
         if signal["status"] not in {"ACTIVE", "TP1", "TP2"}:
@@ -129,44 +201,78 @@ class SignalTracker:
         move_pct = ((price - entry) / entry * 100) * (1 if side == "LONG" else -1)
         max_profit = max(float(signal.get("max_profit_pct") or 0), move_pct)
         max_drawdown = min(float(signal.get("max_drawdown_pct") or 0), move_pct)
-        common = {"current_price": price, "max_profit_pct": max_profit, "max_drawdown_pct": max_drawdown}
+        highest = max(float(signal.get("highest_price") or price), price)
+        lowest = min(float(signal.get("lowest_price") or price), price)
+        common = {
+            "current_price": price,
+            "max_profit_pct": max_profit,
+            "max_drawdown_pct": max_drawdown,
+            "highest_price": highest,
+            "lowest_price": lowest,
+        }
+        signal.update(common)
 
-        if self._stop_hit(side, price, stop):
-            signal.update(common)
-            await self._transition(signal, "STOP", price, stop_hit_at=now, closed_at=now, **common)
+        effective_stop = float(signal.get("effective_stop") or initial_stop)
+        if self._stop_hit(side, price, effective_stop):
+            is_be = bool(signal.get("break_even_at")) and abs(effective_stop - entry) <= max(abs(entry) * 1e-8, 1e-12)
+            event = "BREAKEVEN" if is_be else "STOP"
+            realized_r = 0.0 if is_be else self._r_multiple(side, entry, initial_stop, price)
+            await self._transition(
+                signal,
+                event,
+                price,
+                stop_hit_at=now,
+                closed_at=now,
+                exit_price=price,
+                realized_r=realized_r,
+                result="BREAKEVEN_AFTER_TP1" if is_be else "STOP",
+                **common,
+            )
             return
 
-        # Handle gaps and fast moves without waiting one monitor cycle per target.
         if not signal.get("tp3_hit_at") and self._reached(side, price, float(signal["tp3"])):
             common.update({
                 "tp1_hit_at": signal.get("tp1_hit_at") or now,
                 "tp2_hit_at": signal.get("tp2_hit_at") or now,
                 "tp3_hit_at": now,
                 "closed_at": now,
+                "exit_price": price,
+                "realized_r": self._r_multiple(side, entry, initial_stop, float(signal["tp3"])),
+                "result": "TP3",
             })
-            signal.update(common)
             await self._transition(signal, "TP3", price, **common)
             return
+
         if not signal.get("tp2_hit_at") and self._reached(side, price, float(signal["tp2"])):
-            common.update({"tp1_hit_at": signal.get("tp1_hit_at") or now, "tp2_hit_at": now})
-            signal.update(common)
+            common.update({
+                "tp1_hit_at": signal.get("tp1_hit_at") or now,
+                "tp2_hit_at": now,
+                "realized_r": self._r_multiple(side, entry, initial_stop, float(signal["tp2"])),
+                "result": "TP2_OPEN",
+            })
             await self._transition(signal, "TP2", price, **common)
             return
+
         if not signal.get("tp1_hit_at") and self._reached(side, price, float(signal["tp1"])):
-            common.update({"tp1_hit_at": now})
-            signal.update(common)
+            common.update({
+                "tp1_hit_at": now,
+                "realized_r": self._r_multiple(side, entry, initial_stop, float(signal["tp1"])),
+                "result": "TP1_OPEN",
+            })
+            if self.auto_break_even:
+                common.update({"effective_stop": entry, "break_even_at": now})
             await self._transition(signal, "TP1", price, **common)
+            if self.auto_break_even:
+                self.history.add_event(signal["id"], "BREAK_EVEN_SET", entry, {"old_stop": initial_stop, "new_stop": entry})
             return
+
         self.history.update_lifecycle(signal["id"], **common)
+        await self._maybe_progress(signal, price, now)
 
     def stop(self) -> None:
-        if not hasattr(self, "_stop"):
-            self._stop = asyncio.Event()
         self._stop.set()
 
     async def run_forever(self) -> None:
-        if not hasattr(self, "_stop"):
-            self._stop = asyncio.Event()
         logging.info("SignalTracker started: interval=%ss", self.interval_seconds)
         while not self._stop.is_set():
             await self.check_once()

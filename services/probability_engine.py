@@ -8,7 +8,7 @@ from typing import Any
 from database.database import connect
 
 
-CLOSED_STATUSES = ("TP3", "STOP", "INVALIDATED", "EXPIRED")
+CLOSED_STATUSES = ("TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED")
 
 
 @dataclass(slots=True)
@@ -91,7 +91,7 @@ class ProbabilityEngine:
                     AVG(max_drawdown_pct) AS avg_mae
                 FROM signals
                 WHERE setup_key=? AND timeframe=? AND side=?
-                  AND status IN ('TP3','STOP','INVALIDATED','EXPIRED')
+                  AND status IN ('TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED')
                 """,
                 (setup_key, timeframe, side),
             ).fetchone()
@@ -142,7 +142,7 @@ class ProbabilityEngine:
                        max_profit_pct,max_drawdown_pct
                 FROM signals
                 WHERE side=? AND timeframe=?
-                  AND status IN ('TP3','STOP','INVALIDATED','EXPIRED')
+                  AND status IN ('TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED')
                 ORDER BY id DESC LIMIT 1000
                 """,
                 (side, timeframe),

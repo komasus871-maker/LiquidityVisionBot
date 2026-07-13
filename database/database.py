@@ -185,7 +185,11 @@ def create_tables() -> None:
                 reasons_json TEXT NOT NULL, current_price DOUBLE PRECISION,
                 max_profit_pct DOUBLE PRECISION DEFAULT 0, max_drawdown_pct DOUBLE PRECISION DEFAULT 0,
                 tp1_hit_at TEXT, tp2_hit_at TEXT, tp3_hit_at TEXT, stop_hit_at TEXT,
-                last_notified_status TEXT, notification_chat_id BIGINT
+                last_notified_status TEXT, notification_chat_id BIGINT,
+                effective_stop DOUBLE PRECISION, break_even_at TEXT, exit_price DOUBLE PRECISION,
+                realized_r DOUBLE PRECISION, result TEXT, highest_price DOUBLE PRECISION,
+                lowest_price DOUBLE PRECISION, last_progress_notified_at TEXT,
+                last_progress_bucket INTEGER DEFAULT -1
             )
         """)
         conn.execute(f"""
@@ -260,7 +264,11 @@ def create_tables() -> None:
             "owner_telegram_id": "BIGINT", "triggered_at": "TEXT", "activated_at": "TEXT",
             "expires_at": "TEXT", "invalidated_at": "TEXT", "preferred_entry_low": "DOUBLE PRECISION",
             "preferred_entry_high": "DOUBLE PRECISION", "last_notified_status": "TEXT",
-            "notification_chat_id": "BIGINT",
+            "notification_chat_id": "BIGINT", "effective_stop": "DOUBLE PRECISION",
+            "break_even_at": "TEXT", "exit_price": "DOUBLE PRECISION",
+            "realized_r": "DOUBLE PRECISION", "result": "TEXT",
+            "highest_price": "DOUBLE PRECISION", "lowest_price": "DOUBLE PRECISION",
+            "last_progress_notified_at": "TEXT", "last_progress_bucket": "INTEGER DEFAULT -1",
         }.items():
             _add_column(conn, "signals", name, definition)
         for name, definition in {

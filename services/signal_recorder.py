@@ -75,10 +75,35 @@ class SignalRecorder:
             "recommendation": analysis["recommendation"], "setup_key": setup_key,
             "features": features, "reasons": analysis["reasons"], "status": status,
         }
+        # A fresh directional promotion invalidates only stale opposite ideas that
+        # never became ACTIVE. This prevents contradictory BUY/SELL promotions
+        # and multiple pending Signal IDs for the same market/timeframe.
+        self.history.close_opposite_pending(
+            owner_telegram_id,
+            payload["symbol"],
+            timeframe,
+            payload["side"],
+        )
         duplicate = self.history.find_duplicate(owner_telegram_id, payload["symbol"], timeframe, payload["side"])
         if duplicate:
-            signal_id = self.history.refresh_duplicate(duplicate["id"], payload)
+            # Never rewrite the plan of a trade that is already live. Pending
+            # ideas may be refreshed/promoted while preserving the same ID.
+            if duplicate.get("status") in {"ACTIVE", "TP1", "TP2"}:
+                signal_id = int(duplicate["id"])
+            else:
+                signal_id = self.history.refresh_duplicate(duplicate["id"], payload)
         else:
             signal_id = self.history.save(payload)
+            if status == "ACTIVE":
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc).isoformat()
+                self.history.update_lifecycle(
+                    signal_id,
+                    activated_at=now,
+                    current_price=float(payload["entry"]),
+                    effective_stop=float(payload["stop"]),
+                    highest_price=float(payload["entry"]),
+                    lowest_price=float(payload["entry"]),
+                )
         self.observations.promote(observation_id, signal_id)
         return signal_id

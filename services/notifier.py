@@ -40,29 +40,68 @@ class Notifier:
         move = (price - entry) / entry * 100
         return round(move if signal.get("side") == "LONG" else -move, 2)
 
-    async def lifecycle(self, signal: dict, event: str, price: float, extra: str = "") -> None:
+    @staticmethod
+    def _target_progress(side: str, entry: float, target: float, price: float) -> float:
+        distance = abs(target - entry)
+        if distance <= 0:
+            return 0.0
+        move = (price - entry) if side == "LONG" else (entry - price)
+        return max(0.0, min(100.0, move / distance * 100))
+
+    @staticmethod
+    def _risk_remaining(side: str, entry: float, stop: float, price: float) -> float:
+        distance = abs(entry - stop)
+        if distance <= 0:
+            return 0.0
+        remaining = (price - stop) if side == "LONG" else (stop - price)
+        return max(0.0, min(100.0, remaining / distance * 100))
+
+    @staticmethod
+    def _bar(value: float, width: int = 10) -> str:
+        value = max(0.0, min(100.0, value))
+        filled = round(value / 100 * width)
+        return "█" * filled + "░" * (width - filled)
+
+    @staticmethod
+    def _r_multiple(signal: dict, price: float) -> float:
+        entry = float(signal.get("entry") or 0)
+        stop = float(signal.get("stop") or 0)
+        risk = abs(entry - stop)
+        if not entry or risk <= 0:
+            return 0.0
+        move = (price - entry) if signal.get("side") == "LONG" else (entry - price)
+        return move / risk
+
+    async def _send(self, signal: dict, lines: list[str]) -> None:
         if not self.bot:
             return
         chat_id = signal.get("notification_chat_id") or signal.get("owner_telegram_id")
         if not chat_id:
             return
+        try:
+            await self.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+        except Exception:
+            logging.exception("Failed to send notification for signal %s", signal.get("id"))
 
+    async def lifecycle(self, signal: dict, event: str, price: float, extra: str = "") -> None:
         icons = {
-            "TRIGGERED": "🔔", "ACTIVE": "🟢", "TP1": "🎯", "TP2": "🎯", "TP3": "🏆",
-            "STOP": "🛑", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
+            "TRIGGERED": "🔔", "ACTIVE": "🟢", "TP1": "🎯", "TP2": "🏆", "TP3": "👑",
+            "STOP": "🛑", "BREAKEVEN": "🛡", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
         }
         titles = {
             "TRIGGERED": "Цена вошла в preferred entry zone",
             "ACTIVE": "Сетап активирован",
             "TP1": "TP1 достигнут",
             "TP2": "TP2 достигнут",
-            "TP3": "TP3 достигнут — сделка закрыта",
+            "TP3": "TP3 достигнут — сделка завершена",
             "STOP": "Stop Loss достигнут",
+            "BREAKEVEN": "Сделка закрыта в безубыток",
             "INVALIDATED": "Сетап инвалидирован до активации",
             "EXPIRED": "Сетап истёк без активации",
         }
 
-        progress = self._progress(signal, price)
+        move_pct = self._progress(signal, price)
+        r_value = self._r_multiple(signal, price)
         duration = self._duration(signal.get("activated_at") or signal.get("created_at"))
         stats = self.probability.exact_stats(
             str(signal.get("setup_key") or ""),
@@ -78,21 +117,35 @@ class Notifier:
             f"Price: <code>{fmt_price(price)}</code>",
             f"Status: <b>{event}</b>",
         ]
-        if event in {"ACTIVE", "TP1", "TP2", "TP3", "STOP"}:
-            lines.append(f"Current move: <b>{progress:+.2f}%</b>")
+        if event in {"ACTIVE", "TP1", "TP2", "TP3", "STOP", "BREAKEVEN"}:
+            lines.extend([
+                f"Current move: <b>{move_pct:+.2f}%</b>",
+                f"Current R: <b>{r_value:+.2f}R</b>",
+            ])
         if duration:
             lines.append(f"Duration: <b>{duration}</b>")
+
         if event == "TRIGGERED":
             lines.append("Next: waiting for a directional reaction candle.")
         elif event == "ACTIVE":
-            lines.append(f"Targets: {fmt_price(float(signal['tp1']))} / {fmt_price(float(signal['tp2']))} / {fmt_price(float(signal['tp3']))}")
+            lines.extend([
+                "",
+                f"Entry: <code>{fmt_price(float(signal['entry']))}</code>",
+                f"Stop: <code>{fmt_price(float(signal.get('effective_stop') or signal['stop']))}</code>",
+                f"Targets: {fmt_price(float(signal['tp1']))} / {fmt_price(float(signal['tp2']))} / {fmt_price(float(signal['tp3']))}",
+            ])
         elif event == "TP1":
             lines.append(f"Next target: <b>{fmt_price(float(signal['tp2']))}</b>")
+            if signal.get("break_even_at"):
+                lines.append("🛡 Stop automatically moved to Break Even.")
         elif event == "TP2":
             lines.append(f"Final target: <b>{fmt_price(float(signal['tp3']))}</b>")
-        elif event in {"TP3", "STOP"}:
-            lines.append(f"MFE: <b>{float(signal.get('max_profit_pct') or 0):.2f}%</b>")
-            lines.append(f"MAE: <b>{float(signal.get('max_drawdown_pct') or 0):.2f}%</b>")
+        elif event in {"TP3", "STOP", "BREAKEVEN"}:
+            lines.extend([
+                f"MFE: <b>{float(signal.get('max_profit_pct') or 0):.2f}%</b>",
+                f"MAE: <b>{float(signal.get('max_drawdown_pct') or 0):.2f}%</b>",
+                f"Realized result: <b>{float(signal.get('realized_r') or 0):+.2f}R</b>",
+            ])
 
         if int(stats.get("samples") or 0) >= 5:
             lines.extend([
@@ -103,8 +156,46 @@ class Notifier:
             ])
         if extra:
             lines.extend(["", html.escape(extra)])
+        await self._send(signal, lines)
 
-        try:
-            await self.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
-        except Exception:
-            logging.exception("Failed to send lifecycle notification for signal %s", signal.get("id"))
+    async def progress(self, signal: dict, price: float) -> None:
+        entry = float(signal["entry"])
+        stop = float(signal.get("effective_stop") or signal["stop"])
+        side = str(signal["side"])
+        tp1 = self._target_progress(side, entry, float(signal["tp1"]), price)
+        tp2 = self._target_progress(side, entry, float(signal["tp2"]), price)
+        tp3 = self._target_progress(side, entry, float(signal["tp3"]), price)
+        sl = self._risk_remaining(side, entry, stop, price)
+        duration = self._duration(signal.get("activated_at") or signal.get("created_at")) or "—"
+        move_pct = self._progress(signal, price)
+        r_value = self._r_multiple(signal, price)
+
+        lines = [
+            f"📡 <b>{html.escape(str(signal['symbol']))} {html.escape(side)} · LIVE</b>",
+            "",
+            f"Status: <b>{html.escape(str(signal['status']))}</b>",
+            f"Entry / Current: <code>{fmt_price(entry)}</code> → <code>{fmt_price(price)}</code>",
+            f"PnL: <b>{move_pct:+.2f}%</b> · <b>{r_value:+.2f}R</b>",
+            "",
+            f"TP1 {self._bar(tp1)} {tp1:.0f}%",
+            f"TP2 {self._bar(tp2)} {tp2:.0f}%",
+            f"TP3 {self._bar(tp3)} {tp3:.0f}%",
+            f"SL  {self._bar(sl)} {sl:.0f}% safety",
+            "",
+            f"Duration: <b>{duration}</b>",
+            f"MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>",
+        ]
+        if signal.get("break_even_at"):
+            lines.append("🛡 Break Even protection is active.")
+        await self._send(signal, lines)
+
+    async def break_even(self, signal: dict, price: float) -> None:
+        lines = [
+            f"🛡 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))}</b>",
+            "",
+            "<b>Position secured</b>",
+            f"Signal ID: <code>{signal['id']}</code>",
+            f"Stop moved to Break Even: <code>{fmt_price(price)}</code>",
+            "If price returns to entry, the lifecycle will close as BREAKEVEN instead of STOP.",
+        ]
+        await self._send(signal, lines)
