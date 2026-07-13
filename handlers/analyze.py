@@ -39,6 +39,21 @@ def _snapshot_key(user_id: int, symbol: str, timeframe: str) -> tuple[int, str, 
     return (int(user_id), symbol.upper(), timeframe.lower())
 
 
+
+
+def _get_snapshot(user_id: int, symbol: str, timeframe: str):
+    return _ANALYSIS_SNAPSHOTS.get(_snapshot_key(user_id, symbol, timeframe))
+
+
+async def _snapshot_or_run(user_id: int, symbol: str, timeframe: str):
+    key = _snapshot_key(user_id, symbol, timeframe)
+    analysis = _ANALYSIS_SNAPSHOTS.get(key)
+    if analysis is None:
+        analysis = await _run_analysis(symbol, timeframe)
+        _ANALYSIS_SNAPSHOTS[key] = analysis.copy()
+    return analysis
+
+
 class UniversalAnalyzeState(StatesGroup):
     waiting_symbol = State()
 
@@ -48,6 +63,7 @@ async def _run_analysis(symbol: str, timeframe: str = "1h"):
     analysis = await run_analysis(analyzer, df)
     setup_key = recorder._setup_key(analysis)
     analysis["timeframe"] = timeframe
+    analysis["symbol"] = symbol.upper()
     return probability_engine.enrich(
         analysis,
         symbol=symbol,
@@ -211,16 +227,45 @@ async def explain_callback(callback: CallbackQuery):
         symbol, timeframe = raw.replace("explain_", "").upper(), "1h"
     await callback.answer("Готовлю объяснение…")
     try:
-        key = _snapshot_key(callback.from_user.id, symbol, timeframe)
-        analysis = _ANALYSIS_SNAPSHOTS.get(key)
-        if analysis is None:
-            analysis = await _run_analysis(symbol, timeframe)
-            _ANALYSIS_SNAPSHOTS[key] = analysis.copy()
+        analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
         await callback.message.answer(
             explainer.build(analysis, symbol), parse_mode="HTML", disable_web_page_preview=True,
         )
     except Exception as exc:
         await callback.message.answer(f"❌ Не удалось построить Explain Pro\n\n{exc}")
+
+
+@router.callback_query(F.data.startswith("technical:"))
+async def technical_callback(callback: CallbackQuery):
+    _, symbol, timeframe = callback.data.split(":", 2)
+    await callback.answer("Открываю technical details…")
+    try:
+        analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
+        await callback.message.answer(report.technical(analysis), parse_mode="HTML")
+    except Exception as exc:
+        await callback.message.answer(f"❌ Не удалось открыть Technical Details\n\n{exc}")
+
+
+@router.callback_query(F.data.startswith("scenarios:"))
+async def scenarios_callback(callback: CallbackQuery):
+    _, symbol, timeframe = callback.data.split(":", 2)
+    await callback.answer("Открываю сценарии…")
+    try:
+        analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
+        await callback.message.answer(report.scenarios(analysis), parse_mode="HTML")
+    except Exception as exc:
+        await callback.message.answer(f"❌ Не удалось открыть Scenario Map\n\n{exc}")
+
+
+@router.callback_query(F.data.startswith("history:"))
+async def history_callback(callback: CallbackQuery):
+    _, symbol, timeframe = callback.data.split(":", 2)
+    await callback.answer("Открываю историю…")
+    try:
+        analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
+        await callback.message.answer(report.history(analysis), parse_mode="HTML")
+    except Exception as exc:
+        await callback.message.answer(f"❌ Не удалось открыть Historical Intelligence\n\n{exc}")
 
 
 @router.callback_query((F.data.startswith("similar:") | F.data.startswith("similar_")))
@@ -232,11 +277,7 @@ async def similar_callback(callback: CallbackQuery):
         symbol, timeframe = raw.replace("similar_", "").upper(), "1h"
     await callback.answer("Ищу похожие сетапы…")
     try:
-        key = _snapshot_key(callback.from_user.id, symbol, timeframe)
-        analysis = _ANALYSIS_SNAPSHOTS.get(key)
-        if analysis is None:
-            analysis = await _run_analysis(symbol, timeframe)
-            _ANALYSIS_SNAPSHOTS[key] = analysis.copy()
+        analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
         await callback.message.answer(
             similarity_report.build(symbol, analysis), parse_mode="HTML", disable_web_page_preview=True,
         )
