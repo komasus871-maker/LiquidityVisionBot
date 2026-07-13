@@ -104,8 +104,8 @@ Risk Quality: {data['risk_quality']}/100
 Readiness: {data['execution_readiness']}/100
 AI Grade: {data.get('ai_grade', 'N/A')}
 
-🧠 <b>Confidence Meter</b>
-Overall: {self._bar(direction_confidence)} {direction_confidence:.0f}%
+🧠 <b>Directional Conviction</b>
+Overall: {self._bar(direction_confidence)} {direction_confidence:.0f}/100
 {confidence_text}
 
 ━━━━━━━━━━━━━━━━━━
@@ -197,7 +197,9 @@ ATR
 ━━━━━━━━━━━━━━━━━━
 
 🎯 Trade Plan
-Current Entry: {p(data['entry'])}
+Current Price: {p(data.get('current_price', data['price']))}
+Planned Entry: {p(data['entry'])}
+Entry Type: {data.get('entry_type', 'UNKNOWN')}
 Preferred Zone: {p(data['preferred_entry_low'])} - {p(data['preferred_entry_high'])}
 Stop: {p(data['stop'])}
 TP1: {p(data['tp1'])}

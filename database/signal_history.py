@@ -186,6 +186,29 @@ class SignalHistory:
         with self._connect() as conn:
             conn.execute(f"UPDATE signals SET {sql} WHERE id=?", (*updates.values(), signal_id))
 
+    def manual_stop(self, signal_id: int, owner_telegram_id: int | None = None) -> dict[str, Any] | None:
+        signal = self.get_by_id(signal_id)
+        if not signal:
+            return None
+        if owner_telegram_id is not None and signal.get("owner_telegram_id") != owner_telegram_id:
+            return None
+        if signal.get("status") in {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "MANUAL_STOP"}:
+            return signal
+        now = datetime.now(timezone.utc).isoformat()
+        price = float(signal.get("current_price") or signal.get("entry") or 0)
+        entry = float(signal.get("entry") or price)
+        stop = float(signal.get("stop") or entry)
+        side = str(signal.get("side") or "LONG")
+        risk = max(abs(entry - stop), 1e-12)
+        realized_r = ((price - entry) if side == "LONG" else (entry - price)) / risk
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE signals SET status='INVALIDATED', closed_at=?, invalidated_at=?, exit_price=?, realized_r=?, result='MANUAL_STOP', updated_at=? WHERE id=?",
+                (now, now, price, realized_r, now, signal_id),
+            )
+            self._add_event_conn(conn, signal_id, "MANUAL_STOP", price, {"realized_r": realized_r})
+        return self.get_by_id(signal_id)
+
     def get_events(self, signal_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

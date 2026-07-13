@@ -25,6 +25,8 @@ class SimilarCase:
     stop_hit: bool
     mfe: float
     mae: float
+    duration_minutes: float = 0.0
+    realized_r: float = 0.0
 
 
 class ProbabilityEngine:
@@ -203,6 +205,43 @@ class ProbabilityEngine:
             "avg_mfe": round(sum(x.mfe for x in cases) / samples, 2),
             "avg_mae": round(sum(x.mae for x in cases) / samples, 2),
         })
+        return result
+
+    @staticmethod
+    def _wilson(success_weight: float, total_weight: float, z: float = 1.96) -> tuple[float, float]:
+        if total_weight <= 0:
+            return 0.0, 0.0
+        p = success_weight / total_weight
+        denom = 1 + z * z / total_weight
+        center = (p + z * z / (2 * total_weight)) / denom
+        margin = z * ((p * (1 - p) / total_weight + z * z / (4 * total_weight * total_weight)) ** 0.5) / denom
+        return max(0.0, center - margin) * 100, min(1.0, center + margin) * 100
+
+    def weighted_stats(self, cases: list[SimilarCase]) -> dict[str, Any]:
+        samples = len(cases)
+        if not samples:
+            return {"samples": 0, "effective_samples": 0.0, "estimated": False}
+        weights = [max(0.01, min(1.0, float(c.similarity) / 100.0)) for c in cases]
+        total = sum(weights)
+        effective = total * total / max(sum(w * w for w in weights), 1e-12)
+        result: dict[str, Any] = {
+            "samples": samples,
+            "effective_samples": round(effective, 2),
+            "avg_similarity": round(sum(c.similarity * w for c, w in zip(cases, weights)) / total, 1),
+            "avg_mfe": round(sum(c.mfe * w for c, w in zip(cases, weights)) / total, 2),
+            "avg_mae": round(sum(c.mae * w for c, w in zip(cases, weights)) / total, 2),
+            "avg_duration_minutes": round(sum(c.duration_minutes * w for c, w in zip(cases, weights)) / total, 1),
+            "avg_realized_r": round(sum(c.realized_r * w for c, w in zip(cases, weights)) / total, 2),
+            "estimated": effective >= 3.0,
+            "reliability": self._reliability(int(effective)),
+        }
+        for name, attr in (("tp1", "tp1_hit"), ("tp2", "tp2_hit"), ("tp3", "tp3_hit"), ("stop", "stop_hit")):
+            success = sum(w for c, w in zip(cases, weights) if getattr(c, attr))
+            rate = success / total * 100
+            low, high = self._wilson(success, effective)
+            result[f"{name}_rate"] = round(rate, 1)
+            result[f"{name}_low"] = round(low, 1)
+            result[f"{name}_high"] = round(high, 1)
         return result
 
     def enrich(self, analysis: dict[str, Any], *, symbol: str, timeframe: str, setup_key: str) -> dict[str, Any]:

@@ -17,6 +17,7 @@ from utils.volume_profile import VolumeProfile
 from utils.displacement import Displacement
 from utils.atr import ATR
 from services.market_regime import MarketRegimeEngine
+from services.trade_plan_integrity import TradePlanIntegrity, InvalidTradePlan
 
 
 class Analyzer:
@@ -690,5 +691,22 @@ class Analyzer:
             "biggest_blockers": biggest_blockers,
             "exhaustion_risk": execution["exhaustion"],
         }
+        # Final setup quality must reflect execution constraints, not merely direction.
+        data["score"] = round(execution["readiness"], 1)
+        data["setup_score"] = round(execution["readiness"], 1)
+        data["directional_conviction"] = round(direction_score, 1)
+        data["confidence"] = round(execution["readiness"], 1)
+        data["probability"] = None
+        try:
+            TradePlanIntegrity.apply(data)
+        except InvalidTradePlan as exc:
+            data["plan_valid"] = False
+            data["plan_error"] = str(exc)
+            data["execution_status"] = "⛔ PLAN INVALID"
+            data["recommendation"] = "NO TRADE"
+            data["execution_readiness"] = 0.0
+            data["score"] = 0.0
+            data["setup_score"] = 0.0
+            data.setdefault("reasons", []).append(f"⛔ Invalid trade geometry: {exc}")
         data["final_verdict"] = self._verdict(data)
         return data

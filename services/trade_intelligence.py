@@ -158,9 +158,13 @@ class TradeIntelligenceEngine:
             confidence += 5
         if signal.get("break_even_at"):
             confidence += 4
-        confidence = round(self._clamp(confidence), 1)
+        raw_confidence = round(self._clamp(confidence), 1)
 
-        previous_confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or confidence)
+        previous_confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or raw_confidence)
+        # Limit one-cycle changes so noisy candles cannot flip the model from
+        # healthy to failed instantly. Hard exits are still handled by price/stop logic.
+        max_step = 18.0
+        confidence = round(max(previous_confidence - max_step, min(previous_confidence + max_step, raw_confidence)), 1)
         confidence_delta = round(confidence - previous_confidence, 1)
 
         health_score = confidence

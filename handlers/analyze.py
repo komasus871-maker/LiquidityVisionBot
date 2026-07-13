@@ -31,6 +31,13 @@ similarity_report = SimilarityReport()
 resolver = SymbolResolver(market)
 user_watchlist = UserWatchlist()
 
+# Immutable in-process snapshots keep Explain/Similar consistent with the exact
+# analysis the user received. Refresh is the only action that recalculates.
+_ANALYSIS_SNAPSHOTS: dict[tuple[int, str, str], dict] = {}
+
+def _snapshot_key(user_id: int, symbol: str, timeframe: str) -> tuple[int, str, str]:
+    return (int(user_id), symbol.upper(), timeframe.lower())
+
 
 class UniversalAnalyzeState(StatesGroup):
     waiting_symbol = State()
@@ -59,6 +66,7 @@ async def _send_analysis(message: Message, symbol: str, timeframe: str, user_id:
         notification_chat_id=chat_id,
     )
     analysis["signal_id"] = signal_id
+    _ANALYSIS_SNAPSHOTS[_snapshot_key(user_id, symbol, timeframe)] = analysis.copy()
     await message.answer(
         report.build(analysis),
         parse_mode="HTML",
@@ -169,54 +177,68 @@ async def analyze_callback(callback: CallbackQuery):
         await callback.message.answer(f"❌ Ошибка\n\n{exc}")
 
 
-@router.callback_query(F.data.startswith("refresh_"))
+@router.callback_query((F.data.startswith("refresh:") | F.data.startswith("refresh_")))
 async def refresh_callback(callback: CallbackQuery):
-    symbol = callback.data.replace("refresh_", "").upper()
+    raw = callback.data
+    if raw.startswith("refresh:"):
+        _, symbol, timeframe = raw.split(":", 2)
+    else:
+        symbol, timeframe = raw.replace("refresh_", "").upper(), "1h"
     await callback.answer("Обновляю анализ…")
     try:
-        analysis = await _run_analysis(symbol, "1h")
+        analysis = await _run_analysis(symbol, timeframe)
         signal_id = recorder.record(
-            symbol=symbol,
-            timeframe="1h",
-            analysis=analysis,
+            symbol=symbol, timeframe=timeframe, analysis=analysis,
             owner_telegram_id=callback.from_user.id,
             notification_chat_id=callback.message.chat.id,
         )
         analysis["signal_id"] = signal_id
+        _ANALYSIS_SNAPSHOTS[_snapshot_key(callback.from_user.id, symbol, timeframe)] = analysis.copy()
         await callback.message.edit_text(
-            report.build(analysis),
-            parse_mode="HTML",
-            reply_markup=analysis_actions_keyboard(symbol, "1h"),
+            report.build(analysis), parse_mode="HTML",
+            reply_markup=analysis_actions_keyboard(symbol, timeframe),
         )
     except Exception as exc:
         await callback.message.answer(f"❌ Не удалось обновить анализ\n\n{exc}")
 
 
-@router.callback_query(F.data.startswith("explain_"))
+@router.callback_query((F.data.startswith("explain:") | F.data.startswith("explain_")))
 async def explain_callback(callback: CallbackQuery):
-    symbol = callback.data.replace("explain_", "").upper()
+    raw = callback.data
+    if raw.startswith("explain:"):
+        _, symbol, timeframe = raw.split(":", 2)
+    else:
+        symbol, timeframe = raw.replace("explain_", "").upper(), "1h"
     await callback.answer("Готовлю объяснение…")
     try:
-        analysis = await _run_analysis(symbol, "1h")
+        key = _snapshot_key(callback.from_user.id, symbol, timeframe)
+        analysis = _ANALYSIS_SNAPSHOTS.get(key)
+        if analysis is None:
+            analysis = await _run_analysis(symbol, timeframe)
+            _ANALYSIS_SNAPSHOTS[key] = analysis.copy()
         await callback.message.answer(
-            explainer.build(analysis, symbol),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
+            explainer.build(analysis, symbol), parse_mode="HTML", disable_web_page_preview=True,
         )
     except Exception as exc:
         await callback.message.answer(f"❌ Не удалось построить Explain Pro\n\n{exc}")
 
 
-@router.callback_query(F.data.startswith("similar_"))
+@router.callback_query((F.data.startswith("similar:") | F.data.startswith("similar_")))
 async def similar_callback(callback: CallbackQuery):
-    symbol = callback.data.replace("similar_", "").upper()
+    raw = callback.data
+    if raw.startswith("similar:"):
+        _, symbol, timeframe = raw.split(":", 2)
+    else:
+        symbol, timeframe = raw.replace("similar_", "").upper(), "1h"
     await callback.answer("Ищу похожие сетапы…")
     try:
-        analysis = await _run_analysis(symbol, "1h")
+        key = _snapshot_key(callback.from_user.id, symbol, timeframe)
+        analysis = _ANALYSIS_SNAPSHOTS.get(key)
+        if analysis is None:
+            analysis = await _run_analysis(symbol, timeframe)
+            _ANALYSIS_SNAPSHOTS[key] = analysis.copy()
         await callback.message.answer(
-            similarity_report.build(symbol, analysis),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
+            similarity_report.build(symbol, analysis), parse_mode="HTML", disable_web_page_preview=True,
         )
     except Exception as exc:
         await callback.message.answer(f"❌ Не удалось найти похожие сетапы\n\n{exc}")

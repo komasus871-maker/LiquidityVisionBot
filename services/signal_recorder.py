@@ -32,6 +32,16 @@ class SignalRecorder:
 
     def record(self, *, symbol: str, timeframe: str, analysis: dict[str, Any], owner_telegram_id: int | None = None,
                notification_chat_id: int | None = None, min_confidence: float = 54) -> int | None:
+        if not analysis.get("plan_valid", True):
+            return None
+        side = str(analysis.get("direction") or "").upper()
+        entry, stop = float(analysis.get("entry") or 0), float(analysis.get("stop") or 0)
+        tp1, tp2, tp3 = (float(analysis.get(k) or 0) for k in ("tp1", "tp2", "tp3"))
+        valid_geometry = (side == "LONG" and stop < entry < tp1 < tp2 < tp3) or (
+            side == "SHORT" and tp3 < tp2 < tp1 < entry < stop
+        )
+        if not valid_geometry:
+            return None
         setup_key = self._setup_key(analysis)
         observation_id = self.observations.save_or_update(
             owner_telegram_id=owner_telegram_id, notification_chat_id=notification_chat_id,
