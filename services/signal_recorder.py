@@ -4,8 +4,6 @@ from database.signal_history import SignalHistory
 from services.premium import PremiumService
 from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
-from database.database import acquire_lease, release_lease
-from services.trade_manager import TradeManager
 
 
 class SignalRecorder:
@@ -14,7 +12,6 @@ class SignalRecorder:
         self.premium = PremiumService()
         self.observations = ObservationHistory()
         self.candidates = CandidateHistory()
-        self.trade_manager = TradeManager()
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
@@ -82,56 +79,57 @@ class SignalRecorder:
             "recommendation": analysis["recommendation"], "setup_key": setup_key,
             "features": features, "reasons": analysis["reasons"], "status": status,
         }
-        # Serialize promotion per user/market. This closes the race where WatchEngine
-        # and a manual Analyze request promoted opposite plans at the same time.
-        lease_owner = f"recorder:{owner_telegram_id or 0}:{payload['symbol']}:{timeframe}:{id(self)}"
-        lease_name = f"signal-market:{owner_telegram_id or 0}:{payload['symbol']}:{timeframe}"
-        if not acquire_lease(lease_name, lease_owner, 30):
-            existing = self.history.reconcile_open_market(owner_telegram_id, payload["symbol"], timeframe)
-            return int(existing["id"]) if existing and existing.get("side") == payload["side"] else None
-        try:
-            self.trade_manager.reconcile_market(owner_telegram_id, payload["symbol"], timeframe)
-            open_market = self.history.get_open_market(owner_telegram_id, payload["symbol"], timeframe)
-            live_trade = next((x for x in open_market if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
-            same_side = [x for x in open_market if x.get("side") == payload["side"]]
-            opposite = [x for x in open_market if x.get("side") != payload["side"]]
+        # One market may have only one open Trade. Opposite analysis becomes a Candidate
+        # while a live trade exists; it never creates a conflicting second signal.
+        open_market = self.history.get_open_market(owner_telegram_id, payload["symbol"], timeframe)
+        live_trade = next((x for x in open_market if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
+        same_side = [x for x in open_market if x.get("side") == payload["side"]]
+        opposite = [x for x in open_market if x.get("side") != payload["side"]]
 
-            if live_trade:
-                if live_trade.get("side") == payload["side"]:
-                    signal_id = self.history.refresh_duplicate(int(live_trade["id"]), payload)
-                    self.observations.promote(observation_id, signal_id)
-                    self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
-                    return signal_id
-                if owner_telegram_id is None:
-                    return None
-                self.candidates.upsert(
-                    owner_telegram_id=owner_telegram_id, notification_chat_id=notification_chat_id,
-                    symbol=payload["symbol"], timeframe=timeframe, side=payload["side"],
-                    observation_id=observation_id, blocked_by_signal_id=int(live_trade["id"]),
-                    snapshot={"analysis": analysis, "payload": payload},
-                )
-                return None
-
-            for stale in opposite:
-                self.history.invalidate_open(int(stale["id"]), "DIRECTION_FLIP")
-            duplicate = same_side[0] if same_side else None
-            for extra in same_side[1:]:
-                self.history.invalidate_open(int(extra["id"]), "DUPLICATE_CONSOLIDATED")
-            if duplicate:
-                signal_id = self.history.refresh_duplicate(int(duplicate["id"]), payload)
-            else:
-                signal_id = self.history.save(payload)
-                if status == "ACTIVE":
-                    from datetime import datetime, timezone
-                    now = datetime.now(timezone.utc).isoformat()
-                    self.history.update_lifecycle(
-                        signal_id, activated_at=now, current_price=float(payload["entry"]),
-                        effective_stop=float(payload["stop"]), highest_price=float(payload["entry"]),
-                        lowest_price=float(payload["entry"]),
-                    )
-            self.observations.promote(observation_id, signal_id)
-            if owner_telegram_id is not None:
+        if live_trade:
+            if live_trade.get("side") == payload["side"]:
+                # Refresh metadata only; the locked trade plan remains immutable.
+                signal_id = self.history.refresh_duplicate(int(live_trade["id"]), payload)
+                self.observations.promote(observation_id, signal_id)
                 self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
-            return signal_id
-        finally:
-            release_lease(lease_name, lease_owner)
+                return signal_id
+            if owner_telegram_id is None:
+                return None
+            self.candidates.upsert(
+                owner_telegram_id=owner_telegram_id,
+                notification_chat_id=notification_chat_id,
+                symbol=payload["symbol"],
+                timeframe=timeframe,
+                side=payload["side"],
+                observation_id=observation_id,
+                blocked_by_signal_id=int(live_trade["id"]),
+                snapshot={"analysis": analysis, "payload": payload},
+            )
+            return None
+
+        # Pending direction flips replace the old pending plan. Same-side repeats update
+        # the existing row instead of creating another Signal ID.
+        for stale in opposite:
+            self.history.invalidate_open(int(stale["id"]), "DIRECTION_FLIP")
+        duplicate = same_side[0] if same_side else None
+        for extra in same_side[1:]:
+            self.history.invalidate_open(int(extra["id"]), "DUPLICATE_CONSOLIDATED")
+        if duplicate:
+            signal_id = self.history.refresh_duplicate(int(duplicate["id"]), payload)
+        else:
+            signal_id = self.history.save(payload)
+            if status == "ACTIVE":
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc).isoformat()
+                self.history.update_lifecycle(
+                    signal_id,
+                    activated_at=now,
+                    current_price=float(payload["entry"]),
+                    effective_stop=float(payload["stop"]),
+                    highest_price=float(payload["entry"]),
+                    lowest_price=float(payload["entry"]),
+                )
+        self.observations.promote(observation_id, signal_id)
+        if owner_telegram_id is not None:
+            self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
+        return signal_id

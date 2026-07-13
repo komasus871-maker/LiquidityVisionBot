@@ -110,6 +110,19 @@ Overall: {self._bar(direction_confidence)} {direction_confidence:.0f}%
 
 ━━━━━━━━━━━━━━━━━━
 
+🌍 <b>Market Regime</b>
+{data.get('market_regime', {}).get('label', '⚪ Unknown')}
+Confidence: {data.get('market_regime', {}).get('confidence', 0)}/100
+Execution mode: {data.get('market_regime', {}).get('execution_mode', 'OBSERVE')}
+Trend strength: {data.get('market_regime', {}).get('trend_strength', 0)}/100
+Price-path efficiency: {data.get('market_regime', {}).get('efficiency', 0)}%
+Volatility: {data.get('market_regime', {}).get('volatility_state', 'NORMAL')} ({data.get('market_regime', {}).get('volatility_percentile', 50)}th percentile)
+Risk multiplier: {data.get('market_regime', {}).get('risk_multiplier', 1.0)}x
+
+{chr(10).join('• ' + item for item in data.get('market_regime', {}).get('reasons', []))}
+
+━━━━━━━━━━━━━━━━━━
+
 🧠 <b>Final Verdict</b>
 {data.get('final_verdict', 'Observe current conditions.')}
 

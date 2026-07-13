@@ -16,6 +16,7 @@ from utils.premium_discount import PremiumDiscount
 from utils.volume_profile import VolumeProfile
 from utils.displacement import Displacement
 from utils.atr import ATR
+from services.market_regime import MarketRegimeEngine
 
 
 class Analyzer:
@@ -235,6 +236,24 @@ class Analyzer:
             if value < 0:
                 (blockers if hard else warnings).append(f"{'⛔' if hard else '⚠️'} {label}")
 
+        regime = raw.get("market_regime") or {}
+        regime_code = str(regime.get("code") or "UNKNOWN")
+        regime_direction = str(regime.get("direction") or "NEUTRAL")
+        regime_aligned = regime_direction == direction
+
+        if regime_code == "TRENDING" and regime_aligned:
+            entry_adjust("Market regime supports trend execution", 8)
+        elif regime_code == "TRENDING" and regime_direction not in ("NEUTRAL", direction):
+            entry_adjust("Market regime conflicts with direction", -20, True)
+        elif regime_code == "RANGING":
+            entry_adjust("Ranging/choppy regime is hostile to trend entries", -18, True)
+        elif regime_code == "COMPRESSION":
+            entry_adjust("Compressed regime requires confirmed breakout", -14, True)
+        elif regime_code == "VOLATILE_EXPANSION":
+            entry_adjust("Volatile expansion makes current entry late", -16, True)
+        elif regime_code in ("TRANSITION", "UNKNOWN"):
+            entry_adjust("Transitional regime requires extra confirmation", -8)
+
         location_aligned = (long and position <= 38) or ((not long) and position >= 62)
         location_bad = (long and position >= 70) or ((not long) and position <= 30)
         location_extreme = (long and position >= 85) or ((not long) and position <= 15)
@@ -338,6 +357,16 @@ class Analyzer:
             readiness = min(readiness, 56.0)
         if balanced:
             readiness = min(readiness, 52.0)
+        if regime_code == "RANGING":
+            readiness = min(readiness, 44.0)
+        elif regime_code == "COMPRESSION":
+            readiness = min(readiness, 50.0)
+        elif regime_code == "VOLATILE_EXPANSION":
+            readiness = min(readiness, 52.0)
+        elif regime_code in ("TRANSITION", "UNKNOWN"):
+            readiness = min(readiness, 62.0)
+        elif regime_code == "TRENDING" and not regime_aligned:
+            readiness = min(readiness, 42.0)
 
         low = float(raw["premium"]["low"])
         eq = float(raw["premium"]["equilibrium"])
@@ -359,6 +388,9 @@ class Analyzer:
             and not blockers
             and (structure_ok or bos_ok or choch_ok)
             and not strong_adverse
+            and regime_code == "TRENDING"
+            and regime_aligned
+            and bool(regime.get("allows_trend_entry"))
         )
         pullback_valid = (
             direction_score >= 56
@@ -392,6 +424,19 @@ class Analyzer:
         else:
             status, category = "🔵 WATCHLIST", "WATCHLIST"
 
+        # Regime is the final execution gate. A directional score must not turn
+        # a choppy/compressed market into an executable trend setup.
+        if regime_code == "RANGING":
+            status, category = "🔵 WATCHLIST", "REGIME_BLOCKED"
+        elif regime_code == "COMPRESSION":
+            status, category = "🟡 WAIT FOR TRIGGER", "BREAKOUT_WATCH"
+        elif regime_code == "VOLATILE_EXPANSION":
+            status, category = "🎯 WAIT FOR PULLBACK", "VOLATILITY_PULLBACK"
+        elif regime_code in ("TRANSITION", "UNKNOWN") and status in ("🟢 READY", "🎯 WAIT FOR PULLBACK"):
+            status, category = "🟡 WAIT FOR TRIGGER", "REGIME_CONFIRMATION"
+        elif regime_code == "TRENDING" and not regime_aligned:
+            status, category = "🔵 WATCHLIST", "REGIME_CONFLICT"
+
         if status == "🟢 READY":
             execution_bias = f"{direction} NOW"
         elif status == "🎯 WAIT FOR PULLBACK":
@@ -417,6 +462,8 @@ class Analyzer:
             "blockers": blockers,
             "warnings": warnings,
             "exhaustion": continuation_exhaustion or impulse_exhaustion,
+            "regime_code": regime_code,
+            "regime_aligned": regime_aligned,
         }
 
     @staticmethod
@@ -427,8 +474,18 @@ class Analyzer:
     def _verdict(self, data: dict[str, Any]) -> str:
         status = data["execution_status"]
         direction = data["direction"]
+        regime = data.get("market_regime") or {}
+        regime_code = regime.get("code")
         if status == "🟢 READY":
-            return f"✅ {direction} setup is executable under current conditions. Respect the stop and position size."
+            return f"✅ {direction} setup is executable in a confirmed trending regime. Respect the stop and position size."
+        if regime_code == "RANGING":
+            return "🟡 Directional evidence exists, but the market is ranging/choppy. Avoid trend execution until price leaves the range."
+        if regime_code == "COMPRESSION":
+            return "🟣 Volatility is compressed. Wait for a confirmed breakout and retest before execution."
+        if regime_code == "VOLATILE_EXPANSION":
+            return "🟠 Direction may be valid, but volatility expansion makes the current entry late and fragile. Wait for normalization or a pullback."
+        if regime_code in ("TRANSITION", "UNKNOWN"):
+            return f"⚪ Market context leans {direction}, but the regime is transitional. Require additional confirmation before risking capital."
         if status == "🎯 WAIT FOR PULLBACK":
             return f"🎯 Direction favors {direction}, but the current price is inefficient. Wait for the preferred entry zone."
         if status == "🟡 WAIT FOR TRIGGER":
@@ -457,6 +514,7 @@ class Analyzer:
         volume = VolumeProfile(df)
         displacement = Displacement(df)
         atr = ATR(df)
+        regime_engine = MarketRegimeEngine()
 
         close = float(df["close"].iloc[-1])
         ema50 = float(ema(df, 50).iloc[-1])
@@ -487,6 +545,7 @@ class Analyzer:
             "rsi": rsi_value,
             "macd": "🟢 Bullish" if macd_now > signal_now else "🔴 Bearish",
             "macd_bullish": macd_now > signal_now,
+            "market_regime": regime_engine.analyze(df),
         }
         raw["volume_ratio"] = self._volume_ratio(raw["volume"])
 
@@ -559,15 +618,26 @@ class Analyzer:
                 triggers.append("Prefer confirmed volume above 0.85x")
             if execution["exhaustion"]:
                 triggers.append("Wait for exhaustion to reset before continuation")
+            regime_code = str(raw.get("market_regime", {}).get("code") or "UNKNOWN")
+            if regime_code == "RANGING":
+                triggers.append("Wait for the market to leave the choppy range")
+            elif regime_code == "COMPRESSION":
+                triggers.append("Require a confirmed breakout and retest")
+            elif regime_code == "VOLATILE_EXPANSION":
+                triggers.append("Wait for volatility to normalize or for a deep pullback")
+            elif regime_code in ("TRANSITION", "UNKNOWN"):
+                triggers.append("Wait for the market regime to confirm a trend")
             if not triggers:
                 triggers.append("Wait for one additional independent confirmation")
 
         rr_component = min(rr / 4.0, 1.0) * 100
+        regime_score = 100.0 if execution.get("regime_code") == "TRENDING" and execution.get("regime_aligned") else 35.0
         ranking_score = round(
-            execution["readiness"] * 0.45
-            + direction_score * 0.30
-            + rr_component * 0.15
-            + min(confirmations / 8, 1) * 10,
+            execution["readiness"] * 0.40
+            + direction_score * 0.27
+            + rr_component * 0.13
+            + min(confirmations / 8, 1) * 10
+            + regime_score * 0.10,
             2,
         )
 

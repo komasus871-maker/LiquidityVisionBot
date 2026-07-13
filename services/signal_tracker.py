@@ -6,7 +6,7 @@ import logging
 import os
 import socket
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from aiogram import Bot
 
@@ -15,7 +15,6 @@ from database.signal_history import SignalHistory
 from services.market import Market
 from services.notifier import Notifier
 from services.trade_intelligence import TradeIntelligenceEngine
-from services.trade_manager import TradeManager
 
 
 class SignalTracker:
@@ -25,7 +24,6 @@ class SignalTracker:
         self.market = Market()
         self.notifier = Notifier(bot)
         self.intelligence = TradeIntelligenceEngine()
-        self.trade_manager = TradeManager()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.auto_break_even = os.getenv("AUTO_BREAK_EVEN_AFTER_TP1", "true").lower() in {"1", "true", "yes", "on"}
         self.progress_interval = max(300, int(os.getenv("TRADE_PROGRESS_INTERVAL", "900")))
@@ -79,8 +77,6 @@ class SignalTracker:
         runtime_started("signal_tracker")
         processed = errors = 0
         try:
-            # Repair any race/legacy duplicates before lifecycle processing.
-            self.trade_manager.reconcile_all()
             for signal in self.history.get_open():
                 processed += 1
                 try:
@@ -253,18 +249,7 @@ class SignalTracker:
 
         if snapshot.alert_reasons:
             signature = "|".join(snapshot.alert_reasons)
-            last_alert_at = signal.get("last_intelligence_notified_at")
-            cooldown_ok = True
-            if last_alert_at:
-                try:
-                    parsed = datetime.fromisoformat(str(last_alert_at))
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    cooldown_ok = datetime.now(timezone.utc) - parsed >= timedelta(minutes=15)
-                except (TypeError, ValueError):
-                    cooldown_ok = True
-            critical = snapshot.health == "🔴 AT RISK" or any("90%" in reason for reason in snapshot.alert_reasons)
-            if signature != str(signal.get("last_alert_signature") or "") and (cooldown_ok or critical):
+            if signature != str(signal.get("last_alert_signature") or ""):
                 await self.notifier.smart_alert(signal, price, snapshot.alert_reasons)
                 alerted_at = now
                 alert_fields = {

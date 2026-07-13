@@ -12,13 +12,11 @@ from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.signal_history import SignalHistory
 from utils.price import fmt_price
-from services.trade_manager import TradeManager
 
 router = Router()
 history = SignalHistory()
 observations = ObservationHistory()
 candidates = CandidateHistory()
-trade_manager = TradeManager()
 
 
 def _status_icon(status: str) -> str:
@@ -58,9 +56,6 @@ def _event_details(raw: str | None) -> dict:
 @router.message(F.text == "📒 Journal")
 async def journal_handler(message: Message):
     user_id = message.from_user.id
-    # Journal is also an integrity checkpoint, so stale duplicate active plans
-    # never remain visible after a deployment or race.
-    trade_manager.reconcile_owner(user_id)
     stats = history.get_stats(user_id)
     recent = history.get_recent(user_id, limit=8)
     obs_recent = observations.recent(user_id, limit=5)
@@ -146,58 +141,13 @@ async def journal_handler(message: Message):
 """, parse_mode="HTML")
 
 
-async def _manual_stop(message: Message, signal_id: int) -> bool:
-    signal = history.get_by_id(signal_id)
-    if not signal or int(signal.get("owner_telegram_id") or 0) != message.from_user.id:
-        await message.answer("Сделка не найдена.")
-        return False
-    if str(signal.get("status")) not in {"WATCHING", "TRIGGERED", "ACTIVE", "TP1", "TP2"}:
-        await message.answer(f"Сделка #{signal_id} уже закрыта: <b>{html.escape(str(signal.get('status')))}</b>.", parse_mode="HTML")
-        return False
-    history.manual_stop(signal_id, owner_telegram_id=message.from_user.id)
-    await message.answer(
-        f"⏹ <b>Отслеживание сделки #{signal_id} остановлено</b>\n\n"
-        f"{html.escape(str(signal.get('symbol')))} {html.escape(str(signal.get('side')))} · "
-        f"{html.escape(str(signal.get('timeframe')).upper())}\n"
-        "Результат сохранён как <b>MANUAL_STOP</b> и не считается срабатыванием Stop Loss.",
-        parse_mode="HTML",
-    )
-    return True
-
-
-@router.message(Command("stop"))
-async def stop_trade_handler(message: Message):
-    parts = (message.text or "").split()
-    raw_id = None
-    if len(parts) == 2 and parts[1].isdigit():
-        raw_id = parts[1]
-    elif len(parts) == 3 and parts[1].lower() == "trade" and parts[2].isdigit():
-        raw_id = parts[2]
-    if raw_id is None:
-        await message.answer(
-            "Использование: <code>/stop 12</code> или <code>/stop trade 12</code>",
-            parse_mode="HTML",
-        )
-        return
-    await _manual_stop(message, int(raw_id))
-
-
 @router.message(Command("trade"))
 async def trade_replay_handler(message: Message):
-    parts = (message.text or "").split()
-    if len(parts) not in {2, 3} or not parts[1].isdigit():
-        await message.answer(
-            "Использование: <code>/trade 12</code> или <code>/trade 12 stop</code>",
-            parse_mode="HTML",
-        )
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: <code>/trade 12</code>", parse_mode="HTML")
         return
-    signal_id = int(parts[1])
-    if len(parts) == 3:
-        if parts[2].lower() not in {"stop", "cancel", "close"}:
-            await message.answer("Доступное действие: <code>stop</code>", parse_mode="HTML")
-            return
-        await _manual_stop(message, signal_id)
-        return
+    signal_id = int(parts[1].strip())
     signal = history.get_by_id(signal_id)
     if not signal or int(signal.get("owner_telegram_id") or 0) != message.from_user.id:
         await message.answer("Сделка не найдена.")

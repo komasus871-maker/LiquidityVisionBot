@@ -219,10 +219,8 @@ class Notifier:
             "",
             "📊 <b>Probability Engine</b>",
             (f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · TP3 {probability['tp3_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%"
-             if probability['estimated'] else "Learning: the historical sample is still too small."),
-            (f"TP1 range {probability['tp1_low']:.0f}–{probability['tp1_high']:.0f}% · Stop range {probability['stop_low']:.0f}–{probability['stop_high']:.0f}%"
-             if probability['estimated'] else f"Matched cases: {probability['samples']} · effective sample {probability['effective_samples']:.1f}"),
-            (f"Cases: {probability['samples']} · effective sample {probability['effective_samples']:.1f} · Reliability: {html.escape(probability['reliability'])}"
+             if probability['samples'] else "Learning: no completed historical sample yet."),
+            (f"Sample: {probability['samples']} · Reliability: {html.escape(probability['reliability'])}"
              if probability['samples'] else "Historical estimates will appear after completed trades."),
             "",
             "🤖 <b>AI Commentary</b>",
@@ -255,12 +253,12 @@ class Notifier:
             "<b>What changed</b>",
             *[f"• {html.escape(reason)}" for reason in reasons],
         ]
-        if probability['estimated']:
+        if probability['samples']:
             lines.extend([
                 "",
                 "📊 <b>Historical probability</b>",
                 f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%",
-                f"Cases {probability['samples']} · effective {probability['effective_samples']:.1f} · {html.escape(probability['reliability'])}",
+                f"Sample {probability['samples']} · {html.escape(probability['reliability'])}",
             ])
         if commentary:
             lines.extend(["", "🤖 <b>AI Commentary</b>", html.escape(commentary)])
