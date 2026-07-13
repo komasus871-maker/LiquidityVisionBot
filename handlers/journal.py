@@ -9,12 +9,14 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from database.observation_history import ObservationHistory
+from database.candidate_history import CandidateHistory
 from database.signal_history import SignalHistory
 from utils.price import fmt_price
 
 router = Router()
 history = SignalHistory()
 observations = ObservationHistory()
+candidates = CandidateHistory()
 
 
 def _status_icon(status: str) -> str:
@@ -58,6 +60,7 @@ async def journal_handler(message: Message):
     recent = history.get_recent(user_id, limit=8)
     obs_recent = observations.recent(user_id, limit=5)
     observation_count = observations.count(user_id)
+    candidate_recent = candidates.recent(user_id, limit=5)
 
     recent_text = []
     for item in recent:
@@ -84,6 +87,11 @@ async def journal_handler(message: Message):
         f"   Direction {x['direction_score']:.1f} | Ready {x['readiness']:.1f} | Price {fmt_price(x['price'])}"
         for x in obs_recent
     ) or "Пока нет аналитических наблюдений."
+    candidate_text = "\n\n".join(
+        f"🧩 <b>#{x['id']} {x['symbol']} {x['side']}</b> — CANDIDATE\n"
+        f"   Заблокирован активной сделкой #{x.get('blocked_by_signal_id') or '—'}"
+        for x in candidate_recent
+    ) or "Нет ожидающих альтернативных сценариев."
 
     await message.answer(f"""
 📒 <b>Trade Journal PRO</b>
@@ -119,6 +127,12 @@ async def journal_handler(message: Message):
 👁 <b>Recent observations</b>
 
 {obs_text}
+
+━━━━━━━━━━━━━━━━━━
+
+🧩 <b>Alternative candidates</b>
+
+{candidate_text}
 """, parse_mode="HTML")
 
 
@@ -136,14 +150,48 @@ async def trade_replay_handler(message: Message):
 
     events = history.get_events(signal_id)
     event_lines = []
-    meaningful_events = [e for e in events if str(e.get("event_type")) != "REFRESHED"]
+    meaningful_types = {
+        "CREATED", "PLAN_UPDATED", "DIRECTION_FLIPPED", "DUPLICATE_RECONCILED",
+        "TRIGGERED", "ACTIVE", "TP1", "BREAK_EVEN_SET", "TP2", "TP3",
+        "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED",
+    }
+    meaningful_events = [e for e in events if str(e.get("event_type")) in meaningful_types]
+    labels = {
+        "CREATED": "Observation promoted to trade plan",
+        "PLAN_UPDATED": "Pending plan updated",
+        "DIRECTION_FLIPPED": "Direction replaced before activation",
+        "DUPLICATE_RECONCILED": "Legacy duplicate closed",
+        "TRIGGERED": "Price entered preferred zone",
+        "ACTIVE": "Trade activated",
+        "TP1": "TP1 reached",
+        "BREAK_EVEN_SET": "Stop moved to Break Even",
+        "TP2": "TP2 reached",
+        "TP3": "TP3 reached — completed",
+        "STOP": "Stop Loss reached",
+        "BREAKEVEN": "Closed at Break Even",
+        "INVALIDATED": "Scenario invalidated",
+        "EXPIRED": "Scenario expired",
+    }
+    previous_dt = None
     for event in meaningful_events:
         created = str(event.get("created_at") or "")
         try:
             dt = datetime.fromisoformat(created)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             stamp = dt.strftime("%d.%m %H:%M")
         except ValueError:
+            dt = None
             stamp = created[:16]
+        elapsed = ""
+        if dt is not None and previous_dt is not None:
+            delta = max(0, int((dt - previous_dt).total_seconds()))
+            hours, rem = divmod(delta, 3600)
+            minutes = rem // 60
+            elapsed = f" · +{hours}h {minutes}m" if hours else f" · +{minutes}m"
+        if dt is not None:
+            previous_dt = dt
+
         details = _event_details(event.get("details_json"))
         suffix = ""
         if event["event_type"] == "BREAK_EVEN_SET":
@@ -151,13 +199,15 @@ async def trade_replay_handler(message: Message):
         elif event["event_type"] == "PLAN_UPDATED":
             old_plan, new_plan = details.get("old", {}), details.get("new", {})
             suffix = f" · entry {fmt_price(old_plan.get('entry'))} → {fmt_price(new_plan.get('entry'))}"
-        elif event["event_type"] == "DIRECTION_FLIPPED":
-            suffix = " · opposite scenario replaced this pending plan"
-        elif details.get("reason"):
+        elif event["event_type"] in {"DIRECTION_FLIPPED", "INVALIDATED"} and details.get("reason"):
             suffix = f" · {html.escape(str(details['reason']))}"
+        elif event["event_type"] == "DUPLICATE_RECONCILED":
+            suffix = f" · kept #{details.get('kept_signal_id', '—')}"
+
+        event_name = labels.get(str(event["event_type"]), str(event["event_type"]))
         event_lines.append(
-            f"{_status_icon(str(event['event_type']))} <b>{html.escape(str(event['event_type']))}</b>"
-            f" · {stamp} · <code>{fmt_price(event.get('price')) if event.get('price') is not None else '—'}</code>{suffix}"
+            f"{_status_icon(str(event['event_type']))} <b>{html.escape(event_name)}</b>\n"
+            f"   {stamp}{elapsed} · <code>{fmt_price(event.get('price')) if event.get('price') is not None else '—'}</code>{suffix}"
         )
     replay = "\n".join(event_lines) if event_lines else "Событий пока нет."
     effective_stop = signal.get("effective_stop") or signal.get("stop")

@@ -222,6 +222,17 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS signal_candidates(
+                id {id_col}, owner_telegram_id BIGINT NOT NULL, notification_chat_id BIGINT,
+                symbol TEXT NOT NULL, timeframe TEXT NOT NULL, side TEXT NOT NULL,
+                observation_id BIGINT, blocked_by_signal_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'PENDING', snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                resolved_at TEXT, promoted_signal_id BIGINT,
+                UNIQUE(owner_telegram_id, symbol, timeframe, side)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS user_watchlist(
                 id {id_col}, telegram_id BIGINT NOT NULL, symbol TEXT NOT NULL,
                 timeframe TEXT NOT NULL DEFAULT '1h', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -283,6 +294,42 @@ def create_tables() -> None:
         }.items():
             _add_column(conn, "watch_states", name, definition)
 
+        # Reconcile legacy duplicate open plans before enforcing uniqueness.
+        duplicate_groups = conn.execute("""
+            SELECT COALESCE(owner_telegram_id,0) owner_key, symbol, timeframe, COUNT(*) cnt
+            FROM signals
+            WHERE status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
+            GROUP BY COALESCE(owner_telegram_id,0), symbol, timeframe
+            HAVING COUNT(*) > 1
+        """).fetchall()
+        now_reconcile = datetime.now(timezone.utc).isoformat()
+        priority = {"TP2": 5, "TP1": 4, "ACTIVE": 3, "TRIGGERED": 2, "WATCHING": 1}
+        for group in duplicate_groups:
+            owner_key = group["owner_key"] if isinstance(group, dict) else group[0]
+            symbol = group["symbol"] if isinstance(group, dict) else group[1]
+            timeframe = group["timeframe"] if isinstance(group, dict) else group[2]
+            rows = conn.execute("""
+                SELECT * FROM signals
+                WHERE COALESCE(owner_telegram_id,0)=? AND symbol=? AND timeframe=?
+                  AND status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
+                ORDER BY id DESC
+            """, (owner_key, symbol, timeframe)).fetchall()
+            rows = [dict(r) for r in rows]
+            keep = max(rows, key=lambda r: (priority.get(str(r.get("status")), 0), int(r.get("id") or 0)))
+            for row in rows:
+                if int(row["id"]) == int(keep["id"]):
+                    continue
+                price = row.get("current_price") if row.get("current_price") is not None else row.get("entry")
+                conn.execute(
+                    "UPDATE signals SET status='INVALIDATED', invalidated_at=?, closed_at=?, updated_at=?, result='LEGACY_DUPLICATE_RECONCILED' WHERE id=?",
+                    (now_reconcile, now_reconcile, now_reconcile, row["id"]),
+                )
+                conn.execute(
+                    "INSERT INTO signal_events(signal_id,event_type,price,details_json,created_at) VALUES(?,?,?,?,?)",
+                    (row["id"], "DUPLICATE_RECONCILED", price,
+                     json.dumps({"kept_signal_id": keep["id"]}, ensure_ascii=False), now_reconcile),
+                )
+
         for sql in (
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
@@ -293,6 +340,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(setup_key)",
             "CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_events_signal ON signal_events(signal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_candidates_owner ON signal_candidates(owner_telegram_id, updated_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_market_plan ON signals(COALESCE(owner_telegram_id,0),symbol,timeframe) WHERE status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge ON payments(telegram_payment_charge_id) WHERE telegram_payment_charge_id IS NOT NULL",
         ):
             conn.execute(sql)

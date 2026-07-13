@@ -4,6 +4,12 @@ from services.scenario_engine import ScenarioEngine
 
 class Report:
     @staticmethod
+    def _bar(value: float, width: int = 10) -> str:
+        value = max(0.0, min(100.0, float(value or 0)))
+        filled = round(value / 100 * width)
+        return "█" * filled + "░" * (width - filled)
+
+    @staticmethod
     def _component_lines(items, empty="• None"):
         if not items:
             return empty
@@ -59,6 +65,12 @@ class Report:
         ) or "No breakdown available"
         drivers = self._component_lines(data.get("strongest_drivers", []))
         blockers = self._component_lines(data.get("biggest_blockers", []), "• No major negative component")
+        direction_confidence = float(data.get("direction_score") or 0)
+        confidence_lines = []
+        for label, raw_value in breakdown.items():
+            component_value = max(0.0, min(100.0, 50.0 + float(raw_value or 0) * 2.0))
+            confidence_lines.append(f"{label}: {self._bar(component_value)} {component_value:.0f}%")
+        confidence_text = "\n".join(confidence_lines) or "Component confidence unavailable"
         scenarios = ScenarioEngine.build(data)
         primary_path = "\n".join(f"{idx}. {item}" for idx, item in enumerate(scenarios["primary"], 1))
         alternative_path = "\n".join(f"{idx}. {item}" for idx, item in enumerate(scenarios["alternative"], 1))
@@ -91,6 +103,10 @@ Entry Quality: {data['entry_quality']}/100
 Risk Quality: {data['risk_quality']}/100
 Readiness: {data['execution_readiness']}/100
 AI Grade: {data.get('ai_grade', 'N/A')}
+
+🧠 <b>Confidence Meter</b>
+Overall: {self._bar(direction_confidence)} {direction_confidence:.0f}%
+{confidence_text}
 
 ━━━━━━━━━━━━━━━━━━
 

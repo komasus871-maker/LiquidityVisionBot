@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -158,6 +159,25 @@ class Notifier:
             lines.extend(["", html.escape(extra)])
         await self._send(signal, lines)
 
+    @staticmethod
+    def _confidence_components(signal: dict) -> tuple[float, dict[str, float]]:
+        confidence = float(signal.get("confidence") or 0)
+        try:
+            features = json.loads(signal.get("features_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            features = {}
+        breakdown = features.get("direction_breakdown") or {}
+        groups = {}
+        for key, label in (
+            ("Trend", "Trend"),
+            ("Structure", "Structure"),
+            ("Liquidity/SMC", "Liquidity"),
+            ("Momentum", "Momentum"),
+        ):
+            raw = float(breakdown.get(key, 0) or 0)
+            groups[label] = max(0.0, min(100.0, 50.0 + raw * 2.0))
+        return max(0.0, min(100.0, confidence)), groups
+
     async def progress(self, signal: dict, price: float) -> None:
         entry = float(signal["entry"])
         stop = float(signal.get("effective_stop") or signal["stop"])
@@ -170,6 +190,7 @@ class Notifier:
         duration = self._duration(signal.get("activated_at") or signal.get("created_at")) or "—"
         move_pct = self._progress(signal, price)
         r_value = self._r_multiple(signal, price)
+        confidence, confidence_groups = self._confidence_components(signal)
 
         lines = [
             f"📡 <b>{html.escape(str(signal['symbol']))} {html.escape(side)} · LIVE</b>",
@@ -183,6 +204,12 @@ class Notifier:
             f"TP3 {self._bar(tp3)} {tp3:.0f}%",
             f"Risk used {self._bar(risk_used)} {risk_used:.0f}%",
             f"Distance to SL: <b>{distance_to_sl:.0f}%</b>",
+            "",
+            f"🧠 Confidence {self._bar(confidence)} {confidence:.0f}%",
+            f"Trend {self._bar(confidence_groups.get('Trend', 50))} {confidence_groups.get('Trend', 50):.0f}%",
+            f"Structure {self._bar(confidence_groups.get('Structure', 50))} {confidence_groups.get('Structure', 50):.0f}%",
+            f"Liquidity {self._bar(confidence_groups.get('Liquidity', 50))} {confidence_groups.get('Liquidity', 50):.0f}%",
+            f"Momentum {self._bar(confidence_groups.get('Momentum', 50))} {confidence_groups.get('Momentum', 50):.0f}%",
             "",
             f"Duration: <b>{duration}</b>",
             f"MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>",

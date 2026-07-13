@@ -3,6 +3,7 @@ import re
 from database.signal_history import SignalHistory
 from services.premium import PremiumService
 from database.observation_history import ObservationHistory
+from database.candidate_history import CandidateHistory
 
 
 class SignalRecorder:
@@ -10,6 +11,7 @@ class SignalRecorder:
         self.history = history or SignalHistory()
         self.premium = PremiumService()
         self.observations = ObservationHistory()
+        self.candidates = CandidateHistory()
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
@@ -63,7 +65,9 @@ class SignalRecorder:
             "trend", "structure", "bos", "choch", "liquidity", "sweep", "order_block", "breaker",
             "mitigation", "fvg", "premium", "volume", "displacement", "rsi", "macd", "ema50", "ema200",
             "market_bias", "execution_status", "triggers", "direction_score", "entry_quality", "risk_quality",
-            "execution_readiness", "opportunity_category"
+            "execution_readiness", "opportunity_category", "direction_breakdown",
+            "strongest_drivers", "biggest_blockers", "ai_grade", "execution_bias",
+            "final_verdict", "score_components"
         )}
         payload = {
             "owner_telegram_id": owner_telegram_id, "notification_chat_id": notification_chat_id,
@@ -75,14 +79,36 @@ class SignalRecorder:
             "recommendation": analysis["recommendation"], "setup_key": setup_key,
             "features": features, "reasons": analysis["reasons"], "status": status,
         }
-        # Enforce one open market plan per user/symbol/timeframe.
-        # A live opposite trade blocks promotion; it remains an observation only.
+        # One market may have only one open Trade. Opposite analysis becomes a Candidate
+        # while a live trade exists; it never creates a conflicting second signal.
         open_market = self.history.get_open_market(owner_telegram_id, payload["symbol"], timeframe)
+        live_trade = next((x for x in open_market if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
         same_side = [x for x in open_market if x.get("side") == payload["side"]]
         opposite = [x for x in open_market if x.get("side") != payload["side"]]
-        live_opposite = next((x for x in opposite if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
-        if live_opposite:
+
+        if live_trade:
+            if live_trade.get("side") == payload["side"]:
+                # Refresh metadata only; the locked trade plan remains immutable.
+                signal_id = self.history.refresh_duplicate(int(live_trade["id"]), payload)
+                self.observations.promote(observation_id, signal_id)
+                self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
+                return signal_id
+            if owner_telegram_id is None:
+                return None
+            self.candidates.upsert(
+                owner_telegram_id=owner_telegram_id,
+                notification_chat_id=notification_chat_id,
+                symbol=payload["symbol"],
+                timeframe=timeframe,
+                side=payload["side"],
+                observation_id=observation_id,
+                blocked_by_signal_id=int(live_trade["id"]),
+                snapshot={"analysis": analysis, "payload": payload},
+            )
             return None
+
+        # Pending direction flips replace the old pending plan. Same-side repeats update
+        # the existing row instead of creating another Signal ID.
         for stale in opposite:
             self.history.invalidate_open(int(stale["id"]), "DIRECTION_FLIP")
         duplicate = same_side[0] if same_side else None
@@ -104,4 +130,6 @@ class SignalRecorder:
                     lowest_price=float(payload["entry"]),
                 )
         self.observations.promote(observation_id, signal_id)
+        if owner_telegram_id is not None:
+            self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
         return signal_id
