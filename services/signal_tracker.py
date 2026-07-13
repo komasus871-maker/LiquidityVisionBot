@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -13,6 +14,7 @@ from database.database import acquire_lease, release_lease, runtime_finished, ru
 from database.signal_history import SignalHistory
 from services.market import Market
 from services.notifier import Notifier
+from services.trade_intelligence import TradeIntelligenceEngine
 
 
 class SignalTracker:
@@ -21,6 +23,7 @@ class SignalTracker:
         self.history = SignalHistory()
         self.market = Market()
         self.notifier = Notifier(bot)
+        self.intelligence = TradeIntelligenceEngine()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.auto_break_even = os.getenv("AUTO_BREAK_EVEN_AFTER_TP1", "true").lower() in {"1", "true", "yes", "on"}
         self.progress_interval = max(300, int(os.getenv("TRADE_PROGRESS_INTERVAL", "900")))
@@ -229,6 +232,42 @@ class SignalTracker:
             "lowest_price": lowest,
         }
         signal.update(common)
+
+        snapshot = self.intelligence.evaluate(signal, price, df)
+        intelligence_payload = snapshot.to_dict()
+        intelligence_fields = {
+            "previous_confidence": float(signal.get("dynamic_confidence") or signal.get("confidence") or snapshot.confidence),
+            "dynamic_confidence": snapshot.confidence,
+            "trade_health": snapshot.health,
+            "health_score": snapshot.health_score,
+            "intelligence_json": json.dumps(intelligence_payload, ensure_ascii=False),
+            "last_risk_used": snapshot.risk_used,
+            "last_mfe_giveback": snapshot.mfe_giveback,
+        }
+        signal.update(intelligence_fields)
+        common.update(intelligence_fields)
+
+        if snapshot.alert_reasons:
+            signature = "|".join(snapshot.alert_reasons)
+            if signature != str(signal.get("last_alert_signature") or ""):
+                await self.notifier.smart_alert(signal, price, snapshot.alert_reasons)
+                alerted_at = now
+                alert_fields = {
+                    "last_intelligence_notified_at": alerted_at,
+                    "last_alert_signature": signature,
+                }
+                signal.update(alert_fields)
+                common.update(alert_fields)
+                self.history.add_event(
+                    signal["id"],
+                    "INTELLIGENCE_ALERT",
+                    price,
+                    {
+                        "reasons": snapshot.alert_reasons,
+                        "confidence": snapshot.confidence,
+                        "health": snapshot.health,
+                    },
+                )
 
         effective_stop = float(signal.get("effective_stop") or initial_stop)
         if self._stop_hit(side, price, effective_stop):

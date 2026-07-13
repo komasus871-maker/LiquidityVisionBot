@@ -222,3 +222,41 @@ class ProbabilityEngine:
         analysis["similar_cases"] = [asdict(case) for case in cases]
         analysis["similar_stats"] = self.similar_stats(cases)
         return analysis
+
+    def live_context(self, signal: dict[str, Any]) -> dict[str, Any]:
+        """Return historical probability context for a persisted live signal.
+
+        Exact setup statistics are preferred. Similar cases are used only when
+        exact history is too small. No synthetic percentage is generated.
+        """
+        setup_key = str(signal.get("setup_key") or "")
+        timeframe = str(signal.get("timeframe") or "1h")
+        side = str(signal.get("side") or "LONG")
+        exact = self.exact_stats(setup_key, timeframe, side)
+        try:
+            features = json.loads(signal.get("features_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            features = {}
+        cases = self.similar_cases(
+            features=features,
+            side=side,
+            timeframe=timeframe,
+            symbol=str(signal.get("symbol") or "") or None,
+            limit=50,
+            minimum_similarity=25.0,
+        )
+        similar = self.similar_stats(cases)
+        source = "exact" if exact["samples"] >= self.MIN_DISPLAY_SAMPLE else "similar"
+        chosen = exact if source == "exact" else similar
+        return {
+            "source": source,
+            "samples": int(chosen.get("samples") or 0),
+            "tp1_rate": float(chosen.get("tp1_rate") or 0),
+            "tp2_rate": float(chosen.get("tp2_rate") or 0),
+            "tp3_rate": float(chosen.get("tp3_rate") or 0),
+            "stop_rate": float(chosen.get("stop_rate") or 0),
+            "reliability": str(chosen.get("reliability") or "Insufficient"),
+            "sufficient": bool(chosen.get("sufficient")),
+            "avg_mfe": float(chosen.get("avg_mfe") or 0),
+            "avg_mae": float(chosen.get("avg_mae") or 0),
+        }

@@ -75,9 +75,14 @@ async def journal_handler(message: Message):
                 f"MFE {float(item.get('max_profit_pct') or 0):+.2f}% | "
                 f"MAE {float(item.get('max_drawdown_pct') or 0):+.2f}%"
             )
+        intelligence = ""
+        if item["status"] in {"ACTIVE", "TP1", "TP2"}:
+            health = html.escape(str(item.get("trade_health") or "🟡 STABLE"))
+            confidence = float(item.get("dynamic_confidence") or item.get("confidence") or 0)
+            intelligence = f"\n   {health} · Confidence {confidence:.0f}%"
         recent_text.append(
             f"{_status_icon(item['status'])} <b>#{item['id']} {item['symbol']} {item['side']}</b> — {item['status']}\n"
-            f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | {metrics}\n"
+            f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | {metrics}{intelligence}\n"
             f"   /trade {item['id']}"
         )
 
@@ -153,7 +158,7 @@ async def trade_replay_handler(message: Message):
     meaningful_types = {
         "CREATED", "PLAN_UPDATED", "DIRECTION_FLIPPED", "DUPLICATE_RECONCILED",
         "TRIGGERED", "ACTIVE", "TP1", "BREAK_EVEN_SET", "TP2", "TP3",
-        "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED",
+        "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "INTELLIGENCE_ALERT",
     }
     meaningful_events = [e for e in events if str(e.get("event_type")) in meaningful_types]
     labels = {
@@ -171,6 +176,7 @@ async def trade_replay_handler(message: Message):
         "BREAKEVEN": "Closed at Break Even",
         "INVALIDATED": "Scenario invalidated",
         "EXPIRED": "Scenario expired",
+        "INTELLIGENCE_ALERT": "Intelligence changed",
     }
     previous_dt = None
     for event in meaningful_events:
@@ -203,6 +209,8 @@ async def trade_replay_handler(message: Message):
             suffix = f" · {html.escape(str(details['reason']))}"
         elif event["event_type"] == "DUPLICATE_RECONCILED":
             suffix = f" · kept #{details.get('kept_signal_id', '—')}"
+        elif event["event_type"] == "INTELLIGENCE_ALERT":
+            suffix = f" · {details.get('health', '—')} · confidence {float(details.get('confidence') or 0):.0f}%"
 
         event_name = labels.get(str(event["event_type"]), str(event["event_type"]))
         event_lines.append(
@@ -228,6 +236,8 @@ Pre-activation MFE / MAE: <b>{float(signal.get('pre_activation_max_profit_pct') 
 Trade MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>
 Realized: <b>{float(signal.get('realized_r') or 0):+.2f}R</b>
 Result: <b>{html.escape(str(signal.get('result') or 'OPEN'))}</b>
+Trade Health: <b>{html.escape(str(signal.get('trade_health') or '—'))}</b>
+Dynamic Confidence: <b>{float(signal.get('dynamic_confidence') or signal.get('confidence') or 0):.0f}%</b>
 
 ━━━━━━━━━━━━━━━━━━
 

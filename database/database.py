@@ -192,7 +192,11 @@ def create_tables() -> None:
                 last_progress_bucket INTEGER DEFAULT -1,
                 pre_activation_max_profit_pct DOUBLE PRECISION DEFAULT 0,
                 pre_activation_max_drawdown_pct DOUBLE PRECISION DEFAULT 0,
-                plan_locked_at TEXT
+                plan_locked_at TEXT,
+                dynamic_confidence DOUBLE PRECISION, previous_confidence DOUBLE PRECISION,
+                trade_health TEXT, health_score DOUBLE PRECISION, intelligence_json TEXT,
+                last_intelligence_notified_at TEXT, last_alert_signature TEXT,
+                last_risk_used DOUBLE PRECISION DEFAULT 0, last_mfe_giveback DOUBLE PRECISION DEFAULT 0
             )
         """)
         conn.execute(f"""
@@ -286,6 +290,10 @@ def create_tables() -> None:
             "pre_activation_max_profit_pct": "DOUBLE PRECISION DEFAULT 0",
             "pre_activation_max_drawdown_pct": "DOUBLE PRECISION DEFAULT 0",
             "plan_locked_at": "TEXT",
+            "dynamic_confidence": "DOUBLE PRECISION", "previous_confidence": "DOUBLE PRECISION",
+            "trade_health": "TEXT", "health_score": "DOUBLE PRECISION", "intelligence_json": "TEXT",
+            "last_intelligence_notified_at": "TEXT", "last_alert_signature": "TEXT",
+            "last_risk_used": "DOUBLE PRECISION DEFAULT 0", "last_mfe_giveback": "DOUBLE PRECISION DEFAULT 0",
         }.items():
             _add_column(conn, "signals", name, definition)
         for name, definition in {

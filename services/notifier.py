@@ -161,22 +161,18 @@ class Notifier:
 
     @staticmethod
     def _confidence_components(signal: dict) -> tuple[float, dict[str, float]]:
-        confidence = float(signal.get("confidence") or 0)
+        confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or 0)
         try:
-            features = json.loads(signal.get("features_json") or "{}")
+            intelligence = json.loads(signal.get("intelligence_json") or "{}")
         except (TypeError, json.JSONDecodeError):
-            features = {}
-        breakdown = features.get("direction_breakdown") or {}
-        groups = {}
-        for key, label in (
-            ("Trend", "Trend"),
-            ("Structure", "Structure"),
-            ("Liquidity/SMC", "Liquidity"),
-            ("Momentum", "Momentum"),
-        ):
-            raw = float(breakdown.get(key, 0) or 0)
-            groups[label] = max(0.0, min(100.0, 50.0 + raw * 2.0))
-        return max(0.0, min(100.0, confidence)), groups
+            intelligence = {}
+        groups = {
+            "Trend": float(intelligence.get("trend", 50) or 50),
+            "Structure": float(intelligence.get("structure", 50) or 50),
+            "Liquidity": float(intelligence.get("liquidity", 50) or 50),
+            "Momentum": float(intelligence.get("momentum", 50) or 50),
+        }
+        return max(0.0, min(100.0, confidence)), {k: max(0.0, min(100.0, v)) for k, v in groups.items()}
 
     async def progress(self, signal: dict, price: float) -> None:
         entry = float(signal["entry"])
@@ -191,6 +187,15 @@ class Notifier:
         move_pct = self._progress(signal, price)
         r_value = self._r_multiple(signal, price)
         confidence, confidence_groups = self._confidence_components(signal)
+        previous_confidence = float(signal.get("previous_confidence") or confidence)
+        confidence_delta = confidence - previous_confidence
+        health = str(signal.get("trade_health") or "🟡 STABLE")
+        commentary = ""
+        try:
+            commentary = str(json.loads(signal.get("intelligence_json") or "{}").get("commentary") or "")
+        except (TypeError, json.JSONDecodeError):
+            pass
+        probability = self.probability.live_context(signal)
 
         lines = [
             f"📡 <b>{html.escape(str(signal['symbol']))} {html.escape(side)} · LIVE</b>",
@@ -198,6 +203,7 @@ class Notifier:
             f"Status: <b>{html.escape(str(signal['status']))}</b>",
             f"Entry / Current: <code>{fmt_price(entry)}</code> → <code>{fmt_price(price)}</code>",
             f"PnL: <b>{move_pct:+.2f}%</b> · <b>{r_value:+.2f}R</b>",
+            f"Trade Health: <b>{html.escape(health)}</b>",
             "",
             f"TP1 {self._bar(tp1)} {tp1:.0f}%",
             f"TP2 {self._bar(tp2)} {tp2:.0f}%",
@@ -205,17 +211,57 @@ class Notifier:
             f"Risk used {self._bar(risk_used)} {risk_used:.0f}%",
             f"Distance to SL: <b>{distance_to_sl:.0f}%</b>",
             "",
-            f"🧠 Confidence {self._bar(confidence)} {confidence:.0f}%",
+            f"🧠 Confidence {self._bar(confidence)} {confidence:.0f}% ({confidence_delta:+.0f}%)",
             f"Trend {self._bar(confidence_groups.get('Trend', 50))} {confidence_groups.get('Trend', 50):.0f}%",
             f"Structure {self._bar(confidence_groups.get('Structure', 50))} {confidence_groups.get('Structure', 50):.0f}%",
             f"Liquidity {self._bar(confidence_groups.get('Liquidity', 50))} {confidence_groups.get('Liquidity', 50):.0f}%",
             f"Momentum {self._bar(confidence_groups.get('Momentum', 50))} {confidence_groups.get('Momentum', 50):.0f}%",
+            "",
+            "📊 <b>Probability Engine</b>",
+            (f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · TP3 {probability['tp3_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%"
+             if probability['samples'] else "Learning: no completed historical sample yet."),
+            (f"Sample: {probability['samples']} · Reliability: {html.escape(probability['reliability'])}"
+             if probability['samples'] else "Historical estimates will appear after completed trades."),
+            "",
+            "🤖 <b>AI Commentary</b>",
+            html.escape(commentary or "The trade remains under live monitoring."),
             "",
             f"Duration: <b>{duration}</b>",
             f"MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>",
         ]
         if signal.get("break_even_at"):
             lines.append("🛡 Break Even protection is active.")
+        await self._send(signal, lines)
+
+    async def smart_alert(self, signal: dict, price: float, reasons: list[str]) -> None:
+        if not reasons:
+            return
+        confidence, _ = self._confidence_components(signal)
+        health = str(signal.get("trade_health") or "🟡 STABLE")
+        probability = self.probability.live_context(signal)
+        try:
+            commentary = str(json.loads(signal.get("intelligence_json") or "{}").get("commentary") or "")
+        except (TypeError, json.JSONDecodeError):
+            commentary = ""
+        lines = [
+            f"🧠 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))} · INTELLIGENCE ALERT</b>",
+            "",
+            f"Trade Health: <b>{html.escape(health)}</b>",
+            f"Dynamic Confidence: <b>{confidence:.0f}%</b>",
+            f"Current price: <code>{fmt_price(price)}</code>",
+            "",
+            "<b>What changed</b>",
+            *[f"• {html.escape(reason)}" for reason in reasons],
+        ]
+        if probability['samples']:
+            lines.extend([
+                "",
+                "📊 <b>Historical probability</b>",
+                f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%",
+                f"Sample {probability['samples']} · {html.escape(probability['reliability'])}",
+            ])
+        if commentary:
+            lines.extend(["", "🤖 <b>AI Commentary</b>", html.escape(commentary)])
         await self._send(signal, lines)
 
     async def break_even(self, signal: dict, price: float) -> None:

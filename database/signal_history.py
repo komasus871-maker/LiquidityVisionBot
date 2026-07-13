@@ -176,6 +176,9 @@ class SignalHistory:
             "realized_r", "result", "highest_price", "lowest_price",
             "last_progress_notified_at", "last_progress_bucket",
             "pre_activation_max_profit_pct", "pre_activation_max_drawdown_pct", "plan_locked_at",
+            "dynamic_confidence", "previous_confidence", "trade_health", "health_score",
+            "intelligence_json", "last_intelligence_notified_at", "last_alert_signature",
+            "last_risk_used", "last_mfe_giveback",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
