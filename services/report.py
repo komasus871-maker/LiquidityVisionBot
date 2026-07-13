@@ -2,21 +2,25 @@ from utils.price import fmt_price, fmt_number
 
 
 class Report:
+    @staticmethod
+    def _component_lines(items, empty="• None"):
+        if not items:
+            return empty
+        return "\n".join(
+            f"• {item['label']}: {item['value']:+.1f}" for item in items
+        )
+
     def ai_summary(self, data):
         direction = data["direction"]
         summary = [
-            f"• Market bias: {data['market_bias']}.",
-            f"• Primary scenario: {direction} ({data['score']}/100).",
+            f"• Market direction: {data['market_bias']} ({data['direction_score']}/100).",
+            f"• Execution bias: {data.get('execution_bias', 'NEUTRAL / OBSERVE')}.",
             f"• Alternative scenario: {data['alternative_scenario']} ({data['alternative_score']}/100).",
             f"• Directional edge: {data['directional_edge']:+.1f} points.",
-            f"• Execution status: {data['execution_status']}.",
-            f"• Direction / Entry / Risk / Readiness: {data['direction_score']}/{data['entry_quality']}/{data['risk_quality']}/{data['execution_readiness']}.",
+            f"• Entry / Risk / Readiness: {data['entry_quality']}/{data['risk_quality']}/{data['execution_readiness']}.",
         ]
-        if "Counter-trend" in " ".join(data["reasons"]):
-            summary.append(f"• The {direction} idea is counter-trend and needs stronger confirmation.")
-        else:
-            summary.append(f"• Trend context supports the {direction} scenario.")
-        summary.append(f"• Price location: {data['premium']['zone'].split(' ', 1)[-1]} ({data['premium']['premium']}% of range).")
+        if data.get("exhaustion_risk"):
+            summary.append("• Momentum may be directionally valid, but continuation is currently stretched.")
         if data["triggers"]:
             summary.append(f"• Best next confirmation: {data['triggers'][0]}.")
         return "\n".join(summary)
@@ -48,13 +52,25 @@ class Report:
         reasons = "\n".join(data["reasons"]) or "⚪ No decisive confluence"
         p = fmt_price
         probability_text = self.probability_summary(data)
+        breakdown = data.get("direction_breakdown", {})
+        breakdown_text = "\n".join(
+            f"{name}: {value:+.1f}" for name, value in breakdown.items()
+        ) or "No breakdown available"
+        drivers = self._component_lines(data.get("strongest_drivers", []))
+        blockers = self._component_lines(data.get("biggest_blockers", []), "• No major negative component")
+
         return f"""
 📊 <b>Liquidity Vision</b>
 
 ━━━━━━━━━━━━━━━━━━
 
-🧭 <b>Market Bias</b>
+🧭 <b>Market Direction</b>
 {data['market_bias']}
+Direction score: {data['direction_score']}/100
+
+⚡ <b>Execution Bias</b>
+{data.get('execution_bias', 'NEUTRAL / OBSERVE')}
+{data['execution_status']}
 
 🎯 <b>Primary Scenario</b>
 {data['direction']} — {data['recommendation']}
@@ -66,14 +82,16 @@ class Report:
 LONG {data['long_score']} / SHORT {data['short_score']}
 Edge: {data['directional_edge']:+.1f}
 
-🎬 <b>Execution Status</b>
-{data['execution_status']}
-
 📊 <b>Execution Intelligence</b>
-Direction: {data['direction_score']}/100
 Entry Quality: {data['entry_quality']}/100
 Risk Quality: {data['risk_quality']}/100
 Readiness: {data['execution_readiness']}/100
+AI Grade: {data.get('ai_grade', 'N/A')}
+
+━━━━━━━━━━━━━━━━━━
+
+🧠 <b>Final Verdict</b>
+{data.get('final_verdict', 'Observe current conditions.')}
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -153,6 +171,17 @@ TP1: {p(data['tp1'])}
 TP2: {p(data['tp2'])}
 TP3: {p(data['tp3'])}
 RR: 1:{fmt_number(data['rr'])}
+
+━━━━━━━━━━━━━━━━━━
+
+🧮 <b>Direction Breakdown</b>
+{breakdown_text}
+
+🚀 <b>Strongest Drivers</b>
+{drivers}
+
+🚧 <b>Biggest Blockers</b>
+{blockers}
 
 ━━━━━━━━━━━━━━━━━━
 

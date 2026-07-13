@@ -7,11 +7,7 @@ from utils.price import fmt_number, fmt_price
 
 
 class Explainer:
-    """Turns a structured analysis into an explainable trading report.
-
-    This engine does not invent probabilities. It only explains values that are
-    already present in the deterministic analysis result.
-    """
+    """Explain deterministic market direction and execution quality separately."""
 
     @staticmethod
     def _clean_reason(reason: str) -> str:
@@ -26,6 +22,15 @@ class Explainer:
         if value >= 42:
             return "Weak"
         return "Very weak"
+
+    @staticmethod
+    def _component_text(items: list[dict[str, Any]], empty: str) -> str:
+        if not items:
+            return f"• {empty}"
+        return "\n".join(
+            f"• {escape(str(item.get('label', 'Factor')))}: {float(item.get('value', 0)):+.1f}"
+            for item in items
+        )
 
     def build(self, data: dict[str, Any], symbol: str) -> str:
         direction = str(data.get("direction", "NEUTRAL"))
@@ -50,14 +55,14 @@ class Explainer:
         preferred_high = float(data.get("preferred_entry_high", current_price))
         stop = float(data.get("stop", 0.0))
 
-        if abs(edge) < 5:
-            edge_explanation = "The directional advantage is small, so the market is effectively two-sided."
+        if abs(edge) < 6:
+            edge_explanation = "The market is effectively two-sided; neither direction has a reliable advantage."
         elif abs(edge) < 15:
-            edge_explanation = "The primary scenario has only a modest advantage and needs confirmation."
+            edge_explanation = "The primary direction has a modest advantage and still needs confirmation."
         elif abs(edge) < 30:
-            edge_explanation = "The primary scenario has a meaningful directional advantage."
+            edge_explanation = "The primary direction has a meaningful contextual advantage."
         else:
-            edge_explanation = "The primary scenario has a strong directional advantage over the alternative."
+            edge_explanation = "The primary direction has a strong contextual advantage over the alternative."
 
         exact = data.get("historical_probability") or {}
         similar = data.get("similar_stats") or {}
@@ -78,42 +83,54 @@ class Explainer:
         else:
             historical_text = "No completed historical sample yet. The system is collecting outcomes."
 
-        if data.get("execution_status") == "🟢 READY":
-            execution_view = "The setup currently passes the execution filters, but risk management remains mandatory."
-        elif data.get("execution_status") == "🎯 WAIT FOR PULLBACK":
-            execution_view = "Direction may be valid, but the current entry is inefficient. The preferred plan is to wait for price to return to the calculated zone."
-        elif data.get("execution_status") == "🟡 WAIT FOR TRIGGER":
-            execution_view = "The directional idea exists, but structure or momentum has not confirmed execution yet."
-        else:
-            execution_view = "This is an observation scenario rather than an executable trade."
+        breakdown = data.get("direction_breakdown", {})
+        breakdown_text = "\n".join(
+            f"• {escape(str(name))}: {float(value):+.1f}"
+            for name, value in breakdown.items()
+        ) or "• No breakdown available"
+        drivers = self._component_text(data.get("strongest_drivers", []), "No major positive driver")
+        negative = self._component_text(data.get("biggest_blockers", []), "No major negative component")
 
         return f"""
 🧠 <b>Explain Pro — {escape(symbol.upper())}</b>
 
 ━━━━━━━━━━━━━━━━━━
 
-🎯 <b>Why {escape(direction)}?</b>
-{positive_text}
+🧭 <b>Market direction</b>
+{escape(str(data.get('market_bias', 'Unknown')))}
+Direction score: {fmt_number(data.get('direction_score', 0), 1)}/100
 
-⚖️ <b>Directional edge</b>
-LONG {fmt_number(data.get('long_score', 0), 1)} / SHORT {fmt_number(data.get('short_score', 0), 1)}
-Edge: {float(data.get('directional_edge', 0)):+.1f}
+⚡ <b>Execution bias</b>
+{escape(str(data.get('execution_bias', 'NEUTRAL / OBSERVE')))}
+{escape(str(data.get('execution_status', 'WATCHLIST')))}
 
 {escape(edge_explanation)}
 
 ━━━━━━━━━━━━━━━━━━
 
-📊 <b>Score interpretation</b>
-Direction: {fmt_number(data.get('direction_score', 0), 1)}/100 — {self._grade(float(data.get('direction_score', 0)))}
-Entry: {fmt_number(data.get('entry_quality', 0), 1)}/100 — {self._grade(float(data.get('entry_quality', 0)))}
-Risk: {fmt_number(data.get('risk_quality', 0), 1)}/100 — {self._grade(float(data.get('risk_quality', 0)))}
-Readiness: {fmt_number(data.get('execution_readiness', 0), 1)}/100 — {self._grade(float(data.get('execution_readiness', 0)))}
+🧮 <b>Why the direction score looks this way</b>
+{breakdown_text}
 
-{escape(execution_view)}
+🚀 <b>Strongest drivers</b>
+{drivers}
+
+🚧 <b>Biggest blockers</b>
+{negative}
 
 ━━━━━━━━━━━━━━━━━━
 
-✅ <b>What supports the setup</b>
+📊 <b>Execution quality</b>
+Entry: {fmt_number(data.get('entry_quality', 0), 1)}/100 — {self._grade(float(data.get('entry_quality', 0)))}
+Risk: {fmt_number(data.get('risk_quality', 0), 1)}/100 — {self._grade(float(data.get('risk_quality', 0)))}
+Readiness: {fmt_number(data.get('execution_readiness', 0), 1)}/100 — {self._grade(float(data.get('execution_readiness', 0)))}
+AI Grade: {escape(str(data.get('ai_grade', 'N/A')))}
+
+<b>Final verdict:</b>
+{escape(str(data.get('final_verdict', 'Observe current conditions.')))}
+
+━━━━━━━━━━━━━━━━━━
+
+✅ <b>What supports {escape(direction)}</b>
 {positive_text}
 
 ⚠️ <b>What weakens it</b>
@@ -140,9 +157,4 @@ Invalidation / stop reference: {fmt_price(stop)}
 
 📚 <b>Historical intelligence</b>
 {escape(historical_text)}
-
-━━━━━━━━━━━━━━━━━━
-
-🧩 <b>Analyst conclusion</b>
-The system currently prefers <b>{escape(direction)}</b>, but the recommendation is <b>{escape(str(data.get('recommendation', 'OBSERVE')))}</b>. The most important distinction is between directional quality and entry quality: a correct market bias does not automatically mean the current price is a good entry.
 """.strip()
