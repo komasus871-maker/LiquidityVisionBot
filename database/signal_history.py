@@ -30,6 +30,33 @@ class SignalHistory:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_open_market(self, owner_telegram_id: int | None, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM signals
+                   WHERE COALESCE(owner_telegram_id,0)=COALESCE(?,0)
+                     AND symbol=? AND timeframe=?
+                     AND status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
+                   ORDER BY CASE status
+                     WHEN 'TP2' THEN 5 WHEN 'TP1' THEN 4 WHEN 'ACTIVE' THEN 3
+                     WHEN 'TRIGGERED' THEN 2 ELSE 1 END DESC, id DESC""",
+                (owner_telegram_id, symbol, timeframe),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def invalidate_open(self, signal_id: int, reason: str, price: float | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute("SELECT current_price,entry,status FROM signals WHERE id=?", (signal_id,)).fetchone()
+            if not row or str(row[2]) not in OPEN_STATUSES:
+                return
+            event_price = price if price is not None else (row[0] if row[0] is not None else row[1])
+            conn.execute(
+                "UPDATE signals SET status='INVALIDATED', invalidated_at=?, closed_at=?, updated_at=?, result=? WHERE id=?",
+                (now, now, now, reason, signal_id),
+            )
+            self._add_event_conn(conn, signal_id, "DIRECTION_FLIPPED" if reason == "DIRECTION_FLIP" else "INVALIDATED", event_price, {"reason": reason})
+
     def save(self, signal: dict[str, Any]) -> int:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
@@ -75,27 +102,39 @@ class SignalHistory:
 
     def refresh_duplicate(self, signal_id: int, signal: dict[str, Any]) -> int:
         now = datetime.now(timezone.utc).isoformat()
-        desired_status = signal.get("status", "WATCHING")
-        activated_at = now if desired_status == "ACTIVE" else None
-        effective_stop = float(signal["stop"]) if desired_status == "ACTIVE" else None
         with self._connect() as conn:
+            existing_row = conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
+            if not existing_row:
+                return signal_id
+            existing = dict(existing_row)
+            # Once price entered the zone, the trading plan is immutable.
+            if existing.get("status") in {"TRIGGERED", "ACTIVE", "TP1", "TP2"}:
+                conn.execute(
+                    "UPDATE signals SET updated_at=?, recommendation=?, confidence=?, bull_score=?, bear_score=?, features_json=?, reasons_json=? WHERE id=?",
+                    (now, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
+                     json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False), signal_id),
+                )
+                return signal_id
+
+            desired_status = signal.get("status", "WATCHING")
+            old_plan = {k: existing.get(k) for k in ("entry","preferred_entry_low","preferred_entry_high","stop","tp1","tp2","tp3")}
+            new_plan = {k: signal.get(k) for k in old_plan}
+            changed = any(
+                old_plan[k] is None != (new_plan[k] is None) or
+                (old_plan[k] is not None and new_plan[k] is not None and abs(float(old_plan[k])-float(new_plan[k])) > max(abs(float(old_plan[k]))*1e-6, 1e-12))
+                for k in old_plan
+            )
             conn.execute(
                 """UPDATE signals SET updated_at=?, status=?, recommendation=?, confidence=?, bull_score=?, bear_score=?,
-                   entry=?, preferred_entry_low=?, preferred_entry_high=?, stop=?, effective_stop=COALESCE(?,effective_stop),
-                   tp1=?, tp2=?, tp3=?, rr=?, activated_at=COALESCE(?,activated_at),
-                   current_price=CASE WHEN ?='ACTIVE' THEN ? ELSE current_price END,
-                   highest_price=CASE WHEN ?='ACTIVE' THEN COALESCE(highest_price,?) ELSE highest_price END,
-                   lowest_price=CASE WHEN ?='ACTIVE' THEN COALESCE(lowest_price,?) ELSE lowest_price END,
+                   entry=?, preferred_entry_low=?, preferred_entry_high=?, stop=?, tp1=?, tp2=?, tp3=?, rr=?,
                    features_json=?, reasons_json=? WHERE id=?""",
                 (now, desired_status, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
-                 signal["entry"], signal.get("preferred_entry_low"), signal.get("preferred_entry_high"), signal["stop"], effective_stop,
-                 signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"], activated_at,
-                 desired_status, signal["entry"], desired_status, signal["entry"], desired_status, signal["entry"],
+                 signal["entry"], signal.get("preferred_entry_low"), signal.get("preferred_entry_high"), signal["stop"],
+                 signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"],
                  json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False), signal_id),
             )
-            self._add_event_conn(conn, signal_id, "REFRESHED", signal.get("entry"), {"status": desired_status})
-            if desired_status == "ACTIVE":
-                self._add_event_conn(conn, signal_id, "ACTIVE", signal.get("entry"), {"from": "PROMOTION"})
+            if changed:
+                self._add_event_conn(conn, signal_id, "PLAN_UPDATED", signal.get("entry"), {"old": old_plan, "new": new_plan})
         return signal_id
 
     def get_open(self) -> list[dict[str, Any]]:
@@ -136,6 +175,7 @@ class SignalHistory:
             "last_notified_status", "effective_stop", "break_even_at", "exit_price",
             "realized_r", "result", "highest_price", "lowest_price",
             "last_progress_notified_at", "last_progress_bucket",
+            "pre_activation_max_profit_pct", "pre_activation_max_drawdown_pct", "plan_locked_at",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()

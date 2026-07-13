@@ -75,23 +75,21 @@ class SignalRecorder:
             "recommendation": analysis["recommendation"], "setup_key": setup_key,
             "features": features, "reasons": analysis["reasons"], "status": status,
         }
-        # A fresh directional promotion invalidates only stale opposite ideas that
-        # never became ACTIVE. This prevents contradictory BUY/SELL promotions
-        # and multiple pending Signal IDs for the same market/timeframe.
-        self.history.close_opposite_pending(
-            owner_telegram_id,
-            payload["symbol"],
-            timeframe,
-            payload["side"],
-        )
-        duplicate = self.history.find_duplicate(owner_telegram_id, payload["symbol"], timeframe, payload["side"])
+        # Enforce one open market plan per user/symbol/timeframe.
+        # A live opposite trade blocks promotion; it remains an observation only.
+        open_market = self.history.get_open_market(owner_telegram_id, payload["symbol"], timeframe)
+        same_side = [x for x in open_market if x.get("side") == payload["side"]]
+        opposite = [x for x in open_market if x.get("side") != payload["side"]]
+        live_opposite = next((x for x in opposite if x.get("status") in {"ACTIVE", "TP1", "TP2"}), None)
+        if live_opposite:
+            return None
+        for stale in opposite:
+            self.history.invalidate_open(int(stale["id"]), "DIRECTION_FLIP")
+        duplicate = same_side[0] if same_side else None
+        for extra in same_side[1:]:
+            self.history.invalidate_open(int(extra["id"]), "DUPLICATE_CONSOLIDATED")
         if duplicate:
-            # Never rewrite the plan of a trade that is already live. Pending
-            # ideas may be refreshed/promoted while preserving the same ID.
-            if duplicate.get("status") in {"ACTIVE", "TP1", "TP2"}:
-                signal_id = int(duplicate["id"])
-            else:
-                signal_id = self.history.refresh_duplicate(duplicate["id"], payload)
+            signal_id = self.history.refresh_duplicate(int(duplicate["id"]), payload)
         else:
             signal_id = self.history.save(payload)
             if status == "ACTIVE":

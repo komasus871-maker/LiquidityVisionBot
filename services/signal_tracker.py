@@ -137,6 +137,18 @@ class SignalTracker:
         initial_stop = float(signal["stop"])
         effective_stop = float(signal.get("effective_stop") or initial_stop)
 
+        if status in {"WATCHING", "TRIGGERED"}:
+            pre_move = ((price - entry) / entry * 100) * (1 if side == "LONG" else -1) if entry else 0.0
+            pre_profit = max(float(signal.get("pre_activation_max_profit_pct") or 0), pre_move)
+            pre_drawdown = min(float(signal.get("pre_activation_max_drawdown_pct") or 0), pre_move)
+            pending_fields = {
+                "current_price": price,
+                "pre_activation_max_profit_pct": pre_profit,
+                "pre_activation_max_drawdown_pct": pre_drawdown,
+            }
+            self.history.update_lifecycle(signal["id"], **pending_fields)
+            signal.update(pending_fields)
+
         expires_at = signal.get("expires_at")
         if status in {"WATCHING", "TRIGGERED"} and expires_at:
             try:
@@ -175,7 +187,10 @@ class SignalTracker:
                     current_price=price,
                     highest_price=price,
                     lowest_price=price,
+                    max_profit_pct=0.0,
+                    max_drawdown_pct=0.0,
                     effective_stop=initial_stop,
+                    plan_locked_at=now,
                 )
                 return
 
@@ -190,7 +205,10 @@ class SignalTracker:
                     current_price=price,
                     highest_price=price,
                     lowest_price=price,
+                    max_profit_pct=0.0,
+                    max_drawdown_pct=0.0,
                     effective_stop=initial_stop,
+                    plan_locked_at=now,
                 )
                 return
 

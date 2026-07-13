@@ -1,4 +1,5 @@
 from utils.price import fmt_price, fmt_number
+from services.scenario_engine import ScenarioEngine
 
 
 class Report:
@@ -58,6 +59,9 @@ class Report:
         ) or "No breakdown available"
         drivers = self._component_lines(data.get("strongest_drivers", []))
         blockers = self._component_lines(data.get("biggest_blockers", []), "• No major negative component")
+        scenarios = ScenarioEngine.build(data)
+        primary_path = "\n".join(f"{idx}. {item}" for idx, item in enumerate(scenarios["primary"], 1))
+        alternative_path = "\n".join(f"{idx}. {item}" for idx, item in enumerate(scenarios["alternative"], 1))
 
         return f"""
 📊 <b>Liquidity Vision</b>
@@ -211,6 +215,16 @@ RR: 1:{fmt_number(data['rr'])}
 
 🔄 Alternative Activation
 {alt}
+
+━━━━━━━━━━━━━━━━━━
+
+🧭 <b>Scenario Engine</b>
+
+<b>Scenario A — Primary path</b>
+{primary_path}
+
+<b>Scenario B — Alternative path</b>
+{alternative_path}
 
 ━━━━━━━━━━━━━━━━━━
 

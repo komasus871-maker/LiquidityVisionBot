@@ -62,11 +62,19 @@ async def journal_handler(message: Message):
     recent_text = []
     for item in recent:
         current = item.get("current_price") if item.get("current_price") is not None else item["entry"]
+        if item["status"] in {"WATCHING", "TRIGGERED"}:
+            metrics = (
+                f"Pre-MFE {float(item.get('pre_activation_max_profit_pct') or 0):+.2f}% | "
+                f"Pre-MAE {float(item.get('pre_activation_max_drawdown_pct') or 0):+.2f}%"
+            )
+        else:
+            metrics = (
+                f"MFE {float(item.get('max_profit_pct') or 0):+.2f}% | "
+                f"MAE {float(item.get('max_drawdown_pct') or 0):+.2f}%"
+            )
         recent_text.append(
             f"{_status_icon(item['status'])} <b>#{item['id']} {item['symbol']} {item['side']}</b> — {item['status']}\n"
-            f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | "
-            f"MFE {float(item.get('max_profit_pct') or 0):+.2f}% | "
-            f"MAE {float(item.get('max_drawdown_pct') or 0):+.2f}%\n"
+            f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | {metrics}\n"
             f"   /trade {item['id']}"
         )
 
@@ -128,7 +136,8 @@ async def trade_replay_handler(message: Message):
 
     events = history.get_events(signal_id)
     event_lines = []
-    for event in events:
+    meaningful_events = [e for e in events if str(e.get("event_type")) != "REFRESHED"]
+    for event in meaningful_events:
         created = str(event.get("created_at") or "")
         try:
             dt = datetime.fromisoformat(created)
@@ -139,6 +148,11 @@ async def trade_replay_handler(message: Message):
         suffix = ""
         if event["event_type"] == "BREAK_EVEN_SET":
             suffix = " · stop → entry"
+        elif event["event_type"] == "PLAN_UPDATED":
+            old_plan, new_plan = details.get("old", {}), details.get("new", {})
+            suffix = f" · entry {fmt_price(old_plan.get('entry'))} → {fmt_price(new_plan.get('entry'))}"
+        elif event["event_type"] == "DIRECTION_FLIPPED":
+            suffix = " · opposite scenario replaced this pending plan"
         elif details.get("reason"):
             suffix = f" · {html.escape(str(details['reason']))}"
         event_lines.append(
@@ -160,7 +174,8 @@ Effective Stop: <code>{fmt_price(effective_stop)}</code>
 Targets: <code>{fmt_price(signal['tp1'])}</code> / <code>{fmt_price(signal['tp2'])}</code> / <code>{fmt_price(signal['tp3'])}</code>
 
 Duration: <b>{_duration(signal.get('activated_at') or signal.get('created_at'), signal.get('closed_at'))}</b>
-MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>
+Pre-activation MFE / MAE: <b>{float(signal.get('pre_activation_max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('pre_activation_max_drawdown_pct') or 0):+.2f}%</b>
+Trade MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>
 Realized: <b>{float(signal.get('realized_r') or 0):+.2f}R</b>
 Result: <b>{html.escape(str(signal.get('result') or 'OPEN'))}</b>
 

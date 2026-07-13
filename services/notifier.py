@@ -165,7 +165,8 @@ class Notifier:
         tp1 = self._target_progress(side, entry, float(signal["tp1"]), price)
         tp2 = self._target_progress(side, entry, float(signal["tp2"]), price)
         tp3 = self._target_progress(side, entry, float(signal["tp3"]), price)
-        sl = self._risk_remaining(side, entry, stop, price)
+        distance_to_sl = self._risk_remaining(side, entry, stop, price)
+        risk_used = max(0.0, min(100.0, 100.0 - distance_to_sl))
         duration = self._duration(signal.get("activated_at") or signal.get("created_at")) or "—"
         move_pct = self._progress(signal, price)
         r_value = self._r_multiple(signal, price)
@@ -180,7 +181,8 @@ class Notifier:
             f"TP1 {self._bar(tp1)} {tp1:.0f}%",
             f"TP2 {self._bar(tp2)} {tp2:.0f}%",
             f"TP3 {self._bar(tp3)} {tp3:.0f}%",
-            f"SL  {self._bar(sl)} {sl:.0f}% safety",
+            f"Risk used {self._bar(risk_used)} {risk_used:.0f}%",
+            f"Distance to SL: <b>{distance_to_sl:.0f}%</b>",
             "",
             f"Duration: <b>{duration}</b>",
             f"MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>",

@@ -189,7 +189,10 @@ def create_tables() -> None:
                 effective_stop DOUBLE PRECISION, break_even_at TEXT, exit_price DOUBLE PRECISION,
                 realized_r DOUBLE PRECISION, result TEXT, highest_price DOUBLE PRECISION,
                 lowest_price DOUBLE PRECISION, last_progress_notified_at TEXT,
-                last_progress_bucket INTEGER DEFAULT -1
+                last_progress_bucket INTEGER DEFAULT -1,
+                pre_activation_max_profit_pct DOUBLE PRECISION DEFAULT 0,
+                pre_activation_max_drawdown_pct DOUBLE PRECISION DEFAULT 0,
+                plan_locked_at TEXT
             )
         """)
         conn.execute(f"""
@@ -269,6 +272,9 @@ def create_tables() -> None:
             "realized_r": "DOUBLE PRECISION", "result": "TEXT",
             "highest_price": "DOUBLE PRECISION", "lowest_price": "DOUBLE PRECISION",
             "last_progress_notified_at": "TEXT", "last_progress_bucket": "INTEGER DEFAULT -1",
+            "pre_activation_max_profit_pct": "DOUBLE PRECISION DEFAULT 0",
+            "pre_activation_max_drawdown_pct": "DOUBLE PRECISION DEFAULT 0",
+            "plan_locked_at": "TEXT",
         }.items():
             _add_column(conn, "signals", name, definition)
         for name, definition in {
