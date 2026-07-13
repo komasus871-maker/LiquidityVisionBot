@@ -10,7 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN
-from database.database import create_tables
+from database.database import create_tables, database_backend
 from handlers.analyze import router as analyze_router
 from handlers.fear import router as fear_router
 from handlers.help import router as help_router
@@ -77,7 +77,7 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 async def main() -> None:
     logging.info("Creating database...")
     create_tables()
-    logging.info("Database ready.")
+    logging.info("Database ready: backend=%s", database_backend())
 
     bot = Bot(
         token=BOT_TOKEN,
@@ -102,7 +102,19 @@ async def main() -> None:
     try:
         await dp.emit_startup(bot=bot)
         if mode == "webhook":
-            webhook_server = WebhookServer(bot=bot, dispatcher=dp)
+            async def maintenance_cycle() -> dict[str, object]:
+                # Used by an optional external cron to wake a free Render
+                # instance and run monitoring even when normal traffic is low.
+                await watch_engine.check_once()
+                await observation_monitor.check_once()
+                await tracker.check_once()
+                return {"database_backend": database_backend(), "workers": 3}
+
+            webhook_server = WebhookServer(
+                bot=bot,
+                dispatcher=dp,
+                maintenance_callback=maintenance_cycle,
+            )
             await webhook_server.start()
             logging.info("Liquidity Vision started in webhook mode.")
             stop_event = asyncio.Event()

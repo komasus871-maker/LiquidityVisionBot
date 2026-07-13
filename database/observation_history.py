@@ -38,19 +38,21 @@ class ObservationHistory:
                     (*values, row[0]),
                 )
                 return int(row[0])
-            cur = conn.execute(
-                """INSERT INTO analysis_observations(owner_telegram_id,notification_chat_id,symbol,timeframe,direction,
-                   market_bias,execution_status,recommendation,direction_score,entry_quality,risk_quality,readiness,
-                   directional_edge,price,preferred_entry_low,preferred_entry_high,setup_key,features_json,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (owner_telegram_id, notification_chat_id, symbol.upper(), timeframe, analysis.get("direction","LONG"),
+            params = (owner_telegram_id, notification_chat_id, symbol.upper(), timeframe, analysis.get("direction","LONG"),
                  analysis.get("market_bias",""), analysis.get("execution_status",""), analysis.get("recommendation",""),
                  float(analysis.get("direction_score",0)), float(analysis.get("entry_quality",0)),
                  float(analysis.get("risk_quality",0)), float(analysis.get("execution_readiness",0)),
                  float(analysis.get("directional_edge",0)), float(analysis.get("price",0)),
                  analysis.get("preferred_entry_low"), analysis.get("preferred_entry_high"), setup_key,
-                 json.dumps(features, ensure_ascii=False), now, now),
-            )
+                 json.dumps(features, ensure_ascii=False), now, now)
+            sql = """INSERT INTO analysis_observations(owner_telegram_id,notification_chat_id,symbol,timeframe,direction,
+                   market_bias,execution_status,recommendation,direction_score,entry_quality,risk_quality,readiness,
+                   directional_edge,price,preferred_entry_low,preferred_entry_high,setup_key,features_json,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+            if conn.postgres:
+                row = conn.execute(sql + " RETURNING id", params).fetchone()
+                return int(row[0])
+            cur = conn.execute(sql, params)
             return int(cur.lastrowid)
 
     def promote(self, observation_id: int, signal_id: int) -> None:

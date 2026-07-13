@@ -121,6 +121,20 @@ class WatchEngine:
                 analysis["timeframe"] = timeframe
                 analysis = self.probability.enrich(analysis, symbol=symbol, timeframe=timeframe, setup_key=setup_key)
                 current = self._snapshot(analysis)
+
+                # Every monitor pass persists/refreshes the observation. If the
+                # setup becomes trackable, SignalRecorder promotes it into the
+                # lifecycle repository. This is intentionally independent from
+                # notification changes, so history keeps growing even when the
+                # market state is stable.
+                self.recorder.record(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    analysis=analysis,
+                    owner_telegram_id=row["telegram_id"],
+                    notification_chat_id=row["telegram_id"],
+                )
+
                 raw_previous = row.get("snapshot_json")
                 if not raw_previous:
                     self._save_state(row["telegram_id"], symbol, timeframe, current)
@@ -131,16 +145,6 @@ class WatchEngine:
                 self._save_state(row["telegram_id"], symbol, timeframe, current, notified=notified)
                 if not changes or not self.bot:
                     return
-
-                # Promote meaningful watchlist changes into lifecycle tracking.
-                if current["execution_status"] in {"🟢 READY", "🎯 WAIT FOR PULLBACK", "🟡 WAIT FOR TRIGGER"}:
-                    self.recorder.record(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        analysis=analysis,
-                        owner_telegram_id=row["telegram_id"],
-                        notification_chat_id=row["telegram_id"],
-                    )
 
                 lines = [
                     f"🔔 <b>{symbol} · {timeframe.upper()} WATCH UPDATE</b>",

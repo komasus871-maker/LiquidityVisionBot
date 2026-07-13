@@ -7,11 +7,13 @@ import logging
 import os
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
+
+from database.database import database_backend
 
 _STARTED_AT = datetime.now(timezone.utc)
 
@@ -43,7 +45,13 @@ def webhook_secret(bot_token: str) -> str:
 
 
 class WebhookServer:
-    def __init__(self, bot: Bot, dispatcher: Dispatcher, path: str = "/telegram/webhook") -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        dispatcher: Dispatcher,
+        path: str = "/telegram/webhook",
+        maintenance_callback: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+    ) -> None:
         self.bot = bot
         self.dispatcher = dispatcher
         self.path = path
@@ -54,6 +62,9 @@ class WebhookServer:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._recent_ids: set[int] = set()
         self._recent_order: deque[int] = deque(maxlen=1000)
+        self.maintenance_callback = maintenance_callback
+        self._maintenance_lock = asyncio.Lock()
+        self.maintenance_token = os.getenv("MONITOR_CRON_SECRET", "").strip()
 
     def _remember_update(self, update_id: int) -> bool:
         """Return False when Telegram retries an update we already accepted."""
@@ -104,6 +115,30 @@ class WebhookServer:
         task.add_done_callback(self._task_done)
         return web.Response(text="ok")
 
+
+    async def maintenance_handler(self, request: web.Request) -> web.Response:
+        """Run one monitor cycle from an external scheduler.
+
+        Free Render services sleep when idle, so in-process loops cannot run
+        while the service is suspended. A trusted external cron can call this
+        endpoint every few minutes to wake the service and execute one full
+        watch/observation/signal cycle.
+        """
+        if not self.maintenance_callback:
+            return web.json_response({"status": "disabled"}, status=404)
+        provided = request.headers.get("X-Monitor-Secret", "") or request.query.get("token", "")
+        if not self.maintenance_token or provided != self.maintenance_token:
+            return web.json_response({"status": "forbidden"}, status=403)
+        if self._maintenance_lock.locked():
+            return web.json_response({"status": "busy"}, status=202)
+        async with self._maintenance_lock:
+            try:
+                result = await self.maintenance_callback()
+                return web.json_response({"status": "ok", **result})
+            except Exception as exc:
+                logging.exception("Manual monitor cycle failed")
+                return web.json_response({"status": "error", "detail": str(exc)}, status=500)
+
     async def health_handler(self, _: web.Request) -> web.Response:
         now = datetime.now(timezone.utc)
         info = await self.bot.get_webhook_info()
@@ -111,6 +146,8 @@ class WebhookServer:
             "status": "ok",
             "service": "Liquidity Vision Intelligence",
             "mode": "webhook",
+            "database_backend": database_backend(),
+            "persistent_database": database_backend() == "postgresql",
             "webhook_url": info.url,
             "pending_update_count": info.pending_update_count,
             "last_error_message": info.last_error_message,
@@ -134,6 +171,8 @@ class WebhookServer:
         app.router.add_get("/health", self.health_handler)
         app.router.add_get("/healthz", self.health_handler)
         app.router.add_post(self.path, self.webhook_handler)
+        app.router.add_post("/internal/monitor", self.maintenance_handler)
+        app.router.add_get("/internal/monitor", self.maintenance_handler)
 
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()

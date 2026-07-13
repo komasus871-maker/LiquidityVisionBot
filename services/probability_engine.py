@@ -83,10 +83,10 @@ class ProbabilityEngine:
                 """
                 SELECT
                     COUNT(*) AS samples,
-                    SUM(tp1_hit_at IS NOT NULL) AS tp1_hits,
-                    SUM(tp2_hit_at IS NOT NULL) AS tp2_hits,
-                    SUM(tp3_hit_at IS NOT NULL) AS tp3_hits,
-                    SUM(stop_hit_at IS NOT NULL) AS stop_hits,
+                    SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS tp1_hits,
+                    SUM(CASE WHEN tp2_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS tp2_hits,
+                    SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS tp3_hits,
+                    SUM(CASE WHEN stop_hit_at IS NOT NULL THEN 1 ELSE 0 END) AS stop_hits,
                     AVG(max_profit_pct) AS avg_mfe,
                     AVG(max_drawdown_pct) AS avg_mae
                 FROM signals

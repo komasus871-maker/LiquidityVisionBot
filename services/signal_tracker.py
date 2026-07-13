@@ -140,7 +140,19 @@ class SignalTracker:
             return
         self.history.update_lifecycle(signal["id"], **common)
 
+    def stop(self) -> None:
+        if not hasattr(self, "_stop"):
+            self._stop = asyncio.Event()
+        self._stop.set()
+
     async def run_forever(self) -> None:
-        while True:
+        if not hasattr(self, "_stop"):
+            self._stop = asyncio.Event()
+        logging.info("SignalTracker started: interval=%ss", self.interval_seconds)
+        while not self._stop.is_set():
             await self.check_once()
-            await asyncio.sleep(self.interval_seconds)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+            except asyncio.TimeoutError:
+                pass
+        logging.info("SignalTracker stopped")

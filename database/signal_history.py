@@ -1,21 +1,20 @@
+from __future__ import annotations
+
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from database.database import DATABASE_NAME
+from database.database import connect
 
 OPEN_STATUSES = ("WATCHING", "TRIGGERED", "ACTIVE", "TP1", "TP2")
 CLOSED_STATUSES = ("TP3", "STOP", "INVALIDATED", "EXPIRED")
 
 
 class SignalHistory:
-    """SQLite repository for signals, lifecycle events and statistics."""
+    """Repository for signals, lifecycle events and statistics."""
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DATABASE_NAME)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self):
+        return connect()
 
     def find_duplicate(self, owner_telegram_id: int | None, symbol: str, timeframe: str, side: str, hours: int = 24):
         threshold = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -36,29 +35,41 @@ class SignalHistory:
         now = now_dt.isoformat()
         expires_at = signal.get("expires_at") or (now_dt + timedelta(hours=72)).isoformat()
         with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO signals (
-                    owner_telegram_id, notification_chat_id,
-                    symbol, timeframe, side, status, created_at, updated_at, expires_at,
-                    entry, preferred_entry_low, preferred_entry_high,
-                    stop, tp1, tp2, tp3, rr, confidence,
-                    bull_score, bear_score, recommendation, setup_key,
-                    features_json, reasons_json, max_profit_pct, max_drawdown_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-                """,
-                (
-                    signal.get("owner_telegram_id"), signal.get("notification_chat_id"),
-                    signal["symbol"], signal["timeframe"], signal["side"], signal.get("status", "WATCHING"),
-                    now, now, expires_at, signal["entry"], signal.get("preferred_entry_low"),
-                    signal.get("preferred_entry_high"), signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"],
-                    signal["rr"], signal["confidence"], signal["bull_score"], signal["bear_score"],
-                    signal["recommendation"], signal["setup_key"],
-                    json.dumps(signal["features"], ensure_ascii=False),
-                    json.dumps(signal["reasons"], ensure_ascii=False),
-                ),
+            params = (
+                signal.get("owner_telegram_id"), signal.get("notification_chat_id"), signal["symbol"],
+                signal["timeframe"], signal["side"], signal.get("status", "WATCHING"), now, now, expires_at,
+                signal["entry"], signal.get("preferred_entry_low"), signal.get("preferred_entry_high"),
+                signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"],
+                signal["confidence"], signal["bull_score"], signal["bear_score"], signal["recommendation"],
+                signal["setup_key"], json.dumps(signal["features"], ensure_ascii=False),
+                json.dumps(signal["reasons"], ensure_ascii=False),
             )
-            signal_id = int(cursor.lastrowid)
+            if conn.postgres:
+                row = conn.execute(
+                    """
+                    INSERT INTO signals (
+                        owner_telegram_id, notification_chat_id, symbol, timeframe, side, status,
+                        created_at, updated_at, expires_at, entry, preferred_entry_low, preferred_entry_high,
+                        stop, tp1, tp2, tp3, rr, confidence, bull_score, bear_score, recommendation,
+                        setup_key, features_json, reasons_json, max_profit_pct, max_drawdown_pct
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0) RETURNING id
+                    """,
+                    params,
+                ).fetchone()
+                signal_id = int(row[0])
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO signals (
+                        owner_telegram_id, notification_chat_id, symbol, timeframe, side, status,
+                        created_at, updated_at, expires_at, entry, preferred_entry_low, preferred_entry_high,
+                        stop, tp1, tp2, tp3, rr, confidence, bull_score, bear_score, recommendation,
+                        setup_key, features_json, reasons_json, max_profit_pct, max_drawdown_pct
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
+                    """,
+                    params,
+                )
+                signal_id = int(cur.lastrowid)
             self._add_event_conn(conn, signal_id, "CREATED", signal.get("entry"), {"status": signal.get("status", "WATCHING")})
             return signal_id
 
@@ -112,12 +123,10 @@ class SignalHistory:
         allowed = {
             "status", "current_price", "max_profit_pct", "max_drawdown_pct", "tp1_hit_at", "tp2_hit_at",
             "tp3_hit_at", "stop_hit_at", "closed_at", "triggered_at", "activated_at", "invalidated_at",
-            "last_notified_status"
+            "last_notified_status",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if not updates:
-            return
         sql = ", ".join(f"{key}=?" for key in updates)
         with self._connect() as conn:
             conn.execute(f"UPDATE signals SET {sql} WHERE id=?", (*updates.values(), signal_id))
@@ -131,16 +140,16 @@ class SignalHistory:
         with self._connect() as conn:
             row = conn.execute(f"""
                 SELECT COUNT(*) total,
-                    SUM(status='WATCHING') watching_count,
-                    SUM(status='TRIGGERED') triggered_count,
-                    SUM(status IN ('ACTIVE','TP1','TP2')) active_count,
-                    SUM(status IN ('TP3','STOP','INVALIDATED','EXPIRED')) closed_count,
-                    SUM(tp1_hit_at IS NOT NULL) tp1_hits,
-                    SUM(tp2_hit_at IS NOT NULL) tp2_hits,
-                    SUM(tp3_hit_at IS NOT NULL) tp3_hits,
-                    SUM(stop_hit_at IS NOT NULL) stop_hits,
-                    SUM(status='INVALIDATED') invalidated_count,
-                    SUM(status='EXPIRED') expired_count,
+                    SUM(CASE WHEN status='WATCHING' THEN 1 ELSE 0 END) watching_count,
+                    SUM(CASE WHEN status='TRIGGERED' THEN 1 ELSE 0 END) triggered_count,
+                    SUM(CASE WHEN status IN ('ACTIVE','TP1','TP2') THEN 1 ELSE 0 END) active_count,
+                    SUM(CASE WHEN status IN ('TP3','STOP','INVALIDATED','EXPIRED') THEN 1 ELSE 0 END) closed_count,
+                    SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp1_hits,
+                    SUM(CASE WHEN tp2_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp2_hits,
+                    SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp3_hits,
+                    SUM(CASE WHEN stop_hit_at IS NOT NULL THEN 1 ELSE 0 END) stop_hits,
+                    SUM(CASE WHEN status='INVALIDATED' THEN 1 ELSE 0 END) invalidated_count,
+                    SUM(CASE WHEN status='EXPIRED' THEN 1 ELSE 0 END) expired_count,
                     AVG(CASE WHEN closed_at IS NOT NULL THEN max_profit_pct END) avg_mfe,
                     AVG(CASE WHEN closed_at IS NOT NULL THEN max_drawdown_pct END) avg_mae
                 FROM signals {where}
