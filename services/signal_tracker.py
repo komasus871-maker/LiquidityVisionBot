@@ -1,10 +1,14 @@
 import asyncio
 import logging
+import os
+import socket
+import uuid
 from datetime import datetime, timezone
 
 from aiogram import Bot
 
 from database.signal_history import SignalHistory
+from database.database import acquire_lease, release_lease, runtime_started, runtime_finished
 from services.market import Market
 from services.notifier import Notifier
 
@@ -15,6 +19,7 @@ class SignalTracker:
         self.history = SignalHistory()
         self.market = Market()
         self.notifier = Notifier(bot)
+        self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
     @staticmethod
     def _reached(side: str, price: float, level: float) -> bool:
@@ -41,14 +46,28 @@ class SignalTracker:
         aligned = close_price > open_price if side == "LONG" else close_price < open_price
         return aligned and body_ratio >= 0.45
 
-    async def check_once(self) -> None:
-        for signal in self.history.get_open():
-            try:
-                df = await self.market.get_klines(signal["symbol"], "1m", 5)
-                price = float(df["close"].iloc[-1])
-                await self._update(signal, price, df)
-            except Exception:
-                logging.exception("Failed to update signal %s", signal["id"])
+    async def check_once(self) -> dict[str, int | bool]:
+        if not acquire_lease("signal_tracker", self.owner_id, max(self.interval_seconds * 2, 120)):
+            return {"skipped": True, "processed": 0, "errors": 0}
+        runtime_started("signal_tracker")
+        processed = errors = 0
+        try:
+            for signal in self.history.get_open():
+                processed += 1
+                try:
+                    df = await asyncio.wait_for(self.market.get_klines(signal["symbol"], "1m", 5), timeout=25)
+                    price = float(df["close"].iloc[-1])
+                    await self._update(signal, price, df)
+                except Exception:
+                    errors += 1
+                    logging.exception("Failed to update signal %s", signal["id"])
+            runtime_finished("signal_tracker", processed=processed, errors=errors)
+            return {"skipped": False, "processed": processed, "errors": errors}
+        except Exception as exc:
+            runtime_finished("signal_tracker", processed=processed, errors=errors + 1, error=str(exc))
+            raise
+        finally:
+            release_lease("signal_tracker", self.owner_id)
 
     async def _transition(self, signal: dict, event: str, price: float, **fields) -> None:
         previous = signal["status"]

@@ -10,7 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN
-from database.database import create_tables, database_backend
+from database.database import create_tables, database_backend, persistent_database, ping_database
 from handlers.analyze import router as analyze_router
 from handlers.fear import router as fear_router
 from handlers.help import router as help_router
@@ -77,7 +77,8 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 async def main() -> None:
     logging.info("Creating database...")
     create_tables()
-    logging.info("Database ready: backend=%s", database_backend())
+    db_health = ping_database()
+    logging.info("Database ready: backend=%s persistent=%s latency_ms=%s", database_backend(), persistent_database(), db_health.get("latency_ms"))
 
     bot = Bot(
         token=BOT_TOKEN,
@@ -103,12 +104,18 @@ async def main() -> None:
         await dp.emit_startup(bot=bot)
         if mode == "webhook":
             async def maintenance_cycle() -> dict[str, object]:
-                # Used by an optional external cron to wake a free Render
-                # instance and run monitoring even when normal traffic is low.
-                await watch_engine.check_once()
-                await observation_monitor.check_once()
-                await tracker.check_once()
-                return {"database_backend": database_backend(), "workers": 3}
+                # Free Render sleeps while idle. An external cron can wake the
+                # service and run one complete, lease-protected monitor cycle.
+                watch_result = await watch_engine.check_once()
+                observation_result = await observation_monitor.check_once()
+                tracker_result = await tracker.check_once()
+                return {
+                    "database_backend": database_backend(),
+                    "persistent_database": persistent_database(),
+                    "watch_engine": watch_result,
+                    "observation_monitor": observation_result,
+                    "signal_tracker": tracker_result,
+                }
 
             webhook_server = WebhookServer(
                 bot=bot,

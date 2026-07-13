@@ -16,6 +16,10 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: REQUIRE_PERSISTENT_DB
+        value: "true"
+      - key: PGSSLMODE
+        value: require
       - key: MONITOR_CRON_SECRET
         sync: false
       - key: WEBHOOK_BASE_URL

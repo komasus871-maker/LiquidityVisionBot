@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-USE_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+USE_POSTGRES = DATABASE_URL.startswith("postgresql://")
+REQUIRE_PERSISTENT_DB = os.getenv("REQUIRE_PERSISTENT_DB", "false").strip().lower() in {"1", "true", "yes", "on"}
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATABASE_NAME = DATA_DIR / "database.db"
+
+if REQUIRE_PERSISTENT_DB and not USE_POSTGRES:
+    raise RuntimeError(
+        "Persistent database is required but DATABASE_URL is missing or invalid. "
+        "Configure a PostgreSQL URL in Render, for example from Neon/Supabase/Render Postgres."
+    )
 
 if USE_POSTGRES:
     import psycopg2
@@ -53,7 +64,6 @@ class DBConnection:
 
     @staticmethod
     def _translate(sql: str) -> str:
-        # Project SQL uses DB-API qmark style. PostgreSQL uses %s.
         return re.sub(r"\?", "%s", sql)
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> DBCursor:
@@ -81,17 +91,26 @@ class DBConnection:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is None:
-            self.commit()
-        else:
-            self.rollback()
-        self.close()
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self.close()
         return False
 
 
 def connect() -> DBConnection:
     if USE_POSTGRES:
-        raw = psycopg2.connect(DATABASE_URL, connect_timeout=15, sslmode=os.getenv("PGSSLMODE", "require"))
+        kwargs: dict[str, Any] = {
+            "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "15")),
+            "application_name": "liquidity-vision-bot",
+        }
+        # Most hosted PostgreSQL providers require TLS. If sslmode is already
+        # embedded in the URL, psycopg2 safely accepts this explicit value too.
+        kwargs["sslmode"] = os.getenv("PGSSLMODE", "require")
+        raw = psycopg2.connect(DATABASE_URL, **kwargs)
         raw.autocommit = False
         return DBConnection(raw, postgres=True)
 
@@ -109,14 +128,26 @@ def database_backend() -> str:
     return "postgresql" if USE_POSTGRES else "sqlite"
 
 
+def persistent_database() -> bool:
+    return USE_POSTGRES
+
+
+def ping_database() -> dict[str, Any]:
+    started = datetime.now(timezone.utc)
+    with connect() as conn:
+        row = conn.execute("SELECT 1 AS ok").fetchone()
+    elapsed_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2)
+    return {"ok": bool(row and row[0] == 1), "backend": database_backend(), "latency_ms": elapsed_ms}
+
+
 def _columns(conn: DBConnection, table: str) -> set[str]:
     if conn.postgres:
         rows = conn.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=?",
             (table,),
         ).fetchall()
-        return {row[0] for row in rows}
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        return {str(row[0]) for row in rows}
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def _add_column(conn: DBConnection, table: str, name: str, definition: str) -> None:
@@ -133,14 +164,10 @@ def create_tables() -> None:
         id_col = _id_column()
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS users(
-                id {id_col},
-                telegram_id BIGINT UNIQUE,
-                username TEXT,
-                first_name TEXT,
-                premium INTEGER DEFAULT 0,
-                premium_tier TEXT DEFAULT 'FREE',
-                premium_until TEXT,
-                notifications_enabled INTEGER DEFAULT 1,
+                id {id_col}, telegram_id BIGINT UNIQUE,
+                username TEXT, first_name TEXT,
+                premium INTEGER DEFAULT 0, premium_tier TEXT DEFAULT 'FREE',
+                premium_until TEXT, notifications_enabled INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -155,15 +182,16 @@ def create_tables() -> None:
                 tp3 DOUBLE PRECISION NOT NULL, rr DOUBLE PRECISION NOT NULL, confidence DOUBLE PRECISION NOT NULL,
                 bull_score DOUBLE PRECISION NOT NULL, bear_score DOUBLE PRECISION NOT NULL,
                 recommendation TEXT NOT NULL, setup_key TEXT NOT NULL, features_json TEXT NOT NULL,
-                reasons_json TEXT NOT NULL, current_price DOUBLE PRECISION, max_profit_pct DOUBLE PRECISION DEFAULT 0,
-                max_drawdown_pct DOUBLE PRECISION DEFAULT 0, tp1_hit_at TEXT, tp2_hit_at TEXT, tp3_hit_at TEXT,
-                stop_hit_at TEXT, last_notified_status TEXT, notification_chat_id BIGINT
+                reasons_json TEXT NOT NULL, current_price DOUBLE PRECISION,
+                max_profit_pct DOUBLE PRECISION DEFAULT 0, max_drawdown_pct DOUBLE PRECISION DEFAULT 0,
+                tp1_hit_at TEXT, tp2_hit_at TEXT, tp3_hit_at TEXT, stop_hit_at TEXT,
+                last_notified_status TEXT, notification_chat_id BIGINT
             )
         """)
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS signal_events(
-                id {id_col}, signal_id BIGINT NOT NULL, event_type TEXT NOT NULL, price DOUBLE PRECISION,
-                details_json TEXT, created_at TEXT NOT NULL
+                id {id_col}, signal_id BIGINT NOT NULL, event_type TEXT NOT NULL,
+                price DOUBLE PRECISION, details_json TEXT, created_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -175,14 +203,15 @@ def create_tables() -> None:
         """)
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS analysis_observations(
-                id {id_col}, owner_telegram_id BIGINT, notification_chat_id BIGINT, symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL, direction TEXT NOT NULL, market_bias TEXT NOT NULL,
-                execution_status TEXT NOT NULL, recommendation TEXT NOT NULL, direction_score DOUBLE PRECISION NOT NULL,
-                entry_quality DOUBLE PRECISION NOT NULL, risk_quality DOUBLE PRECISION NOT NULL,
-                readiness DOUBLE PRECISION NOT NULL, directional_edge DOUBLE PRECISION NOT NULL,
-                price DOUBLE PRECISION NOT NULL, preferred_entry_low DOUBLE PRECISION,
-                preferred_entry_high DOUBLE PRECISION, setup_key TEXT, features_json TEXT NOT NULL,
-                promoted_signal_id BIGINT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                id {id_col}, owner_telegram_id BIGINT, notification_chat_id BIGINT,
+                symbol TEXT NOT NULL, timeframe TEXT NOT NULL, direction TEXT NOT NULL,
+                market_bias TEXT NOT NULL, execution_status TEXT NOT NULL, recommendation TEXT NOT NULL,
+                direction_score DOUBLE PRECISION NOT NULL, entry_quality DOUBLE PRECISION NOT NULL,
+                risk_quality DOUBLE PRECISION NOT NULL, readiness DOUBLE PRECISION NOT NULL,
+                directional_edge DOUBLE PRECISION NOT NULL, price DOUBLE PRECISION NOT NULL,
+                preferred_entry_low DOUBLE PRECISION, preferred_entry_high DOUBLE PRECISION,
+                setup_key TEXT, features_json TEXT NOT NULL, promoted_signal_id BIGINT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -195,9 +224,30 @@ def create_tables() -> None:
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS watch_states(
                 id {id_col}, telegram_id BIGINT NOT NULL, symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL DEFAULT '1h', snapshot_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL, last_notified_at TEXT,
+                timeframe TEXT NOT NULL DEFAULT '1h', snapshot_json TEXT NOT NULL DEFAULT '{{}}',
+                updated_at TEXT NOT NULL, last_checked_at TEXT, last_notified_at TEXT,
+                last_error TEXT, consecutive_errors INTEGER DEFAULT 0, promoted_signal_id BIGINT,
                 UNIQUE(telegram_id, symbol, timeframe)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS watch_events(
+                id {id_col}, telegram_id BIGINT NOT NULL, symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL, event_type TEXT NOT NULL, details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS runtime_state(
+                worker_name TEXT PRIMARY KEY, last_started_at TEXT, last_finished_at TEXT,
+                last_success_at TEXT, last_error TEXT, processed_count INTEGER DEFAULT 0,
+                error_count INTEGER DEFAULT 0, details_json TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS distributed_leases(
+                lease_name TEXT PRIMARY KEY, owner_id TEXT NOT NULL, expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         """)
 
@@ -213,10 +263,16 @@ def create_tables() -> None:
             "notification_chat_id": "BIGINT",
         }.items():
             _add_column(conn, "signals", name, definition)
+        for name, definition in {
+            "last_checked_at": "TEXT", "last_error": "TEXT",
+            "consecutive_errors": "INTEGER DEFAULT 0", "promoted_signal_id": "BIGINT",
+        }.items():
+            _add_column(conn, "watch_states", name, definition)
 
         for sql in (
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
+            "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_observations_owner ON analysis_observations(owner_telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_observations_symbol ON analysis_observations(symbol, timeframe)",
             "CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)",
@@ -234,7 +290,72 @@ def add_user(telegram_id: int, username: str | None, first_name: str | None) -> 
             """
             INSERT INTO users(telegram_id, username, first_name)
             VALUES(?,?,?)
-            ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name
             """,
             (telegram_id, username, first_name),
         )
+
+
+def acquire_lease(lease_name: str, owner_id: str, ttl_seconds: int) -> bool:
+    """Atomically acquire a cross-process lease on SQLite or PostgreSQL."""
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=max(30, ttl_seconds))
+    now_s, expires_s = now.isoformat(), expires.isoformat()
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO distributed_leases(lease_name,owner_id,expires_at,updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(lease_name) DO UPDATE SET
+                owner_id=excluded.owner_id,expires_at=excluded.expires_at,updated_at=excluded.updated_at
+            WHERE distributed_leases.expires_at<=? OR distributed_leases.owner_id=?
+            """,
+            (lease_name, owner_id, expires_s, now_s, now_s, owner_id),
+        )
+        return cur.rowcount > 0
+
+
+def release_lease(lease_name: str, owner_id: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM distributed_leases WHERE lease_name=? AND owner_id=?", (lease_name, owner_id))
+
+
+def runtime_started(worker_name: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO runtime_state(worker_name,last_started_at,processed_count,error_count)
+            VALUES(?,?,0,0)
+            ON CONFLICT(worker_name) DO UPDATE SET last_started_at=excluded.last_started_at,last_error=NULL
+            """,
+            (worker_name, now),
+        )
+
+
+def runtime_finished(worker_name: str, *, processed: int, errors: int, details: dict[str, Any] | None = None, error: str | None = None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    details_json = json.dumps(details or {}, ensure_ascii=False)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO runtime_state(worker_name,last_finished_at,last_success_at,last_error,processed_count,error_count,details_json)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(worker_name) DO UPDATE SET
+                last_finished_at=excluded.last_finished_at,
+                last_success_at=CASE WHEN excluded.last_error IS NULL THEN excluded.last_finished_at ELSE runtime_state.last_success_at END,
+                last_error=excluded.last_error,
+                processed_count=excluded.processed_count,
+                error_count=excluded.error_count,
+                details_json=excluded.details_json
+            """,
+            (worker_name, now, None if error else now, error, processed, errors, details_json),
+        )
+
+
+def get_runtime_states() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM runtime_state ORDER BY worker_name").fetchall()
+    return [dict(row) for row in rows]

@@ -13,7 +13,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 
-from database.database import database_backend
+from database.database import database_backend, persistent_database, ping_database, get_runtime_states
 
 _STARTED_AT = datetime.now(timezone.utc)
 
@@ -142,19 +142,30 @@ class WebhookServer:
     async def health_handler(self, _: web.Request) -> web.Response:
         now = datetime.now(timezone.utc)
         info = await self.bot.get_webhook_info()
+        try:
+            db = await asyncio.to_thread(ping_database)
+            workers = await asyncio.to_thread(get_runtime_states)
+            status = "ok" if db.get("ok") else "degraded"
+        except Exception as exc:
+            logging.exception("Database health check failed")
+            db = {"ok": False, "backend": database_backend(), "error": str(exc)}
+            workers = []
+            status = "degraded"
         return web.json_response({
-            "status": "ok",
+            "status": status,
             "service": "Liquidity Vision Intelligence",
             "mode": "webhook",
             "database_backend": database_backend(),
-            "persistent_database": database_backend() == "postgresql",
+            "persistent_database": persistent_database(),
+            "database": db,
+            "workers": workers,
             "webhook_url": info.url,
             "pending_update_count": info.pending_update_count,
             "last_error_message": info.last_error_message,
             "active_update_tasks": len(self._tasks),
             "uptime_seconds": max(0, int((now - _STARTED_AT).total_seconds())),
             "timestamp": now.isoformat(),
-        })
+        }, status=200 if status == "ok" else 503)
 
     async def root_handler(self, _: web.Request) -> web.Response:
         return web.Response(text="Liquidity Vision Intelligence webhook is online.")

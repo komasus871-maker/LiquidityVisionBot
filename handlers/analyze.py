@@ -243,9 +243,24 @@ async def watchlist_view(message: Message):
         )
         return
 
+    import json
     lines = ["⭐ <b>Your Watchlist</b>", ""]
     for index, row in enumerate(rows, 1):
+        snapshot = {}
+        try:
+            snapshot = json.loads(row.get("snapshot_json") or "{}")
+        except (TypeError, ValueError):
+            pass
+        status = snapshot.get("execution_status") or "INITIALIZING"
+        direction = float(snapshot.get("direction_score") or 0)
+        readiness = float(snapshot.get("readiness") or 0)
+        checked = row.get("last_checked_at") or row.get("updated_at") or "ещё не проверено"
+        error = row.get("last_error")
         lines.append(f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}")
+        lines.append(f"   {status} · Dir {direction:.1f} · Ready {readiness:.1f}")
+        lines.append(f"   Проверено: <code>{checked}</code>")
+        if error:
+            lines.append(f"   ⚠️ {str(error)[:160]}")
     lines.append("\nИспользуйте /analyze ТИКЕР ТФ для быстрого обновления.")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
