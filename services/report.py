@@ -32,6 +32,11 @@ class Report:
         regime = data.get("market_regime", {}) or {}
         current = data.get("current_price", data.get("price", 0))
         entry_type = str(data.get("entry_type", "UNKNOWN")).replace("_", " ").title()
+        plan_mode = str(data.get("plan_mode") or "TRADE_PLAN")
+        plan_title = "Trade Plan" if plan_mode == "TRADE_PLAN" else "Area of Interest"
+        quality = escape(str(data.get("trade_quality_stars") or data.get("quality") or "⭐☆☆☆☆"))
+        entry_reasons = data.get("entry_reasons") or []
+        reason_text = "\n".join(f"• {escape(str(x))}" for x in entry_reasons[:3]) or "• Volatility-adjusted execution area"
 
         return f"""
 📊 <b>{escape(str(data.get('symbol', 'Liquidity Vision')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
@@ -39,20 +44,24 @@ class Report:
 {escape(str(data.get('market_bias', 'Unknown')))}
 {escape(str(data.get('execution_status', 'WATCHLIST')))}
 
-⭐ <b>Setup</b>: {fmt_number(data.get('score', 0), 1)}/100 · Grade {escape(str(data.get('ai_grade', 'N/A')))}
-🧭 <b>Direction</b>: {fmt_number(data.get('direction_score', 0), 1)}/100
-🌍 <b>Regime</b>: {escape(str(regime.get('label', 'Unknown')))}
-⚖️ <b>Risk multiplier</b>: {fmt_number(regime.get('risk_multiplier', 1.0), 2)}x
+{quality} <b>Trade Quality</b>
+⭐ Setup: {fmt_number(data.get('score', 0), 1)}/100 · Grade {escape(str(data.get('ai_grade', 'N/A')))}
+🧭 Direction: {fmt_number(data.get('direction_score', 0), 1)}/100
+🌍 Regime: {escape(str(regime.get('label', 'Unknown')))}
+⚖️ Risk multiplier: {fmt_number(regime.get('risk_multiplier', 1.0), 2)}x
 
 ━━━━━━━━━━━━━━━━━━
 
-💰 <b>Trade Plan</b>
+💰 <b>{plan_title}</b>
 Current: {p(current)}
-Entry: {p(data.get('entry'))} ({escape(entry_type)})
+Planned level: {p(data.get('entry'))} ({escape(entry_type)})
 Zone: {p(data.get('preferred_entry_low'))} – {p(data.get('preferred_entry_high'))}
-Stop: {p(data.get('stop'))}
-TP1 / TP2 / TP3: {p(data.get('tp1'))} / {p(data.get('tp2'))} / {p(data.get('tp3'))}
+Invalidation: {p(data.get('stop'))}
+Targets: {p(data.get('tp1'))} / {p(data.get('tp2'))} / {p(data.get('tp3'))}
 RR: 1:{fmt_number(data.get('rr', 0), 1)}
+
+📍 <b>Why this zone</b>
+{reason_text}
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -113,24 +122,25 @@ Volatility: {escape(str(regime.get('volatility_state', 'NORMAL')))} ({fmt_number
 """.strip()
 
     def scenarios(self, data):
-        scenarios = ScenarioEngine.build(data)
-        primary = "\n".join(f"{i}. {escape(str(x))}" for i, x in enumerate(scenarios.get("primary", []), 1)) or "1. Maintain current context"
-        alternative = "\n".join(f"{i}. {escape(str(x))}" for i, x in enumerate(scenarios.get("alternative", []), 1)) or "1. Opposite structure confirmation"
+        path = data.get("expected_path") or []
+        path_text = "\n   ↓\n".join(escape(str(x)) for x in path) or "Observe current structure"
+        alternatives = data.get("alternative_conditions") or []
+        alternative = "\n".join(f"• {escape(str(x))}" for x in alternatives[:4]) or "• Opposite structure confirmation"
         invalidation = escape(str(data.get("stop")))
         return f"""
-🧭 <b>Scenario Map — {escape(str(data.get('symbol', '')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
+🧭 <b>Expected Path — {escape(str(data.get('symbol', '')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
 
-<b>Scenario A — Primary</b>
-{primary}
+<b>Primary path</b>
+{path_text}
 
-<b>Scenario B — Alternative</b>
+<b>Alternative path</b>
 {alternative}
 
 🛑 <b>Invalidation reference</b>
-Stop level: {invalidation}
+{invalidation}
 
-🎯 <b>Primary bias</b>
-{escape(str(data.get('direction', 'NEUTRAL')))} · {escape(str(data.get('recommendation', 'WATCHLIST')))}
+💡 <b>Why this trade exists</b>
+{escape(str(data.get('why_trade_exists', 'No directional thesis is trusted yet.')))}
 """.strip()
 
     def history(self, data):

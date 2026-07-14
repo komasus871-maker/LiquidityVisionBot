@@ -23,7 +23,6 @@ def _status_icon(status: str) -> str:
     return {
         "WATCHING": "👀", "TRIGGERED": "🔔", "ACTIVE": "⚡", "TP1": "🎯", "TP2": "🏆",
         "TP3": "👑", "STOP": "🛑", "BREAKEVEN": "🛡", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
-        "MANUAL_STOP": "✋",
     }.get(status, "•")
 
 
@@ -144,60 +143,30 @@ async def journal_handler(message: Message):
 
 @router.message(Command("trade"))
 async def trade_replay_handler(message: Message):
-    # Supported forms:
-    #   /trade 29          -> replay
-    #   /trade 29 stop     -> manual close
-    # Telegram may append the bot username to the command, so only arguments
-    # after the first token are parsed.
-    parts = (message.text or "").strip().split()
-    if len(parts) not in {2, 3} or not parts[1].isdigit():
-        await message.answer(
-            "Использование:\n"
-            "<code>/trade 12</code> — открыть сделку\n"
-            "<code>/trade 12 stop</code> — остановить отслеживание",
-            parse_mode="HTML",
-        )
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/trade 12</code> или <code>/trade 12 stop</code>", parse_mode="HTML")
         return
-
     signal_id = int(parts[1])
-    action = parts[2].lower() if len(parts) == 3 else None
-    allowed_stop_actions = {"stop", "close", "cancel", "стоп", "закрыть", "отмена"}
-    if action is not None and action not in allowed_stop_actions:
+    action = parts[2].lower() if len(parts) >= 3 else ""
+    if action in {"stop", "close", "cancel", "стоп", "закрыть"}:
+        closed = history.manual_stop(signal_id, message.from_user.id)
+        if not closed:
+            await message.answer("Сделка не найдена.")
+            return
         await message.answer(
-            "Неизвестное действие. Используйте <code>/trade 12 stop</code>.",
+            f"🛑 <b>MANUAL STOP</b> · #{signal_id}\n"
+            f"Цена закрытия: <code>{fmt_price(closed.get('exit_price'))}</code>\n"
+            f"Результат: <b>{float(closed.get('realized_r') or 0):+.2f}R</b>",
             parse_mode="HTML",
         )
         return
-
-    signal = history.get_by_id(signal_id)
-    if not signal or int(signal.get("owner_telegram_id") or 0) != int(message.from_user.id):
-        await message.answer("Сделка не найдена.")
+    if action:
+        await message.answer("Доступные действия: <code>stop</code>, <code>close</code>, <code>cancel</code>.", parse_mode="HTML")
         return
-
-    if action in allowed_stop_actions:
-        previous_status = str(signal.get("status") or "")
-        closed = history.manual_stop(signal_id, owner_telegram_id=int(message.from_user.id))
-        if not closed:
-            await message.answer("Не удалось остановить отслеживание сделки.")
-            return
-        if str(closed.get("result") or "") == "MANUAL_STOP":
-            await message.answer(
-                f"✋ <b>Отслеживание сделки #{signal_id} остановлено</b>\n\n"
-                f"{html.escape(str(closed.get('symbol') or ''))} "
-                f"{html.escape(str(closed.get('side') or ''))} · "
-                f"{html.escape(str(closed.get('timeframe') or '').upper())}\n"
-                f"Статус: <b>MANUAL STOP</b>\n"
-                f"Цена закрытия: <code>{fmt_price(closed.get('exit_price') or closed.get('current_price') or closed.get('entry'))}</code>\n"
-                f"Результат: <b>{float(closed.get('realized_r') or 0):+.2f}R</b>\n\n"
-                "Ручное закрытие не засчитывается как Stop Loss.",
-                parse_mode="HTML",
-            )
-        else:
-            await message.answer(
-                f"Сделка #{signal_id} уже закрыта. Предыдущий статус: "
-                f"<b>{html.escape(previous_status or str(closed.get('status') or '—'))}</b>.",
-                parse_mode="HTML",
-            )
+    signal = history.get_by_id(signal_id)
+    if not signal or int(signal.get("owner_telegram_id") or 0) != message.from_user.id:
+        await message.answer("Сделка не найдена.")
         return
 
     events = history.get_events(signal_id)
@@ -223,7 +192,7 @@ async def trade_replay_handler(message: Message):
         "BREAKEVEN": "Closed at Break Even",
         "INVALIDATED": "Scenario invalidated",
         "EXPIRED": "Scenario expired",
-        "MANUAL_STOP": "Tracking stopped manually",
+        "MANUAL_STOP": "Closed manually",
         "INTELLIGENCE_ALERT": "Intelligence changed",
     }
     previous_dt = None

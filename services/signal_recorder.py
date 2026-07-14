@@ -4,6 +4,7 @@ from database.signal_history import SignalHistory
 from services.premium import PremiumService
 from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
+from database.database import connect
 
 
 class SignalRecorder:
@@ -30,9 +31,25 @@ class SignalRecorder:
             normalized.append(text)
         return " | ".join(normalized)
 
+    @staticmethod
+    def _live_symbol_trades(owner_telegram_id: int | None, symbol: str) -> list[dict[str, Any]]:
+        if owner_telegram_id is None:
+            return []
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM signals
+                   WHERE owner_telegram_id=? AND symbol=?
+                     AND status IN ('ACTIVE','TP1','TP2')
+                   ORDER BY id ASC""",
+                (owner_telegram_id, symbol.upper()),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def record(self, *, symbol: str, timeframe: str, analysis: dict[str, Any], owner_telegram_id: int | None = None,
                notification_chat_id: int | None = None, min_confidence: float = 54) -> int | None:
         if not analysis.get("plan_valid", True):
+            return None
+        if not analysis.get("decision_gate_passed", True):
             return None
         side = str(analysis.get("direction") or "").upper()
         entry, stop = float(analysis.get("entry") or 0), float(analysis.get("stop") or 0)
@@ -71,6 +88,17 @@ class SignalRecorder:
                 return None
 
         status = "ACTIVE" if status_name == "🟢 READY" else "WATCHING"
+        live_symbol = self._live_symbol_trades(owner_telegram_id, symbol)
+        if status == "ACTIVE" and live_symbol:
+            # Never create a second live position on the same instrument across
+            # timeframes. Preserve the analysis as an observation only.
+            analysis["portfolio_conflict"] = {
+                "blocked": True,
+                "signal_ids": [int(x.get("id") or 0) for x in live_symbol],
+                "sides": [str(x.get("side") or "") for x in live_symbol],
+                "timeframes": [str(x.get("timeframe") or "") for x in live_symbol],
+            }
+            return None
         features = {key: analysis.get(key) for key in (
             "trend", "structure", "bos", "choch", "liquidity", "sweep", "order_block", "breaker",
             "mitigation", "fvg", "premium", "volume", "displacement", "rsi", "macd", "ema50", "ema200",

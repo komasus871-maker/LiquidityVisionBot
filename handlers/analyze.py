@@ -18,6 +18,7 @@ from services.similarity_report import SimilarityReport
 from services.symbol_resolver import SymbolResolver
 from services.user_watchlist import UserWatchlist
 from services.analysis_runtime import run_analysis
+from services.decision_quality import DecisionQualityEngine
 
 router = Router()
 
@@ -30,6 +31,7 @@ probability_engine = ProbabilityEngine()
 similarity_report = SimilarityReport()
 resolver = SymbolResolver(market)
 user_watchlist = UserWatchlist()
+decision_quality = DecisionQualityEngine()
 
 # Immutable in-process snapshots keep Explain/Similar consistent with the exact
 # analysis the user received. Refresh is the only action that recalculates.
@@ -64,12 +66,13 @@ async def _run_analysis(symbol: str, timeframe: str = "1h"):
     setup_key = recorder._setup_key(analysis)
     analysis["timeframe"] = timeframe
     analysis["symbol"] = symbol.upper()
-    return probability_engine.enrich(
+    analysis = probability_engine.enrich(
         analysis,
         symbol=symbol,
         timeframe=timeframe,
         setup_key=setup_key,
     )
+    return decision_quality.enrich(analysis)
 
 
 async def _send_analysis(message: Message, symbol: str, timeframe: str, user_id: int, chat_id: int):
