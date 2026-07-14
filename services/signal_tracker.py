@@ -15,6 +15,7 @@ from database.signal_history import SignalHistory
 from services.market import Market
 from services.notifier import Notifier
 from services.trade_intelligence import TradeIntelligenceEngine
+from services.data_integrity import DataIntegrityEngine
 
 
 class SignalTracker:
@@ -24,6 +25,7 @@ class SignalTracker:
         self.market = Market()
         self.notifier = Notifier(bot)
         self.intelligence = TradeIntelligenceEngine()
+        self.integrity = DataIntegrityEngine()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.auto_break_even = os.getenv("AUTO_BREAK_EVEN_AFTER_TP1", "true").lower() in {"1", "true", "yes", "on"}
         self.progress_interval = max(300, int(os.getenv("TRADE_PROGRESS_INTERVAL", "900")))
@@ -81,6 +83,15 @@ class SignalTracker:
                 processed += 1
                 try:
                     df = await asyncio.wait_for(self.market.get_klines(signal["symbol"], "1m", 6), timeout=25)
+                    frame_check = self.integrity.validate_market_frame(df)
+                    if not frame_check.valid:
+                        errors += 1
+                        self.history.add_event(signal["id"], "DATA_INTEGRITY_WARNING", None, {
+                            "code": frame_check.code,
+                            "reason": frame_check.reason,
+                            "details": frame_check.details or {},
+                        })
+                        continue
                     price = float(df["close"].iloc[-1])
                     await self._update(signal, price, df)
                 except Exception:
@@ -130,6 +141,23 @@ class SignalTracker:
             )
             signal["last_progress_notified_at"] = now
             signal["last_progress_bucket"] = bucket
+
+    async def _reject_activation(self, signal: dict, price: float, check) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        await self._transition(
+            signal,
+            "INVALIDATED",
+            price,
+            invalidated_at=now,
+            closed_at=now,
+            exit_price=price,
+            result="DATA_INTEGRITY_REJECTED",
+        )
+        self.history.add_event(signal["id"], "DATA_INTEGRITY_REJECTED", price, {
+            "code": check.code,
+            "reason": check.reason,
+            "details": check.details or {},
+        })
 
     async def _update(self, signal: dict, price: float, df) -> None:
         now_dt = datetime.now(timezone.utc)
@@ -182,6 +210,10 @@ class SignalTracker:
             no_zone = zone_low is None or zone_high is None
             crossed_entry = price >= entry if side == "LONG" else price <= entry
             if no_zone and crossed_entry:
+                activation_check = self.integrity.validate_activation(signal, price)
+                if not activation_check.valid:
+                    await self._reject_activation(signal, price, activation_check)
+                    return
                 await self._transition(
                     signal,
                     "ACTIVE",
@@ -200,6 +232,10 @@ class SignalTracker:
         if status == "TRIGGERED":
             candle = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
             if self._directional_candle(side, candle):
+                activation_check = self.integrity.validate_activation(signal, price)
+                if not activation_check.valid:
+                    await self._reject_activation(signal, price, activation_check)
+                    return
                 await self._transition(
                     signal,
                     "ACTIVE",

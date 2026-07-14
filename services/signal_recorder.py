@@ -5,6 +5,7 @@ from services.premium import PremiumService
 from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.database import connect
+from services.data_integrity import DataIntegrityEngine
 
 
 class SignalRecorder:
@@ -13,6 +14,7 @@ class SignalRecorder:
         self.premium = PremiumService()
         self.observations = ObservationHistory()
         self.candidates = CandidateHistory()
+        self.integrity = DataIntegrityEngine()
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
@@ -50,6 +52,15 @@ class SignalRecorder:
         if not analysis.get("plan_valid", True):
             return None
         if not analysis.get("decision_gate_passed", True):
+            return None
+        integrity = self.integrity.validate_plan(analysis)
+        if not integrity.valid:
+            analysis["plan_valid"] = False
+            analysis["integrity_rejection"] = {
+                "code": integrity.code,
+                "reason": integrity.reason,
+                "details": integrity.details or {},
+            }
             return None
         side = str(analysis.get("direction") or "").upper()
         entry, stop = float(analysis.get("entry") or 0), float(analysis.get("stop") or 0)
