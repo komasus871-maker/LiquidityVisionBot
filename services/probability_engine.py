@@ -287,15 +287,18 @@ class ProbabilityEngine:
         similar = self.similar_stats(cases)
         source = "exact" if exact["samples"] >= self.MIN_DISPLAY_SAMPLE else "similar"
         chosen = exact if source == "exact" else similar
+        samples = int(chosen.get("samples") or 0)
+        sufficient = samples >= self.MIN_RELIABLE_SAMPLE
         return {
             "source": source,
-            "samples": int(chosen.get("samples") or 0),
-            "tp1_rate": float(chosen.get("tp1_rate") or 0),
-            "tp2_rate": float(chosen.get("tp2_rate") or 0),
-            "tp3_rate": float(chosen.get("tp3_rate") or 0),
-            "stop_rate": float(chosen.get("stop_rate") or 0),
+            "samples": samples,
+            "tp1_rate": float(chosen.get("tp1_rate") or 0) if sufficient else 0.0,
+            "tp2_rate": float(chosen.get("tp2_rate") or 0) if sufficient else 0.0,
+            "tp3_rate": float(chosen.get("tp3_rate") or 0) if sufficient else 0.0,
+            "stop_rate": float(chosen.get("stop_rate") or 0) if sufficient else 0.0,
             "reliability": str(chosen.get("reliability") or "Insufficient"),
-            "sufficient": bool(chosen.get("sufficient")),
+            "sufficient": sufficient,
+            "disabled_reason": None if sufficient else f"Need at least {self.MIN_RELIABLE_SAMPLE} completed comparable trades; have {samples}.",
             "avg_mfe": float(chosen.get("avg_mfe") or 0),
             "avg_mae": float(chosen.get("avg_mae") or 0),
         }

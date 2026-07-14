@@ -204,6 +204,7 @@ class Notifier:
             f"Entry / Current: <code>{fmt_price(entry)}</code> → <code>{fmt_price(price)}</code>",
             f"PnL: <b>{move_pct:+.2f}%</b> · <b>{r_value:+.2f}R</b>",
             f"Trade Health: <b>{html.escape(health)}</b>",
+            f"Suggested Action: <b>{html.escape(str((json.loads(signal.get('intelligence_json') or '{}') if signal.get('intelligence_json') else {}).get('suggested_action') or 'HOLD'))}</b>",
             "",
             f"TP1 {self._bar(tp1)} {tp1:.0f}%",
             f"TP2 {self._bar(tp2)} {tp2:.0f}%",
@@ -219,9 +220,9 @@ class Notifier:
             "",
             "📊 <b>Probability Engine</b>",
             (f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · TP3 {probability['tp3_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%"
-             if probability['samples'] else "Learning: no completed historical sample yet."),
+             if probability.get('sufficient') else "Statistical model disabled."),
             (f"Sample: {probability['samples']} · Reliability: {html.escape(probability['reliability'])}"
-             if probability['samples'] else "Historical estimates will appear after completed trades."),
+             if probability.get('sufficient') else html.escape(str(probability.get('disabled_reason') or 'Insufficient completed history.'))),
             "",
             "🤖 <b>AI Commentary</b>",
             html.escape(commentary or "The trade remains under live monitoring."),
@@ -253,12 +254,19 @@ class Notifier:
             "<b>What changed</b>",
             *[f"• {html.escape(reason)}" for reason in reasons],
         ]
-        if probability['samples']:
+        lines.extend([
+            "",
+            "📊 <b>Historical probability</b>",
+        ])
+        if probability.get('sufficient'):
             lines.extend([
-                "",
-                "📊 <b>Historical probability</b>",
                 f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%",
                 f"Sample {probability['samples']} · {html.escape(probability['reliability'])}",
+            ])
+        else:
+            lines.extend([
+                "Statistical model disabled.",
+                html.escape(str(probability.get('disabled_reason') or 'Insufficient completed history.')),
             ])
         if commentary:
             lines.extend(["", "🤖 <b>AI Commentary</b>", html.escape(commentary)])

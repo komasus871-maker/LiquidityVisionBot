@@ -20,6 +20,9 @@ class IntelligenceSnapshot:
     risk_used: float
     distance_to_stop: float
     mfe_giveback: float
+    current_r: float
+    target_progress: float
+    suggested_action: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,14 +153,21 @@ class TradeIntelligenceEngine:
         current_move = ((price - entry) / max(abs(entry), 1e-12) * 100) * (1 if side == "LONG" else -1)
         mfe_giveback = max(0.0, mfe - current_move)
 
+        tp1 = float(signal.get("tp1") or entry)
+        tp_distance = max(abs(tp1 - entry), 1e-12)
+        target_progress = self._clamp(
+            (((price - entry) if side == "LONG" else (entry - price)) / tp_distance) * 100
+        )
+
         confidence = base_confidence
-        confidence += max(-16, min(12, current_r * 9))
+        confidence += max(-16, min(16, current_r * 10))
+        confidence += min(14, target_progress * 0.14)
         confidence -= max(0, risk_used - 60) * 0.28
-        confidence -= min(14, mfe_giveback * 3.0)
+        confidence -= min(12, mfe_giveback * 2.5)
         if signal.get("tp1_hit_at"):
-            confidence += 5
+            confidence += 8
         if signal.get("break_even_at"):
-            confidence += 4
+            confidence += 6
         raw_confidence = round(self._clamp(confidence), 1)
 
         previous_confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or raw_confidence)
@@ -168,9 +178,12 @@ class TradeIntelligenceEngine:
         confidence_delta = round(confidence - previous_confidence, 1)
 
         health_score = confidence
-        health_score -= max(0, risk_used - 55) * 0.35
-        health_score += max(-12, min(10, current_r * 7))
-        health_score -= min(18, mfe_giveback * 4)
+        health_score -= max(0, risk_used - 55) * 0.40
+        health_score += max(-14, min(18, current_r * 10))
+        health_score += min(18, target_progress * 0.18)
+        health_score -= min(16, mfe_giveback * 3.0)
+        if signal.get("break_even_at"):
+            health_score += 8
         health_score = round(self._clamp(health_score), 1)
         health = self._health_label(health_score)
         previous_health = str(signal.get("trade_health") or "")
@@ -192,7 +205,9 @@ class TradeIntelligenceEngine:
         positive = sorted(components.items(), key=lambda item: item[1], reverse=True)
         weak = sorted(components.items(), key=lambda item: item[1])
         sentences: list[str] = []
-        if health_score >= 78:
+        if target_progress >= 85 and current_r > 0:
+            sentences.append("The trade is close to TP1 and remains favorable; protect open profit rather than treating normal momentum cooling as failure.")
+        elif health_score >= 78:
             sentences.append("The trade remains technically healthy.")
         elif health_score >= 60:
             sentences.append("The setup remains valid, but follow-through is not yet decisive.")
@@ -212,6 +227,20 @@ class TradeIntelligenceEngine:
         else:
             sentences.append("Price is currently trading against the entry.")
 
+
+        if signal.get("tp1_hit_at"):
+            suggested_action = "MOVE STOP / PROTECT PROFIT"
+        elif target_progress >= 85 and current_r > 0:
+            suggested_action = "PROTECT PROFIT"
+        elif target_progress >= 55 and current_r > 0:
+            suggested_action = "HOLD / MONITOR TP1"
+        elif risk_used >= 75 or health_score < 42:
+            suggested_action = "REDUCE RISK"
+        elif current_r >= 0:
+            suggested_action = "HOLD"
+        else:
+            suggested_action = "MONITOR INVALIDATION"
+
         return IntelligenceSnapshot(
             confidence=confidence,
             confidence_delta=confidence_delta,
@@ -226,4 +255,7 @@ class TradeIntelligenceEngine:
             risk_used=round(risk_used, 1),
             distance_to_stop=round(distance_to_stop, 1),
             mfe_giveback=round(mfe_giveback, 2),
+            current_r=round(current_r, 2),
+            target_progress=round(target_progress, 1),
+            suggested_action=suggested_action,
         )

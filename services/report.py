@@ -59,7 +59,7 @@ class Report:
 
 💰 <b>{plan_title}</b>
 Current: {p(current)}
-Planned level: {p(data.get('entry'))} ({escape(entry_type)})
+Planned Entry: {p(data.get('entry'))} ({escape(entry_type)})
 Zone: {p(data.get('preferred_entry_low'))} – {p(data.get('preferred_entry_high'))}
 Invalidation: {p(data.get('stop'))}
 Targets: {p(data.get('tp1'))} / {p(data.get('tp2'))} / {p(data.get('tp3'))}
@@ -92,6 +92,23 @@ RR: 1:{fmt_number(data.get('rr', 0), 1)}
 
 ⚠️ <i>Not financial advice. Use proper risk management.</i>
 """.strip()
+
+    def why_not(self, data):
+        blockers = [str(x).replace("⛔ ", "").strip() for x in (data.get("reasons") or []) if str(x).startswith("⛔ ")]
+        risks = [str(x).replace("⚠️ ", "").strip() for x in (data.get("reasons") or []) if str(x).startswith("⚠️ ")]
+        reasons = blockers + risks
+        body = "\n".join(f"• {escape(x)}" for x in reasons[:5]) or "• The setup does not yet have enough execution edge."
+        triggers = data.get("triggers") or ["Wait for stronger confirmation"]
+        next_steps = "\n".join(f"• {escape(str(x))}" for x in triggers[:3])
+        return f"""🚫 <b>Why NOT? — {escape(str(data.get('symbol', '')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
+
+The directional idea may still be valid, but the activation trigger is still missing. Execution is delayed because:
+{body}
+
+<b>What would change the decision</b>
+{next_steps}
+
+Waiting protects expectancy."""
 
     def technical(self, data):
         p = fmt_price
@@ -134,7 +151,7 @@ Volatility: {escape(str(regime.get('volatility_state', 'NORMAL')))} ({fmt_number
 
     def scenarios(self, data):
         path = data.get("expected_path") or []
-        path_text = "\n   ↓\n".join(escape(str(x)) for x in path) or "Observe current structure"
+        path_text = "\n   ↓\n".join(escape(str(x)) for x in path) if path else "Observe current structure\n   ↓\nWait for confirmation\n   ↓\nTP1\n   ↓\nTP2\n   ↓\nTP3"
         alternatives = data.get("alternative_conditions") or []
         alternative = "\n".join(f"• {escape(str(x))}" for x in alternatives[:4]) or "• Opposite structure confirmation"
         invalidation = escape(str(data.get("stop")))

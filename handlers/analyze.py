@@ -247,6 +247,17 @@ async def explain_callback(callback: CallbackQuery):
         await callback.message.answer(f"❌ Не удалось построить Explain Pro\n\n{exc}")
 
 
+@router.callback_query(F.data.startswith("whynot:"))
+async def why_not_callback(callback: CallbackQuery):
+    _, symbol, timeframe = callback.data.split(":", 2)
+    await callback.answer("Объясняю, почему вход отложен…")
+    try:
+        analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
+        await callback.message.answer(report.why_not(analysis), parse_mode="HTML")
+    except Exception as exc:
+        await callback.message.answer(f"❌ Не удалось открыть Why NOT\n\n{exc}")
+
+
 @router.callback_query(F.data.startswith("technical:"))
 async def technical_callback(callback: CallbackQuery):
     _, symbol, timeframe = callback.data.split(":", 2)
