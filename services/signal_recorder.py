@@ -105,7 +105,8 @@ class SignalRecorder:
             "market_bias", "execution_status", "triggers", "direction_score", "entry_quality", "risk_quality",
             "execution_readiness", "opportunity_category", "direction_breakdown",
             "strongest_drivers", "biggest_blockers", "ai_grade", "execution_bias",
-            "final_verdict", "score_components"
+            "final_verdict", "score_components", "global_context", "entry_reasons", "expected_path",
+            "decision_action", "trade_quality_stars"
         )}
         payload = {
             "owner_telegram_id": owner_telegram_id, "notification_chat_id": notification_chat_id,

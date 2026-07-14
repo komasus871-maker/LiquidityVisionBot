@@ -76,13 +76,23 @@ async def journal_handler(message: Message):
                 f"MAE {float(item.get('max_drawdown_pct') or 0):+.2f}%"
             )
         intelligence = ""
+        next_event = ""
+        try:
+            features = json.loads(item.get("features_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            features = {}
+        triggers = features.get("triggers") or []
+        if item["status"] in {"WATCHING", "TRIGGERED"} and triggers:
+            next_event = f"\n   Next: {html.escape(str(triggers[0]))}"
+        elif item["status"] in {"ACTIVE", "TP1", "TP2"}:
+            next_event = "\n   Next: protect risk and monitor progression toward the next target"
         if item["status"] in {"ACTIVE", "TP1", "TP2"}:
             health = html.escape(str(item.get("trade_health") or "🟡 STABLE"))
             confidence = float(item.get("dynamic_confidence") or item.get("confidence") or 0)
             intelligence = f"\n   {health} · Confidence {confidence:.0f}%"
         recent_text.append(
             f"{_status_icon(item['status'])} <b>#{item['id']} {item['symbol']} {item['side']}</b> — {item['status']}\n"
-            f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | {metrics}{intelligence}\n"
+            f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | {metrics}{intelligence}{next_event}\n"
             f"   /trade {item['id']}"
         )
 

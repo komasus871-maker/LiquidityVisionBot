@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from database.database import connect
@@ -72,8 +72,19 @@ class ObservationHistory:
         return int(row[0] or 0)
 
     def pending(self, limit: int = 50):
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
         with connect() as conn:
             rows = conn.execute("""SELECT * FROM analysis_observations
                                   WHERE promoted_signal_id IS NULL AND owner_telegram_id IS NOT NULL
-                                  ORDER BY updated_at ASC LIMIT ?""", (limit,)).fetchall()
+                                    AND updated_at >= ?
+                                    AND direction_score >= 62 AND readiness >= 52
+                                  ORDER BY readiness DESC, direction_score DESC, updated_at ASC LIMIT ?""",
+                                (cutoff, limit)).fetchall()
         return [dict(x) for x in rows]
+
+    def prune_stale(self, hours: int = 72) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with connect() as conn:
+            cur = conn.execute("""DELETE FROM analysis_observations
+                                  WHERE promoted_signal_id IS NULL AND updated_at < ?""", (cutoff,))
+            return int(cur.rowcount or 0)

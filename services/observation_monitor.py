@@ -36,6 +36,7 @@ class ObservationMonitor:
         runtime_started(self.worker_name)
         processed = errors = promoted = 0
         try:
+            self.history.prune_stale(hours=72)
             for observation in self.history.pending(limit=40):
                 processed += 1
                 try:

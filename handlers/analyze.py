@@ -19,6 +19,7 @@ from services.symbol_resolver import SymbolResolver
 from services.user_watchlist import UserWatchlist
 from services.analysis_runtime import run_analysis
 from services.decision_quality import DecisionQualityEngine
+from services.market_context import MarketContextEngine
 
 router = Router()
 
@@ -32,6 +33,7 @@ similarity_report = SimilarityReport()
 resolver = SymbolResolver(market)
 user_watchlist = UserWatchlist()
 decision_quality = DecisionQualityEngine()
+market_context = MarketContextEngine()
 
 # Immutable in-process snapshots keep Explain/Similar consistent with the exact
 # analysis the user received. Refresh is the only action that recalculates.
@@ -61,16 +63,23 @@ class UniversalAnalyzeState(StatesGroup):
 
 
 async def _run_analysis(symbol: str, timeframe: str = "1h"):
+    symbol = symbol.upper()
     df = await market.get_klines(symbol, interval=timeframe)
     analysis = await run_analysis(analyzer, df)
-    setup_key = recorder._setup_key(analysis)
     analysis["timeframe"] = timeframe
-    analysis["symbol"] = symbol.upper()
+    analysis["symbol"] = symbol
+
+    btc_analysis = None
+    if symbol != "BTC":
+        try:
+            btc_df = await market.get_klines("BTC", interval=timeframe)
+            btc_analysis = await run_analysis(analyzer, btc_df)
+        except Exception:
+            btc_analysis = None
+    analysis = market_context.enrich(analysis, symbol=symbol, btc=btc_analysis)
+    setup_key = recorder._setup_key(analysis)
     analysis = probability_engine.enrich(
-        analysis,
-        symbol=symbol,
-        timeframe=timeframe,
-        setup_key=setup_key,
+        analysis, symbol=symbol, timeframe=timeframe, setup_key=setup_key,
     )
     return decision_quality.enrich(analysis)
 

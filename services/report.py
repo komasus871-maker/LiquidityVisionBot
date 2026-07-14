@@ -37,12 +37,17 @@ class Report:
         quality = escape(str(data.get("trade_quality_stars") or data.get("quality") or "⭐☆☆☆☆"))
         entry_reasons = data.get("entry_reasons") or []
         reason_text = "\n".join(f"• {escape(str(x))}" for x in entry_reasons[:3]) or "• Volatility-adjusted execution area"
+        context = data.get("global_context") or {}
+        context_text = escape(str(context.get("summary") or "No broad-market adjustment."))
+        take_text = "✅ YES" if data.get("would_take_trade") else "❌ NO"
+        action = escape(str(data.get("decision_action") or "WATCH"))
 
         return f"""
 📊 <b>{escape(str(data.get('symbol', 'Liquidity Vision')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
 
 {escape(str(data.get('market_bias', 'Unknown')))}
 {escape(str(data.get('execution_status', 'WATCHLIST')))}
+🚦 Decision: <b>{action}</b>
 
 {quality} <b>Trade Quality</b>
 ⭐ Setup: {fmt_number(data.get('score', 0), 1)}/100 · Grade {escape(str(data.get('ai_grade', 'N/A')))}
@@ -62,6 +67,12 @@ RR: 1:{fmt_number(data.get('rr', 0), 1)}
 
 📍 <b>Why this zone</b>
 {reason_text}
+
+🌐 <b>Broad market context</b>
+{context_text}
+
+🤔 <b>Would the system take it now?</b>
+{take_text}
 
 ━━━━━━━━━━━━━━━━━━
 

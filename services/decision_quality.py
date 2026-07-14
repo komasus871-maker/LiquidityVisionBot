@@ -135,8 +135,8 @@ class DecisionQualityEngine:
         # promoted into a full executable trade merely because geometry exists.
         actionable = (
             status in self.EXECUTABLE
-            and direction_score >= 58
-            and setup_score >= 58
+            and direction_score >= 62
+            and setup_score >= 62
             and not hard_block
             and regime not in {"RANGING", "COMPRESSION"}
             and bool(data.get("plan_valid", True))
@@ -158,6 +158,13 @@ class DecisionQualityEngine:
         else:
             stars = "⭐☆☆☆☆"
         data["trade_quality_stars"] = stars
+        data["decision_action"] = (
+            "EXECUTE" if actionable and status == "🟢 READY" else
+            "WAIT" if actionable else
+            "WATCH" if setup_score >= 52 and direction_score >= 52 else
+            "SKIP"
+        )
+        data["would_take_trade"] = bool(actionable and status == "🟢 READY" and setup_score >= 72)
         data["entry_reasons"] = self._entry_reasons(data)
         data["expected_path"] = self._expected_path(data)
         data["why_trade_exists"] = self._why_exists(data)
