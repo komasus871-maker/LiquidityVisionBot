@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from services.conviction_engine import ConvictionEngine
+from services.unified_decision import UnifiedDecisionEngine
+from services.market_memory import MarketMemory
 
 
 class DecisionQualityEngine:
@@ -14,6 +16,10 @@ class DecisionQualityEngine:
     """
 
     EXECUTABLE = {"🟢 READY", "🟡 WAIT FOR TRIGGER", "🎯 WAIT FOR PULLBACK", "🔄 REVERSAL WATCH"}
+
+    def __init__(self):
+        self.unified = UnifiedDecisionEngine()
+        self.memory = MarketMemory()
 
     @staticmethod
     def _dedupe_text(items: list[str] | None) -> list[str]:
@@ -172,4 +178,8 @@ class DecisionQualityEngine:
         data["why_trade_exists"] = self._why_exists(data)
         data["conviction"] = ConvictionEngine().evaluate(data)
         data["system_decision"] = data["conviction"]["action"]
+        data["unified_decision"] = self.unified.evaluate(data)
+        symbol = str(data.get("symbol") or "UNKNOWN")
+        timeframe = str(data.get("timeframe") or "1h")
+        data["market_memory"] = self.memory.remember(symbol, timeframe, data)
         return data

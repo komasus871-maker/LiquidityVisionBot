@@ -262,6 +262,18 @@ class ProbabilityEngine:
         analysis["historical_probability"] = exact
         analysis["similar_cases"] = [asdict(case) for case in cases]
         analysis["similar_stats"] = self.similar_stats(cases)
+        weighted = self.weighted_stats(cases)
+        analysis["weighted_similarity"] = weighted
+        analysis["historical_intelligence"] = {
+            "samples": int(weighted.get("samples") or 0),
+            "effective_samples": float(weighted.get("effective_samples") or 0),
+            "expected_r": weighted.get("avg_realized_r") if weighted.get("estimated") else None,
+            "average_similarity": float(weighted.get("avg_similarity") or 0),
+            "reliability": str(weighted.get("reliability") or "Insufficient"),
+            "reliability_score": min(100.0, float(weighted.get("effective_samples") or 0) / self.MIN_RELIABLE_SAMPLE * 100.0),
+            "display_probabilities": bool(weighted.get("estimated")) and int(weighted.get("samples") or 0) >= self.MIN_DISPLAY_SAMPLE,
+            "closest_case": asdict(cases[0]) if cases else None,
+        }
         try:
             dna = TradeDNABuilder.build(analysis, symbol=symbol, timeframe=timeframe)
             v2_cases = SimilarityEngineV2().find(dna=dna, limit=20)

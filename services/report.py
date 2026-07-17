@@ -50,6 +50,17 @@ class Report:
         opposition = conviction.get("strongest_opposition") or {}
         support_text = escape(str(support.get("label") or "No decisive support"))
         opposition_text = escape(str(opposition.get("label") or "No decisive opposition"))
+        unified = data.get("unified_decision") or {}
+        unified_support = "\n".join(
+            f"• {escape(str(x.get('label', 'Factor')))}: {float(x.get('value') or 0):+.1f}"
+            for x in (unified.get("top_support") or [])[:2]
+        ) or "• No decisive unified support"
+        unified_opposition = "\n".join(
+            f"• {escape(str(x.get('label', 'Factor')))}: {float(x.get('value') or 0):+.1f}"
+            for x in (unified.get("top_opposition") or [])[:2]
+        ) or "• No major unified opposition"
+        memory = data.get("market_memory") or {}
+        memory_text = "\n".join(f"• {escape(str(x))}" for x in (memory.get("changes") or [])[:3]) or f"• {escape(str(memory.get('summary') or 'Collecting snapshots.'))}"
 
         return f"""
 📊 <b>{escape(str(data.get('symbol', 'Liquidity Vision')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
@@ -61,6 +72,19 @@ Conviction: <b>{escape(str(conviction.get('confidence_band', 'LOW')))}</b> · Di
 🟢 Bulls <b>{bull_score}</b> : <b>{bear_score}</b> Bears 🔴
 Strongest support: {support_text}
 Strongest opposition: {opposition_text}
+
+🧠 <b>Unified Decision v7.9</b>
+{escape(str(unified.get('action', 'WAIT')))} · <b>{fmt_number(unified.get('score', 0), 1)}/100</b> · {escape(str(unified.get('conviction', 'LOW')))} conviction
+{escape(str(unified.get('reason', 'Awaiting unified decision context.')))}
+
+Support
+{unified_support}
+Opposition
+{unified_opposition}
+
+🕰 <b>Market Memory</b>
+{escape(str(memory.get('state', 'LEARNING')))} · {int(memory.get('samples') or 0)} snapshots
+{memory_text}
 
 {quality} <b>Trade Quality</b>
 ⭐ Setup: {fmt_number(data.get('score', 0), 1)}/100 · Grade {escape(str(data.get('ai_grade', 'N/A')))}
@@ -185,24 +209,28 @@ Volatility: {escape(str(regime.get('volatility_state', 'NORMAL')))} ({fmt_number
 """.strip()
 
     def history(self, data):
-        exact = data.get("historical_probability") or {}
-        similar = data.get("similar_stats") or {}
-        exact_samples = int(exact.get("samples") or 0)
-        similar_samples = int(similar.get("samples") or 0)
-        if exact_samples >= 5:
+        intelligence = data.get("historical_intelligence") or {}
+        closest = intelligence.get("closest_case") or {}
+        samples = int(intelligence.get("samples") or 0)
+        if not intelligence.get("display_probabilities"):
             body = (
-                f"Exact samples: <b>{exact_samples}</b>\n"
-                f"TP1 {exact.get('tp1_rate', 0)}% · TP2 {exact.get('tp2_rate', 0)}% · "
-                f"TP3 {exact.get('tp3_rate', 0)}% · Stop {exact.get('stop_rate', 0)}%\n"
-                f"Reliability: <b>{escape(str(exact.get('reliability', 'Insufficient')))}</b>"
-            )
-        elif similar_samples:
-            body = (
-                f"Similar completed setups: <b>{similar_samples}</b>\n"
-                f"TP1 {similar.get('tp1_rate', 0)}% · TP2 {similar.get('tp2_rate', 0)}% · "
-                f"TP3 {similar.get('tp3_rate', 0)}% · Stop {similar.get('stop_rate', 0)}%\n"
-                f"Reliability: <b>{escape(str(similar.get('reliability', 'Insufficient')))}</b>"
+                f"Sample is still insufficient: <b>{samples}</b> comparable completed setups.\n"
+                "Probabilities are intentionally hidden until the effective sample is statistically usable."
             )
         else:
-            body = "No statistically usable completed sample yet. The system is collecting outcomes."
+            expected = intelligence.get("expected_r")
+            expected_text = "unknown" if expected is None else f"{float(expected):+.2f}R"
+            body = (
+                f"Weighted matches: <b>{samples}</b> · effective {fmt_number(intelligence.get('effective_samples', 0), 1)}\n"
+                f"Average similarity: <b>{fmt_number(intelligence.get('average_similarity', 0), 1)}%</b>\n"
+                f"Expected result: <b>{expected_text}</b>\n"
+                f"Reliability: <b>{escape(str(intelligence.get('reliability', 'Insufficient')))}</b>"
+            )
+            if closest:
+                body += (
+                    f"\n\nClosest case: <b>#{closest.get('signal_id')}</b> "
+                    f"{escape(str(closest.get('symbol', '')))} {escape(str(closest.get('side', '')))} · "
+                    f"{fmt_number(closest.get('similarity', 0), 1)}% similarity · "
+                    f"{escape(str(closest.get('status', 'UNKNOWN')))}"
+                )
         return f"📚 <b>Historical Intelligence — {escape(str(data.get('symbol', '')).upper())}</b>\n\n{body}"
