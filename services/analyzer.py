@@ -3,21 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from utils.indicators import ema, rsi, macd
-from utils.structure import Structure
-from utils.choch import CHOCH
-from utils.liquidity import Liquidity
-from utils.sweep import Sweep
-from utils.order_blocks import OrderBlocks
-from utils.breaker_block import BreakerBlock
-from utils.mitigation_block import MitigationBlock
-from utils.fvg import FVG
-from utils.premium_discount import PremiumDiscount
-from utils.volume_profile import VolumeProfile
-from utils.displacement import Displacement
-from utils.atr import ATR
-from services.market_regime import MarketRegimeEngine
 from services.trade_plan_integrity import TradePlanIntegrity, InvalidTradePlan
+from services.unified_core import unified_pipeline
 
 
 class Analyzer:
@@ -497,57 +484,18 @@ class Analyzer:
             return "⚪ No clear directional edge. Preserve capital and wait for the market to resolve."
         return f"👁 Market context leans {direction}, but this is an observation—not a trade."
 
-    def analyze(self, df):
-        if "confirm" in df.columns:
-            confirmed = df[df["confirm"].astype(str) == "1"]
-            if len(confirmed) >= 220:
-                df = confirmed.copy()
-
-        structure = Structure(df)
-        choch = CHOCH(df)
-        liquidity = Liquidity(df)
-        sweep = Sweep(df)
-        order_blocks = OrderBlocks(df)
-        breaker = BreakerBlock(df)
-        mitigation = MitigationBlock(df)
-        fvg = FVG(df)
-        premium = PremiumDiscount(df)
-        volume = VolumeProfile(df)
-        displacement = Displacement(df)
-        atr = ATR(df)
-        regime_engine = MarketRegimeEngine()
-
-        close = float(df["close"].iloc[-1])
-        ema50 = float(ema(df, 50).iloc[-1])
-        ema200 = float(ema(df, 200).iloc[-1])
-        rsi_value = float(rsi(df).iloc[-1])
-        macd_line, signal = macd(df)
-        macd_now = float(macd_line.iloc[-1])
-        signal_now = float(signal.iloc[-1])
-
-        raw = {
-            "price": close,
-            "trend": "🟢 Bullish" if ema50 > ema200 else "🔴 Bearish",
-            "structure": structure.market_structure(),
-            "bos": structure.bos(),
-            "choch": choch.analyze(),
-            "liquidity": liquidity.analyze(),
-            "sweep": sweep.analyze(),
-            "order_block": order_blocks.analyze(),
-            "breaker": breaker.analyze(),
-            "mitigation": mitigation.analyze(),
-            "fvg": fvg.analyze(),
-            "premium": premium.analyze(),
-            "volume": volume.analyze(),
-            "displacement": displacement.analyze(),
-            "atr": atr.analyze(),
-            "ema50": ema50,
-            "ema200": ema200,
-            "rsi": rsi_value,
-            "macd": "🟢 Bullish" if macd_now > signal_now else "🔴 Bearish",
-            "macd_bullish": macd_now > signal_now,
-            "market_regime": regime_engine.analyze(df),
-        }
+    def analyze(self, df, *, symbol=None, timeframe=None, source="analyzer", use_cache=True):
+        """Analyze through the v7.6 shared pipeline while preserving legacy output."""
+        pipeline_result = unified_pipeline.execute(
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+            source=source,
+            use_cache=use_cache,
+        )
+        context = pipeline_result.context
+        raw = dict(context.raw)
+        close = float(raw["price"])
         raw["volume_ratio"] = self._volume_ratio(raw["volume"])
 
         long_score, long_pos, long_warn, long_groups, long_components = self._direction_score("LONG", raw)
@@ -708,5 +656,9 @@ class Analyzer:
             data["score"] = 0.0
             data["setup_score"] = 0.0
             data.setdefault("reasons", []).append(f"⛔ Invalid trade geometry: {exc}")
+        context.decision.update(data)
+        data["analysis_context"] = context.snapshot()
+        data["trade_dna_foundation"] = dict(context.trade_dna)
         data["final_verdict"] = self._verdict(data)
+        context.output.update(data)
         return data

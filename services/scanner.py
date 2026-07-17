@@ -36,7 +36,7 @@ class Scanner:
         async with semaphore:
             try:
                 df = await asyncio.wait_for(self.market.get_klines(symbol), timeout=30)
-                result = await asyncio.wait_for(run_analysis(self.analyzer, df), timeout=30)
+                result = await asyncio.wait_for(run_analysis(self.analyzer, df, symbol=symbol, timeframe="1h", source="scanner"), timeout=30)
                 result = self.decision_quality.enrich(result)
                 risks = [
                     x.replace("⚠️ ", "").replace("⛔ ", "")

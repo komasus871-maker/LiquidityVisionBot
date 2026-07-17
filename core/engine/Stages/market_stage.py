@@ -14,9 +14,10 @@ class MarketStage:
         analyzer = Analyzer()
 
         analysis = analyzer.analyze(
-
-            context["df"]
-
+            context["df"],
+            symbol=context.get("symbol"),
+            timeframe=context.get("timeframe"),
+            source="legacy_engine",
         )
 
         context["analysis"] = analysis

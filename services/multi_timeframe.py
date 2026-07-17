@@ -1,5 +1,6 @@
 from services.market import Market
 from services.analyzer import Analyzer
+from services.analysis_runtime import run_analysis
 
 
 class MultiTimeframe:
@@ -36,10 +37,12 @@ class MultiTimeframe:
 
             )
 
-            result[tf] = self.analyzer.analyze(
-
-                candles
-
+            result[tf] = await run_analysis(
+                self.analyzer,
+                candles,
+                symbol=symbol,
+                timeframe=tf,
+                source="multi_timeframe",
             )
 
         return result

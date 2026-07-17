@@ -22,7 +22,7 @@ class ScannerV2:
 
             df = await self.market.get_klines(symbol)
 
-            result = await run_analysis(self.analyzer, df)
+            result = await run_analysis(self.analyzer, df, symbol=symbol, timeframe="1h", source="scanner_v2")
 
             return symbol, result
 

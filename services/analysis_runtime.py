@@ -22,7 +22,7 @@ def _semaphore() -> asyncio.Semaphore:
     return _SEMAPHORE
 
 
-async def run_analysis(analyzer: Any, dataframe: Any) -> dict:
-    """Run ``analyzer.analyze`` without blocking the asyncio event loop."""
+async def run_analysis(analyzer: Any, dataframe: Any, **kwargs: Any) -> dict:
+    """Run analysis off-loop and pass identity metadata into the unified core."""
     async with _semaphore():
-        return await asyncio.to_thread(analyzer.analyze, dataframe)
+        return await asyncio.to_thread(analyzer.analyze, dataframe, **kwargs)

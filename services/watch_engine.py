@@ -157,7 +157,7 @@ class WatchEngine:
             symbol, timeframe = row["symbol"], row["timeframe"]
             try:
                 df = await asyncio.wait_for(self.market.get_klines(symbol, interval=timeframe), timeout=35)
-                analysis = await asyncio.wait_for(run_analysis(self.analyzer, df), timeout=45)
+                analysis = await asyncio.wait_for(run_analysis(self.analyzer, df, symbol=symbol, timeframe=timeframe, source="watch_engine"), timeout=45)
                 setup_key = self.recorder._setup_key(analysis)
                 analysis["timeframe"] = timeframe
                 analysis = self.probability.enrich(analysis, symbol=symbol, timeframe=timeframe, setup_key=setup_key)

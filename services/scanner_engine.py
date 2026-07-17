@@ -1,5 +1,6 @@
 from services.market import Market
 from services.analyzer import Analyzer
+from services.analysis_runtime import run_analysis
 from services.brain import Brain
 from services.watchlist import WATCHLIST
 
@@ -28,10 +29,12 @@ class ScannerEngine:
 
         )
 
-        analysis = self.analyzer.analyze(
-
-            candles
-
+        analysis = await run_analysis(
+            self.analyzer,
+            candles,
+            symbol=symbol,
+            timeframe="1h",
+            source="scanner_engine",
         )
 
         analysis["symbol"] = symbol

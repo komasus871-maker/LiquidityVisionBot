@@ -65,7 +65,7 @@ class UniversalAnalyzeState(StatesGroup):
 async def _run_analysis(symbol: str, timeframe: str = "1h"):
     symbol = symbol.upper()
     df = await market.get_klines(symbol, interval=timeframe)
-    analysis = await run_analysis(analyzer, df)
+    analysis = await run_analysis(analyzer, df, symbol=symbol, timeframe=timeframe, source="analyze")
     analysis["timeframe"] = timeframe
     analysis["symbol"] = symbol
 
@@ -73,7 +73,7 @@ async def _run_analysis(symbol: str, timeframe: str = "1h"):
     if symbol != "BTC":
         try:
             btc_df = await market.get_klines("BTC", interval=timeframe)
-            btc_analysis = await run_analysis(analyzer, btc_df)
+            btc_analysis = await run_analysis(analyzer, btc_df, symbol="BTC", timeframe=timeframe, source="market_context")
         except Exception:
             btc_analysis = None
     analysis = market_context.enrich(analysis, symbol=symbol, btc=btc_analysis)

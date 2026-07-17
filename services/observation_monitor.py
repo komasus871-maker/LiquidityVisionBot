@@ -43,7 +43,7 @@ class ObservationMonitor:
                     df = await asyncio.wait_for(
                         self.market.get_klines(observation["symbol"], observation["timeframe"]), timeout=35
                     )
-                    analysis = await asyncio.wait_for(run_analysis(self.analyzer, df), timeout=45)
+                    analysis = await asyncio.wait_for(run_analysis(self.analyzer, df, symbol=observation["symbol"], timeframe=observation["timeframe"], source="observation_monitor"), timeout=45)
                     signal_id = self.recorder.record(
                         symbol=observation["symbol"], timeframe=observation["timeframe"], analysis=analysis,
                         owner_telegram_id=observation["owner_telegram_id"],
