@@ -83,6 +83,15 @@ class Explainer:
         else:
             historical_text = "No completed historical sample yet. The system is collecting outcomes."
 
+
+        dna_similarity = data.get("similarity_v2") or {}
+        dna_text = "Knowledge base is still collecting comparable completed trades."
+        if int(dna_similarity.get("samples") or 0):
+            dna_text = (f"{int(dna_similarity.get('samples') or 0)} comparable DNA patterns · "
+                        f"{float(dna_similarity.get('average_similarity') or 0):.1f}% average similarity · "
+                        f"expected {float(dna_similarity.get('expected_r') or 0):+.2f}R · "
+                        f"{dna_similarity.get('reliability', 'Insufficient')} reliability")
+
         breakdown = data.get("direction_breakdown", {})
         breakdown_text = "\n".join(
             f"• {escape(str(name))}: {float(value):+.1f}"
@@ -157,4 +166,7 @@ Invalidation / stop reference: {fmt_price(stop)}
 
 📚 <b>Historical intelligence</b>
 {escape(historical_text)}
+
+🧬 <b>Trade DNA evidence</b>
+{escape(dna_text)}
 """.strip()

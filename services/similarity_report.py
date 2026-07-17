@@ -5,40 +5,28 @@ from typing import Any
 
 
 class SimilarityReport:
-    @staticmethod
-    def build(symbol: str, analysis: dict[str, Any]) -> str:
-        stats = analysis.get("similar_stats") or {}
+    def build(self, symbol: str, analysis: dict[str, Any]) -> str:
+        v2 = analysis.get("similarity_v2") or {}
+        if int(v2.get("samples") or 0):
+            lines = [f"🔍 <b>Trade DNA Similarity — {escape(symbol.upper())}</b>", "",
+                     f"Comparable trades: <b>{v2.get('samples')}</b>",
+                     f"Average similarity: <b>{v2.get('average_similarity', 0)}%</b>",
+                     f"Expected result: <b>{float(v2.get('expected_r', 0)):+.2f}R</b>",
+                     f"Average result: <b>{float(v2.get('average_result_r', 0)):+.2f}R</b>",
+                     f"Win rate: <b>{v2.get('win_rate', 0)}%</b>",
+                     f"Reliability: <b>{escape(str(v2.get('reliability', 'Insufficient')))}</b>", "", "━━━━━━━━━━━━━━━━━━"]
+            for title, case in (("🏆 Best match", v2.get("best_trade")), ("🛑 Worst match", v2.get("worst_trade"))):
+                if not case: continue
+                lines += ["", f"<b>{title}</b>",
+                          f"#{case.get('signal_id')} {escape(str(case.get('symbol')))} {escape(str(case.get('side')))} · {case.get('similarity')}% · {float(case.get('realized_r',0)):+.2f}R"]
+                matches = case.get("matching_reasons") or []
+                differences = case.get("difference_reasons") or []
+                if matches: lines.append("Similar: " + escape("; ".join(matches[:3])))
+                if differences: lines.append("Different: " + escape("; ".join(differences[:2])))
+            lines += ["", "Historical similarity is evidence, not a guarantee."]
+            return "\n".join(lines)
         cases = analysis.get("similar_cases") or []
-        samples = int(stats.get("samples") or 0)
-        if not samples:
-            return (
-                f"🧩 <b>Similar Setups — {escape(symbol)}</b>\n\n"
-                "Пока нет завершённых исторических сетапов, достаточно похожих на текущий. "
-                "Система начнёт показывать статистику после накопления результатов."
-            )
-        lines = [
-            f"🧩 <b>Similar Setups — {escape(symbol)}</b>",
-            "",
-            f"Found: <b>{samples}</b>",
-            f"Average similarity: <b>{stats.get('avg_similarity', 0)}%</b>",
-            f"Reliability: <b>{escape(str(stats.get('reliability', 'Insufficient')))}</b>",
-            "",
-            f"🎯 TP1: <b>{stats.get('tp1_rate', 0)}%</b>",
-            f"🎯 TP2: <b>{stats.get('tp2_rate', 0)}%</b>",
-            f"🏆 TP3: <b>{stats.get('tp3_rate', 0)}%</b>",
-            f"🛑 Stop: <b>{stats.get('stop_rate', 0)}%</b>",
-            f"📈 Avg MFE: <b>{stats.get('avg_mfe', 0)}%</b>",
-            f"📉 Avg MAE: <b>{stats.get('avg_mae', 0)}%</b>",
-            "",
-            "━━━━━━━━━━━━━━━━━━",
-            "",
-            "<b>Closest historical cases</b>",
-        ]
-        for case in cases[:5]:
-            outcome = "TP3" if case.get("tp3_hit") else "TP2" if case.get("tp2_hit") else "TP1" if case.get("tp1_hit") else "STOP" if case.get("stop_hit") else case.get("status")
-            lines.append(
-                f"• #{case.get('signal_id')} {escape(str(case.get('symbol')))} {escape(str(case.get('side')))} — "
-                f"{case.get('similarity')}% · <b>{escape(str(outcome))}</b>"
-            )
-        lines.extend(["", "Percentages are historical observations, not guarantees."])
-        return "\n".join(lines)
+        stats = analysis.get("similar_stats") or {}
+        if not cases:
+            return f"🔍 <b>Trade DNA Similarity — {escape(symbol.upper())}</b>\n\nNo completed comparable trades yet."
+        return f"🔍 <b>Trade DNA Similarity — {escape(symbol.upper())}</b>\n\nComparable trades: <b>{stats.get('samples',0)}</b>\nAverage similarity: <b>{stats.get('avg_similarity',0)}%</b>"

@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from database.database import connect
+from domain.intelligence import TradeDNABuilder
+from services.similarity_engine_v2 import SimilarityEngineV2
 
 
 CLOSED_STATUSES = ("TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED")
@@ -260,6 +262,13 @@ class ProbabilityEngine:
         analysis["historical_probability"] = exact
         analysis["similar_cases"] = [asdict(case) for case in cases]
         analysis["similar_stats"] = self.similar_stats(cases)
+        try:
+            dna = TradeDNABuilder.build(analysis, symbol=symbol, timeframe=timeframe)
+            v2_cases = SimilarityEngineV2().find(dna=dna, limit=20)
+            analysis["trade_dna"] = dna.to_dict()
+            analysis["similarity_v2"] = SimilarityEngineV2.summarize(v2_cases)
+        except Exception:
+            analysis["similarity_v2"] = {"samples": 0, "reliability": "Unavailable"}
         return analysis
 
     def live_context(self, signal: dict[str, Any]) -> dict[str, Any]:

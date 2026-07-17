@@ -69,7 +69,8 @@ class SignalHistory:
                 signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"],
                 signal["confidence"], signal["bull_score"], signal["bear_score"], signal["recommendation"],
                 signal["setup_key"], json.dumps(signal["features"], ensure_ascii=False),
-                json.dumps(signal["reasons"], ensure_ascii=False),
+                json.dumps(signal["reasons"], ensure_ascii=False), signal.get("trade_dna_json"),
+                signal.get("dna_fingerprint"),
             )
             if conn.postgres:
                 row = conn.execute(
@@ -78,8 +79,8 @@ class SignalHistory:
                         owner_telegram_id, notification_chat_id, symbol, timeframe, side, status,
                         created_at, updated_at, expires_at, entry, preferred_entry_low, preferred_entry_high,
                         stop, tp1, tp2, tp3, rr, confidence, bull_score, bear_score, recommendation,
-                        setup_key, features_json, reasons_json, max_profit_pct, max_drawdown_pct
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0) RETURNING id
+                        setup_key, features_json, reasons_json, trade_dna_json, dna_fingerprint, max_profit_pct, max_drawdown_pct
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0) RETURNING id
                     """,
                     params,
                 ).fetchone()
@@ -91,8 +92,8 @@ class SignalHistory:
                         owner_telegram_id, notification_chat_id, symbol, timeframe, side, status,
                         created_at, updated_at, expires_at, entry, preferred_entry_low, preferred_entry_high,
                         stop, tp1, tp2, tp3, rr, confidence, bull_score, bear_score, recommendation,
-                        setup_key, features_json, reasons_json, max_profit_pct, max_drawdown_pct
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
+                        setup_key, features_json, reasons_json, trade_dna_json, dna_fingerprint, max_profit_pct, max_drawdown_pct
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
                     """,
                     params,
                 )
@@ -110,9 +111,10 @@ class SignalHistory:
             # Once price entered the zone, the trading plan is immutable.
             if existing.get("status") in {"TRIGGERED", "ACTIVE", "TP1", "TP2"}:
                 conn.execute(
-                    "UPDATE signals SET updated_at=?, recommendation=?, confidence=?, bull_score=?, bear_score=?, features_json=?, reasons_json=? WHERE id=?",
+                    "UPDATE signals SET updated_at=?, recommendation=?, confidence=?, bull_score=?, bear_score=?, features_json=?, reasons_json=?, trade_dna_json=?, dna_fingerprint=? WHERE id=?",
                     (now, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
-                     json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False), signal_id),
+                     json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False),
+                     signal.get("trade_dna_json"), signal.get("dna_fingerprint"), signal_id),
                 )
                 return signal_id
 
@@ -127,11 +129,12 @@ class SignalHistory:
             conn.execute(
                 """UPDATE signals SET updated_at=?, status=?, recommendation=?, confidence=?, bull_score=?, bear_score=?,
                    entry=?, preferred_entry_low=?, preferred_entry_high=?, stop=?, tp1=?, tp2=?, tp3=?, rr=?,
-                   features_json=?, reasons_json=? WHERE id=?""",
+                   features_json=?, reasons_json=?, trade_dna_json=?, dna_fingerprint=? WHERE id=?""",
                 (now, desired_status, signal["recommendation"], signal["confidence"], signal["bull_score"], signal["bear_score"],
                  signal["entry"], signal.get("preferred_entry_low"), signal.get("preferred_entry_high"), signal["stop"],
                  signal["tp1"], signal["tp2"], signal["tp3"], signal["rr"],
-                 json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False), signal_id),
+                 json.dumps(signal["features"], ensure_ascii=False), json.dumps(signal["reasons"], ensure_ascii=False),
+                 signal.get("trade_dna_json"), signal.get("dna_fingerprint"), signal_id),
             )
             if changed:
                 self._add_event_conn(conn, signal_id, "PLAN_UPDATED", signal.get("entry"), {"old": old_plan, "new": new_plan})
@@ -177,7 +180,7 @@ class SignalHistory:
             "last_progress_notified_at", "last_progress_bucket",
             "pre_activation_max_profit_pct", "pre_activation_max_drawdown_pct", "plan_locked_at",
             "dynamic_confidence", "previous_confidence", "trade_health", "health_score",
-            "intelligence_json", "last_intelligence_notified_at", "last_alert_signature",
+            "intelligence_json", "last_intelligence_notified_at", "last_alert_signature", "memory_created_at",
             "last_risk_used", "last_mfe_giveback",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}

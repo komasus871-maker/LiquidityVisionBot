@@ -6,6 +6,7 @@ from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.database import connect
 from services.data_integrity import DataIntegrityEngine
+from domain.intelligence import TradeDNABuilder
 
 
 class SignalRecorder:
@@ -110,15 +111,9 @@ class SignalRecorder:
                 "timeframes": [str(x.get("timeframe") or "") for x in live_symbol],
             }
             return None
-        features = {key: analysis.get(key) for key in (
-            "trend", "structure", "bos", "choch", "liquidity", "sweep", "order_block", "breaker",
-            "mitigation", "fvg", "premium", "volume", "displacement", "rsi", "macd", "ema50", "ema200",
-            "market_bias", "execution_status", "triggers", "direction_score", "entry_quality", "risk_quality",
-            "execution_readiness", "opportunity_category", "direction_breakdown",
-            "strongest_drivers", "biggest_blockers", "ai_grade", "execution_bias",
-            "final_verdict", "score_components", "global_context", "entry_reasons", "expected_path",
-            "decision_action", "trade_quality_stars"
-        )}
+        dna = TradeDNABuilder.build(analysis, symbol=symbol, timeframe=timeframe)
+        features = dna.to_dict()
+        analysis["trade_dna"] = features
         payload = {
             "owner_telegram_id": owner_telegram_id, "notification_chat_id": notification_chat_id,
             "symbol": symbol.upper(), "timeframe": timeframe, "side": analysis.get("direction", "LONG"),
@@ -128,6 +123,7 @@ class SignalRecorder:
             "confidence": analysis["confidence"], "bull_score": analysis["bull_score"], "bear_score": analysis["bear_score"],
             "recommendation": analysis["recommendation"], "setup_key": setup_key,
             "features": features, "reasons": analysis["reasons"], "status": status,
+            "trade_dna_json": dna.to_json(), "dna_fingerprint": dna.fingerprint,
         }
         # One market may have only one open Trade. Opposite analysis becomes a Candidate
         # while a live trade exists; it never creates a conflicting second signal.

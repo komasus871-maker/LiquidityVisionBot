@@ -206,6 +206,13 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS trade_memories(
+                id {id_col}, signal_id BIGINT NOT NULL UNIQUE, dna_fingerprint TEXT,
+                memory_json TEXT NOT NULL, lesson TEXT NOT NULL, result TEXT,
+                realized_r DOUBLE PRECISION DEFAULT 0, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS payments(
                 id {id_col}, telegram_id BIGINT NOT NULL, provider TEXT NOT NULL, payload TEXT NOT NULL,
                 amount INTEGER NOT NULL, currency TEXT NOT NULL, telegram_payment_charge_id TEXT,
@@ -304,6 +311,7 @@ def create_tables() -> None:
             "trade_health": "TEXT", "health_score": "DOUBLE PRECISION", "intelligence_json": "TEXT",
             "last_intelligence_notified_at": "TEXT", "last_alert_signature": "TEXT",
             "last_risk_used": "DOUBLE PRECISION DEFAULT 0", "last_mfe_giveback": "DOUBLE PRECISION DEFAULT 0",
+            "trade_dna_json": "TEXT", "dna_fingerprint": "TEXT", "memory_created_at": "TEXT",
         }.items():
             _add_column(conn, "signals", name, definition)
         for name, definition in {
@@ -358,6 +366,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(setup_key)",
             "CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_events_signal ON signal_events(signal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signals_dna_fingerprint ON signals(dna_fingerprint)",
+            "CREATE INDEX IF NOT EXISTS idx_trade_memories_fingerprint ON trade_memories(dna_fingerprint)",
             "CREATE INDEX IF NOT EXISTS idx_candidates_owner ON signal_candidates(owner_telegram_id, updated_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_market_plan ON signals(COALESCE(owner_telegram_id,0),symbol,timeframe) WHERE status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge ON payments(telegram_payment_charge_id) WHERE telegram_payment_charge_id IS NOT NULL",

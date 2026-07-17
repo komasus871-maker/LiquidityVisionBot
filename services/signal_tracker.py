@@ -16,6 +16,7 @@ from services.market import Market
 from services.notifier import Notifier
 from services.trade_intelligence import TradeIntelligenceEngine
 from services.data_integrity import DataIntegrityEngine
+from services.trade_memory import TradeMemoryService
 
 
 class SignalTracker:
@@ -26,6 +27,7 @@ class SignalTracker:
         self.notifier = Notifier(bot)
         self.intelligence = TradeIntelligenceEngine()
         self.integrity = DataIntegrityEngine()
+        self.memory = TradeMemoryService()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.auto_break_even = os.getenv("AUTO_BREAK_EVEN_AFTER_TP1", "true").lower() in {"1", "true", "yes", "on"}
         self.progress_interval = max(300, int(os.getenv("TRADE_PROGRESS_INTERVAL", "900")))
@@ -116,6 +118,14 @@ class SignalTracker:
             await self.notifier.lifecycle(signal, event, price)
             self.history.update_lifecycle(signal["id"], last_notified_status=event)
             signal["last_notified_status"] = event
+        if fields.get("closed_at") or event in {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED"}:
+            try:
+                memory = self.memory.create_for_signal(int(signal["id"]))
+                if memory:
+                    self.history.update_lifecycle(signal["id"], memory_created_at=datetime.now(timezone.utc).isoformat())
+                    self.history.add_event(signal["id"], "AI_MEMORY_CREATED", price, {"lesson": memory.get("lesson")})
+            except Exception:
+                logging.exception("Failed to create AI memory for signal %s", signal["id"])
 
     async def _maybe_progress(self, signal: dict, price: float, now: str) -> None:
         if signal["status"] not in {"ACTIVE", "TP1", "TP2"}:
