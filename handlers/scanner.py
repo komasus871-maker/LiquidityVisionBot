@@ -22,6 +22,7 @@ def _ranked(results: list[dict], limit: int = 8) -> str:
         category = category_label(coin.get("category"))
         lines.append(
             f"{rank}. <b>{symbol}</b> · {coin.get('direction', 'NEUTRAL')} · {category}\n"
+            f"   Решение: <b>{coin.get('decision_action') or 'WATCH'}</b> · Conviction {float((coin.get('conviction') or {}).get('directional_confidence') or 0):.0f}%\n"
             f"   Исполнение <b>{float(coin.get('ranking_score') or 0):.1f}</b>/100 · Направление {float(coin.get('confidence') or 0):.0f} · Готовность {float(coin.get('readiness') or 0):.0f}\n"
             f"   Качество входа {float(coin.get('entry_quality') or 0):.0f}/100 · Риск: {reason_label(coin.get('risk'))}"
         )
@@ -40,9 +41,9 @@ async def scanner_menu(message: Message):
     short_count = sum(str(x.get("direction")) == "SHORT" for x in results)
     ready_count = sum(str(x.get("category")) == "READY_NOW" for x in results)
     text = (
-        "🏆 <b>LIQUIDITY VISION SCANNER 4.1</b>\n\n"
+        "🏆 <b>LIQUIDITY VISION SCANNER 5.0</b>\n\n"
         f"Активов: <b>{len(results)}</b> · Ready Now: <b>{ready_count}</b> · LONG/SHORT: <b>{long_count}/{short_count}</b>\n"
-        "Единый рейтинг по реальной готовности к исполнению. Заблокированные сценарии получают штраф.\n\n"
+        "Decision Engine объединяет направление, исполнение, режим и исторический контекст в одно решение.\n\n"
         f"{_ranked(results)}"
     )
     await wait.edit_text(text[:4090], parse_mode="HTML")

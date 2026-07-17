@@ -4,6 +4,7 @@ import html
 from typing import Any
 
 from utils.price import fmt_price
+from services.conviction_engine import ConvictionEngine
 
 
 def _v(value: Any, default: str = "—") -> str:
@@ -28,8 +29,15 @@ def render_intelligence(signal: dict[str, Any], intelligence: dict[str, Any]) ->
     similarity = intelligence.get("similarity") or {}
     historical = intelligence.get("historical") or {}
     cases = intelligence.get("similar_trades") or []
+    live_decision = ConvictionEngine().evaluate_live(signal)
 
     setup_grade = dna.get("ai_grade") or "N/A"
+    decision_card = f"""🚦 <b>Decision Engine</b>
+
+Action: <b>{_v(live_decision.get('action'))}</b>
+Live confidence: <b>{float(live_decision.get('confidence') or 0):.0f}%</b>
+Capital protected: <b>{'YES' if live_decision.get('protected') else 'NO'}</b>
+Realized result: <b>{float(live_decision.get('realized_r') or 0):+.2f}R</b>"""
     execution_rating = round((float(dna.get("entry_quality") or 0) + float(dna.get("risk_quality") or 0) + float(dna.get("readiness") or 0)) / 3)
     dna_card = f"""🧬 <b>Trade DNA · {_v(dna.get('fingerprint'))}</b>
 
@@ -90,4 +98,4 @@ Reliability: <b>{_v(historical.get('reliability'))}</b>"""
 
 <b>Lesson learned</b>
 {html.escape(str(memory.get('lesson') or 'Memory will be created after the trade closes.'))}"""
-    return [dna_card, similar_card + "\n\n" + history_card, memory_card]
+    return [decision_card + "\n\n" + dna_card, similar_card + "\n\n" + history_card, memory_card]

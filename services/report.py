@@ -40,14 +40,27 @@ class Report:
         context = data.get("global_context") or {}
         context_text = escape(str(context.get("summary") or "No broad-market adjustment."))
         take_text = "✅ YES" if data.get("would_take_trade") else "❌ NO"
-        action = escape(str(data.get("decision_action") or "WATCH"))
+        conviction = data.get("conviction") or {}
+        action = escape(str(conviction.get("action") or data.get("decision_action") or "WATCH"))
+        bull_score = fmt_number(conviction.get("bull_score", 0), 1)
+        bear_score = fmt_number(conviction.get("bear_score", 0), 1)
+        directional_conviction = fmt_number(conviction.get("directional_confidence", 0), 1)
+        execution_conviction = fmt_number(conviction.get("execution_confidence", 0), 1)
+        support = conviction.get("strongest_support") or {}
+        opposition = conviction.get("strongest_opposition") or {}
+        support_text = escape(str(support.get("label") or "No decisive support"))
+        opposition_text = escape(str(opposition.get("label") or "No decisive opposition"))
 
         return f"""
 📊 <b>{escape(str(data.get('symbol', 'Liquidity Vision')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
 
 {escape(str(data.get('market_bias', 'Unknown')))}
 {escape(str(data.get('execution_status', 'WATCHLIST')))}
-🚦 Decision: <b>{action}</b>
+🚦 <b>Decision Engine: {action}</b>
+Conviction: <b>{escape(str(conviction.get('confidence_band', 'LOW')))}</b> · Direction {directional_conviction}% · Execution {execution_conviction}%
+🟢 Bulls <b>{bull_score}</b> : <b>{bear_score}</b> Bears 🔴
+Strongest support: {support_text}
+Strongest opposition: {opposition_text}
 
 {quality} <b>Trade Quality</b>
 ⭐ Setup: {fmt_number(data.get('score', 0), 1)}/100 · Grade {escape(str(data.get('ai_grade', 'N/A')))}

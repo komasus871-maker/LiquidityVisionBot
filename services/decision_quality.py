@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.conviction_engine import ConvictionEngine
+
 
 class DecisionQualityEngine:
     """Post-processes raw analysis into a stricter, explainable decision.
@@ -168,4 +170,6 @@ class DecisionQualityEngine:
         data["entry_reasons"] = self._entry_reasons(data)
         data["expected_path"] = self._expected_path(data)
         data["why_trade_exists"] = self._why_exists(data)
+        data["conviction"] = ConvictionEngine().evaluate(data)
+        data["system_decision"] = data["conviction"]["action"]
         return data

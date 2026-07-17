@@ -9,6 +9,7 @@ from services.analysis_runtime import run_analysis
 from services.analyzer import Analyzer
 from services.market import Market
 from services.watchlist import WATCHLIST
+from services.decision_quality import DecisionQualityEngine
 
 
 class Scanner:
@@ -23,6 +24,7 @@ class Scanner:
         self.analyzer = Analyzer()
         self.concurrency = max(1, int(os.getenv("SCANNER_CONCURRENCY", "4")))
         self.cache_ttl = max(5, int(os.getenv("SCANNER_CACHE_TTL", "30")))
+        self.decision_quality = DecisionQualityEngine()
 
     @classmethod
     def _lock(cls) -> asyncio.Lock:
@@ -35,6 +37,7 @@ class Scanner:
             try:
                 df = await asyncio.wait_for(self.market.get_klines(symbol), timeout=30)
                 result = await asyncio.wait_for(run_analysis(self.analyzer, df), timeout=30)
+                result = self.decision_quality.enrich(result)
                 risks = [
                     x.replace("⚠️ ", "").replace("⛔ ", "")
                     for x in result["reasons"]
@@ -59,6 +62,8 @@ class Scanner:
                     "readiness": result["execution_readiness"],
                     "preferred_entry_low": result["preferred_entry_low"],
                     "preferred_entry_high": result["preferred_entry_high"],
+                    "decision_action": (result.get("conviction") or {}).get("action", result.get("decision_action")),
+                    "conviction": result.get("conviction") or {},
                 }
             except Exception as exc:
                 logging.warning("Scanner failed for %s: %s", symbol, exc)
