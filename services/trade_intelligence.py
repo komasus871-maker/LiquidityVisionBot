@@ -23,6 +23,8 @@ class IntelligenceSnapshot:
     current_r: float
     target_progress: float
     suggested_action: str
+    evolution: list[str]
+    probability_shift: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -239,6 +241,26 @@ class TradeIntelligenceEngine:
             sentences.append(f"Текущая просадка от входа составляет {abs(current_move):.2f}%.")
 
 
+        previous_components = {
+            "trend": float(signal.get("last_trend_component") or components["trend"]),
+            "structure": float(signal.get("last_structure_component") or components["structure"]),
+            "liquidity": float(signal.get("last_liquidity_component") or components["liquidity"]),
+            "momentum": float(signal.get("last_momentum_component") or components["momentum"]),
+        }
+        evolution: list[str] = []
+        labels_en = {"trend": "Trend", "structure": "Structure", "liquidity": "Liquidity", "momentum": "Momentum"}
+        deltas = {key: round(components[key] - previous_components[key], 1) for key in components}
+        for key, delta in sorted(deltas.items(), key=lambda item: abs(item[1]), reverse=True):
+            if abs(delta) >= 5:
+                evolution.append(f"{labels_en[key]} {'strengthened' if delta > 0 else 'weakened'} by {abs(delta):.1f} points")
+        if risk_used >= 75:
+            evolution.append(f"Risk consumption increased to {risk_used:.0f}%")
+        if mfe_giveback >= 1:
+            evolution.append(f"Open-profit giveback reached {mfe_giveback:.2f}%")
+        probability_shift = round(confidence_delta * 0.6, 1)
+        if not evolution:
+            evolution.append("No material market evolution since the previous intelligence snapshot")
+
         if signal.get("tp1_hit_at"):
             suggested_action = "MOVE STOP / PROTECT PROFIT"
         elif target_progress >= 85 and current_r > 0:
@@ -269,4 +291,6 @@ class TradeIntelligenceEngine:
             current_r=round(current_r, 2),
             target_progress=round(target_progress, 1),
             suggested_action=suggested_action,
+            evolution=evolution[:4],
+            probability_shift=probability_shift,
         )

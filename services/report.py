@@ -61,6 +61,9 @@ class Report:
         ) or "• No major unified opposition"
         memory = data.get("market_memory") or {}
         memory_text = "\n".join(f"• {escape(str(x))}" for x in (memory.get("changes") or [])[:3]) or f"• {escape(str(memory.get('summary') or 'Collecting snapshots.'))}"
+        brain = data.get("decision_brain") or {}
+        ev = brain.get("expected_value") or data.get("expected_value") or {}
+        reasoning = "\n".join(f"{idx}. {escape(str(line))}" for idx, line in enumerate((brain.get("reasoning") or [])[:4], 1)) or "1. Collecting decision context."
 
         return f"""
 📊 <b>{escape(str(data.get('symbol', 'Liquidity Vision')).upper())} · {escape(str(data.get('timeframe', '')).upper())}</b>
@@ -73,10 +76,17 @@ Conviction: <b>{escape(str(conviction.get('confidence_band', 'LOW')))}</b> · Di
 Strongest support: {support_text}
 Strongest opposition: {opposition_text}
 
-🧠 <b>Unified Decision v7.9</b>
-{escape(str(unified.get('action', 'WAIT')))} · <b>{fmt_number(unified.get('score', 0), 1)}/100</b> · {escape(str(unified.get('conviction', 'LOW')))} conviction
-{escape(str(unified.get('reason', 'Awaiting unified decision context.')))}
+🧠 <b>Decision Report v8.0</b>
+Action: <b>{escape(str(brain.get('action', unified.get('action', 'WAIT'))))}</b> · Decision <b>{fmt_number(brain.get('score', unified.get('score', 0)), 1)}/100</b>
+Direction: {fmt_number(brain.get('direction_score', data.get('direction_score', 0)), 1)}/100 · Execution: {fmt_number(brain.get('execution_score', data.get('execution_readiness', 0)), 1)}/100
+Expected value: <b>{float(ev.get('expected_r') or 0):+.2f}R</b> · {escape(str(ev.get('band', 'UNKNOWN')))} · {escape(str(ev.get('confidence', 'MODEL-BASED')))}
+Primary reason: {escape(str(brain.get('primary_reason') or unified.get('reason') or 'Awaiting context.'))}
+Next condition: {escape(str(brain.get('next_condition') or 'Material confirmation'))}
 
+<b>Reasoning chain</b>
+{reasoning}
+
+<b>Decision factors</b>
 Support
 {unified_support}
 Opposition

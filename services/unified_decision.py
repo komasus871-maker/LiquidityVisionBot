@@ -29,7 +29,9 @@ class UnifiedDecisionEngine:
         risk = float(analysis.get("risk_quality") or 50)
         readiness = float(analysis.get("execution_readiness") or 50)
         rr = float(analysis.get("rr") or 0)
-        blockers = int(analysis.get("blockers") or 0)
+        reason_items = [str(x) for x in (analysis.get("reasons") or [])]
+        hard_reason_blockers = sum(1 for x in reason_items if x.startswith("⛔"))
+        blockers = max(int(analysis.get("blockers") or 0), hard_reason_blockers)
         status = str(analysis.get("execution_status") or "")
 
         base = direction * 0.27 + entry * 0.23 + risk * 0.16 + readiness * 0.34
@@ -76,7 +78,9 @@ class UnifiedDecisionEngine:
         ready = "READY" in status.upper() and "WAIT" not in status.upper()
         if invalid:
             action, reason = self.ACTION_INVALID, "The current plan is invalid under the unified lifecycle rules."
-        elif ready and score >= 70 and blockers == 0:
+        elif blockers > 0:
+            action, reason = self.ACTION_SKIP, "A hard execution blocker prevents activation under the unified rules."
+        elif ready and score >= 70:
             action, reason = self.ACTION_TAKE, "Direction, execution and risk are aligned with no hard blocker."
         elif score >= 48 and direction >= 55:
             action, reason = self.ACTION_WAIT, "The directional thesis remains valid, but execution quality is incomplete."
@@ -94,5 +98,5 @@ class UnifiedDecisionEngine:
             "contributions": contributions,
             "top_support": positive[:3],
             "top_opposition": negative[:3],
-            "version": "7.9",
+            "version": "8.0",
         }

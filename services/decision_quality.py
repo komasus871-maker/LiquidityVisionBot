@@ -5,6 +5,7 @@ from typing import Any
 from services.conviction_engine import ConvictionEngine
 from services.unified_decision import UnifiedDecisionEngine
 from services.market_memory import MarketMemory
+from services.decision_brain import DecisionBrain
 
 
 class DecisionQualityEngine:
@@ -20,6 +21,7 @@ class DecisionQualityEngine:
     def __init__(self):
         self.unified = UnifiedDecisionEngine()
         self.memory = MarketMemory()
+        self.brain = DecisionBrain()
 
     @staticmethod
     def _dedupe_text(items: list[str] | None) -> list[str]:
@@ -182,4 +184,7 @@ class DecisionQualityEngine:
         symbol = str(data.get("symbol") or "UNKNOWN")
         timeframe = str(data.get("timeframe") or "1h")
         data["market_memory"] = self.memory.remember(symbol, timeframe, data)
+        data["decision_brain"] = self.brain.evaluate(data)
+        data["expected_value"] = data["decision_brain"]["expected_value"]
+        data["system_decision"] = data["decision_brain"]["action"]
         return data

@@ -89,4 +89,19 @@ class MarketMemory:
             changes.append(f"Directional bias flipped {flips} times")
         state = "IMPROVING" if float(last.get("decision_score") or 0) > float(first.get("decision_score") or 0) + 4 else "DETERIORATING" if float(last.get("decision_score") or 0) < float(first.get("decision_score") or 0) - 4 else "STABLE"
         summary = changes[0] if changes else "No material change across recent snapshots."
-        return {"samples": len(series), "state": state, "summary": summary, "changes": changes[:4], "first_at": first.get("at"), "last_at": last.get("at")}
+        window = series[-min(len(series), 18):]
+        avg_direction = sum(float(x.get("direction_score") or 0) for x in window) / len(window)
+        avg_readiness = sum(float(x.get("readiness") or 0) for x in window) / len(window)
+        avg_decision = sum(float(x.get("decision_score") or 0) for x in window) / len(window)
+        direction_delta = float(last.get("direction_score") or 0) - float(first.get("direction_score") or 0)
+        readiness_delta = float(last.get("readiness") or 0) - float(first.get("readiness") or 0)
+        trend_state = "IMPROVING" if direction_delta > 4 else "WEAKENING" if direction_delta < -4 else "STABLE"
+        execution_state = "IMPROVING" if readiness_delta > 4 else "DETERIORATING" if readiness_delta < -4 else "STABLE"
+        return {
+            "samples": len(series), "state": state, "summary": summary, "changes": changes[:4],
+            "first_at": first.get("at"), "last_at": last.get("at"),
+            "averages": {"direction": round(avg_direction, 1), "readiness": round(avg_readiness, 1), "decision": round(avg_decision, 1)},
+            "trend_state": trend_state, "execution_state": execution_state,
+            "direction_delta": round(direction_delta, 1), "readiness_delta": round(readiness_delta, 1),
+            "window": len(window),
+        }
