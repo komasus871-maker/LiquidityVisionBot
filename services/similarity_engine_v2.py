@@ -107,11 +107,11 @@ class SimilarityEngineV2:
         weights=[max(.05,c.similarity/100) for c in cases]
         total=sum(weights)
         expected=sum(c.realized_r*w for c,w in zip(cases,weights))/total
-        best=max(cases,key=lambda c:c.realized_r); worst=min(cases,key=lambda c:c.realized_r)
+        best=max(cases,key=lambda c:(c.similarity, c.realized_r)); worst=min(cases,key=lambda c:(c.similarity, -c.realized_r))
         n=len(cases)
         reliability="High" if n>=50 else "Moderate" if n>=20 else "Low" if n>=8 else "Insufficient"
         return {"samples":n,"expected_r":round(expected,2),
                 "average_result_r":round(sum(c.realized_r for c in cases)/n,2),
                 "average_similarity":round(sum(c.similarity for c in cases)/n,1),
                 "win_rate":round(sum(c.realized_r>0 for c in cases)/n*100,1),"reliability":reliability,
-                "best_trade":asdict(best),"worst_trade":asdict(worst),"cases":[asdict(c) for c in cases]}
+                "best_match":asdict(best),"worst_match":asdict(worst),"best_trade":asdict(max(cases,key=lambda c:c.realized_r)),"worst_trade":asdict(min(cases,key=lambda c:c.realized_r)),"cases":[asdict(c) for c in cases]}

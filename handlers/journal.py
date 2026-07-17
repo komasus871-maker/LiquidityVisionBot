@@ -12,11 +12,14 @@ from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.signal_history import SignalHistory
 from utils.price import fmt_price
+from services.intelligence_layer import IntelligenceLayer
+from services.replay_renderer import render_intelligence
 
 router = Router()
 history = SignalHistory()
 observations = ObservationHistory()
 candidates = CandidateHistory()
+intelligence_layer = IntelligenceLayer()
 
 
 def _status_icon(status: str) -> str:
@@ -246,9 +249,10 @@ async def trade_replay_handler(message: Message):
         )
     replay = "\n".join(event_lines) if event_lines else "Событий пока нет."
     effective_stop = signal.get("effective_stop") or signal.get("stop")
+    intelligence = intelligence_layer.build_for_signal(signal)
     await message.answer(
         f"""
-🎞 <b>Trade Replay #{signal_id}</b>
+🎞 <b>Trade Replay PRO #{signal_id}</b>
 
 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))}</b> · {html.escape(str(signal['timeframe']).upper())}
 Status: <b>{html.escape(str(signal['status']))}</b>
@@ -272,3 +276,5 @@ Dynamic Confidence: <b>{float(signal.get('dynamic_confidence') or signal.get('co
 """,
         parse_mode="HTML",
     )
+    for card in render_intelligence(signal, intelligence):
+        await message.answer(card[:4090], parse_mode="HTML")

@@ -3,43 +3,53 @@ from aiogram.types import Message
 from services.scanner import Scanner
 from utils.price import fmt_price
 
-router = Router(); scanner = Scanner()
+router = Router()
+scanner = Scanner()
+
+CATEGORY_LABELS = {
+    "READY_NOW": "🚀 Ready Now",
+    "PULLBACK": "🎯 Pullback",
+    "CONFIRMATION": "🔔 Confirmation",
+    "REVERSAL": "🔄 Reversal",
+    "WATCHLIST": "👀 Watchlist",
+}
 
 
-def _section(title, items, limit=5):
-    if not items:
-        return f"{title}\nНет выраженных возможностей.\n\n"
-    text = f"{title}\n\n"
-    for index, coin in enumerate(items[:limit], 1):
-        text += (
-            f"{index}. 🪙 <b>{coin['symbol']}</b> — {coin['recommendation']}\n"
-            f"   {coin['market_bias']} | {coin['execution_status']}\n"
-            f"   Direction: {coin['confidence']}/100 | Entry: {coin['entry_quality']}/100 | Ready: {coin['readiness']}/100\n"
-            f"   RR: 1:{coin['rr']} | Edge: {coin['edge']:+.1f}\n"
+def _ranked(results: list[dict], limit: int = 12) -> str:
+    if not results:
+        return "Выраженных возможностей не найдено."
+    seen: set[str] = set()
+    lines: list[str] = []
+    for coin in results:
+        symbol = str(coin.get("symbol") or "").upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        rank = len(lines) + 1
+        category = CATEGORY_LABELS.get(str(coin.get("category")), str(coin.get("category") or "Watchlist"))
+        lines.append(
+            f"{rank}. <b>{symbol}</b> · {coin.get('direction', 'NEUTRAL')} · {category}\n"
+            f"   Score <b>{float(coin.get('ranking_score') or 0):.1f}</b> · Direction {float(coin.get('confidence') or 0):.0f}/100 · Ready {float(coin.get('readiness') or 0):.0f}/100\n"
+            f"   Entry {float(coin.get('entry_quality') or 0):.0f}/100 · RR 1:{coin.get('rr', '—')} · Risk {coin.get('risk', '—')}"
         )
-        if coin['category'] == 'PULLBACK':
-            text += f"   Zone: {fmt_price(coin['preferred_entry_low'])} - {fmt_price(coin['preferred_entry_high'])}\n"
-        text += f"   Risk: {coin['risk']}\n\n"
-    return text
+        if coin.get("category") == "PULLBACK":
+            lines[-1] += f"\n   Zone {fmt_price(coin.get('preferred_entry_low'))} – {fmt_price(coin.get('preferred_entry_high'))}"
+        if len(lines) >= limit:
+            break
+    return "\n\n".join(lines)
 
 
 @router.message(F.text == "🔥 Scanner")
 async def scanner_menu(message: Message):
-    wait = await message.answer("🔍 Сканирую рынок по режимам исполнения...")
+    wait = await message.answer("🔍 Сканирую рынок и строю единый рейтинг...")
     results = await scanner.scan()
-    ready = [x for x in results if x['category'] == 'READY_NOW']
-    pullback = [x for x in results if x['category'] == 'PULLBACK']
-    confirmation = [x for x in results if x['category'] == 'CONFIRMATION']
-    reversal = [x for x in results if x['category'] == 'REVERSAL']
-    executable_shorts = [x for x in results if x['direction'] == 'SHORT' and x['category'] == 'READY_NOW' and x['edge'] <= -10]
-    confirmation_shorts = [x for x in results if x['direction'] == 'SHORT' and x['category'] in {'CONFIRMATION','PULLBACK','REVERSAL'} and x['edge'] <= -10]
-    bearish_watchlist = [x for x in results if x['direction'] == 'SHORT' and x['category'] == 'WATCHLIST' and x['edge'] <= -10]
-    text = "🏆 <b>LIQUIDITY VISION SCANNER 3.0</b>\n\n"
-    text += _section("🚀 <b>Ready Now</b>", ready)
-    text += _section("🎯 <b>Pullback Opportunities</b>", pullback)
-    text += _section("🔔 <b>Confirmation Watch</b>", confirmation)
-    text += _section("🔄 <b>Reversal Watch</b>", reversal, 3)
-    text += _section("🔴 <b>Executable SHORT</b>", executable_shorts, 5)
-    text += _section("🟡 <b>SHORT Confirmation Watch</b>", confirmation_shorts, 5)
-    text += _section("📉 <b>Bearish Watchlist</b>", bearish_watchlist, 5)
+    long_count = sum(str(x.get("direction")) == "LONG" for x in results)
+    short_count = sum(str(x.get("direction")) == "SHORT" for x in results)
+    ready_count = sum(str(x.get("category")) == "READY_NOW" for x in results)
+    text = (
+        "🏆 <b>LIQUIDITY VISION SCANNER 4.0</b>\n\n"
+        f"Активов: <b>{len(results)}</b> · Ready Now: <b>{ready_count}</b> · LONG/SHORT: <b>{long_count}/{short_count}</b>\n"
+        "Каждый актив показывается один раз — по своему лучшему сценарию.\n\n"
+        f"{_ranked(results)}"
+    )
     await wait.edit_text(text[:4090], parse_mode="HTML")

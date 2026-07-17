@@ -28,6 +28,7 @@ from services.observation_monitor import ObservationMonitor
 from services.signal_tracker import SignalTracker
 from services.watch_engine import WatchEngine
 from services.webhook_server import WebhookServer
+from services.trade_memory import TradeMemoryService
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -79,6 +80,8 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 async def main() -> None:
     logging.info("Creating database...")
     create_tables()
+    backfill = TradeMemoryService().backfill(limit=int(os.getenv("MEMORY_BACKFILL_LIMIT", "500")))
+    logging.info("AI memory backfill: scanned=%s created=%s", backfill["scanned"], backfill["created"])
     db_health = ping_database()
     logging.info("Database ready: backend=%s persistent=%s latency_ms=%s", database_backend(), persistent_database(), db_health.get("latency_ms"))
 

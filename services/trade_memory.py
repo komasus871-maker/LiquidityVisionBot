@@ -82,6 +82,36 @@ class TradeMemoryService:
             )
             return memory
 
+
+    def get(self, signal_id: int) -> dict[str, Any] | None:
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM trade_memories WHERE signal_id=?", (signal_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            payload = json.loads(data.get("memory_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        payload.setdefault("lesson", data.get("lesson"))
+        payload.setdefault("result", data.get("result"))
+        payload.setdefault("realized_r", float(data.get("realized_r") or 0))
+        return payload
+
+    def backfill(self, limit: int = 500) -> dict[str, int]:
+        with connect() as conn:
+            rows = conn.execute("""
+                SELECT s.id FROM signals s
+                LEFT JOIN trade_memories m ON m.signal_id=s.id
+                WHERE s.closed_at IS NOT NULL AND m.signal_id IS NULL
+                ORDER BY s.id ASC LIMIT ?
+            """, (max(1, int(limit)),)).fetchall()
+        created = 0
+        for row in rows:
+            if self.create_for_signal(int(row["id"])):
+                created += 1
+        return {"scanned": len(rows), "created": created}
+
     def progress(self) -> dict[str, Any]:
         with connect() as conn:
             closed = int(conn.execute("SELECT COUNT(*) n FROM signals WHERE closed_at IS NOT NULL").fetchone()["n"] or 0)
