@@ -1,3 +1,115 @@
-LiquidityVisionBot
+# Liquidity Vision Intelligence v7.2.0
 
-Trading bot by Noctis.
+Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
+
+## Core lifecycle
+
+`analysis → observation → trade plan → triggered → active → TP/stop/invalidation → replay/research`
+
+The bot keeps the original plan immutable after activation, records signal events, calculates MFE/MAE and realized R, and persists state in PostgreSQL on Render.
+
+## Production components
+
+- Telegram webhook or local polling runtime
+- Binance/OKX-compatible market analysis services
+- Watch Engine, Observation Monitor, and Signal Tracker
+- Persistent signal lifecycle and trade replay
+- Market regime, probability, adaptive weights, and loss forensics
+- Runtime diagnostics, worker heartbeat, lifecycle integrity checks
+- `/health`, `/healthz`, `/admin_status`
+- `tools/smoke_test.py`
+
+## Required environment variables
+
+```env
+BOT_TOKEN=...
+BOT_MODE=webhook
+DATABASE_URL=postgresql://...
+WEBHOOK_BASE_URL=https://your-service.onrender.com
+MONITOR_CRON_SECRET=...
+ADMIN_IDS=123456789
+REQUIRE_PERSISTENT_DB=true
+PGSSLMODE=require
+PYTHON_VERSION=3.12.10
+APP_VERSION=7.2.0
+SCHEMA_VERSION=1
+LOG_LEVEL=INFO
+```
+
+Use the **Internal Database URL** when both the web service and Render PostgreSQL belong to the same Render workspace.
+
+## Local start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python bot.py
+```
+
+On Windows activate with `.venv\\Scripts\\activate`.
+
+## Deployment
+
+Render start command:
+
+```bash
+python bot.py
+```
+
+Health endpoint:
+
+```text
+GET /health
+```
+
+The protected monitor endpoint can be called by an external cron on Render Free:
+
+```text
+GET /internal/monitor?token=<MONITOR_CRON_SECRET>
+```
+
+## Diagnostics
+
+Set your Telegram numeric ID in `ADMIN_IDS`, then run:
+
+```text
+/admin_status
+```
+
+The report shows database latency, worker freshness, active lifecycle counts, watch errors, duplicate open plans, and invalid active records.
+
+After deployment run:
+
+```bash
+python tools/smoke_test.py
+```
+
+A non-zero exit code means the database or lifecycle integrity check failed.
+
+## Tests
+
+```bash
+pytest -q
+```
+
+## Architecture
+
+- `handlers/` — Telegram commands and buttons
+- `services/` — orchestration, market access, monitoring, reports
+- `core/` — analysis and decision engines
+- `database/` — schema, persistence, lifecycle history
+- `domain/` — typed market/trade entities
+- `tools/` — operational and research scripts
+- `tests/` — regression and lifecycle tests
+
+## Release notes — v7.2.0
+
+- Added centralized runtime diagnostics.
+- Added worker stale-state detection.
+- Added `/admin_status`.
+- Expanded `/health` with counts and lifecycle integrity.
+- Added schema migration registry foundation.
+- Added production smoke test.
+- Cleaned duplicate nested source tree and embedded Git metadata from release archive.

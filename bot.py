@@ -11,6 +11,7 @@ from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN
 from database.database import create_tables, database_backend, persistent_database, ping_database
+from handlers.admin import router as admin_router
 from handlers.analyze import router as analyze_router
 from handlers.fear import router as fear_router
 from handlers.help import router as help_router
@@ -36,6 +37,7 @@ logging.basicConfig(
 
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(start_router)
     dp.include_router(help_router)
     dp.include_router(price_router)

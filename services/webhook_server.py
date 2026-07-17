@@ -13,7 +13,8 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 
-from database.database import database_backend, persistent_database, ping_database, get_runtime_states
+from database.database import database_backend, persistent_database
+from services.runtime_diagnostics import collect_runtime_diagnostics
 
 _STARTED_AT = datetime.now(timezone.utc)
 
@@ -140,32 +141,27 @@ class WebhookServer:
                 return web.json_response({"status": "error", "detail": str(exc)}, status=500)
 
     async def health_handler(self, _: web.Request) -> web.Response:
-        now = datetime.now(timezone.utc)
-        info = await self.bot.get_webhook_info()
         try:
-            db = await asyncio.to_thread(ping_database)
-            workers = await asyncio.to_thread(get_runtime_states)
-            status = "ok" if db.get("ok") else "degraded"
+            report = await asyncio.to_thread(collect_runtime_diagnostics)
+            info = await self.bot.get_webhook_info()
+            report.update({
+                "mode": "webhook",
+                "webhook_url": info.url,
+                "pending_update_count": info.pending_update_count,
+                "last_error_message": info.last_error_message,
+                "active_update_tasks": len(self._tasks),
+            })
+            http_status = 503 if report["status"] == "degraded" else 200
+            return web.json_response(report, status=http_status)
         except Exception as exc:
-            logging.exception("Database health check failed")
-            db = {"ok": False, "backend": database_backend(), "error": str(exc)}
-            workers = []
-            status = "degraded"
-        return web.json_response({
-            "status": status,
-            "service": "Liquidity Vision Intelligence",
-            "mode": "webhook",
-            "database_backend": database_backend(),
-            "persistent_database": persistent_database(),
-            "database": db,
-            "workers": workers,
-            "webhook_url": info.url,
-            "pending_update_count": info.pending_update_count,
-            "last_error_message": info.last_error_message,
-            "active_update_tasks": len(self._tasks),
-            "uptime_seconds": max(0, int((now - _STARTED_AT).total_seconds())),
-            "timestamp": now.isoformat(),
-        }, status=200 if status == "ok" else 503)
+            logging.exception("Health diagnostics failed")
+            return web.json_response({
+                "status": "degraded",
+                "service": "Liquidity Vision Intelligence",
+                "database_backend": database_backend(),
+                "persistent_database": persistent_database(),
+                "error": str(exc),
+            }, status=503)
 
     async def root_handler(self, _: web.Request) -> web.Response:
         return web.Response(text="Liquidity Vision Intelligence webhook is online.")

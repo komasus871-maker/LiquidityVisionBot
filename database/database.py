@@ -272,6 +272,16 @@ def create_tables() -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations(
+                version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
+            )
+        """)
+        schema_version = int(os.getenv("SCHEMA_VERSION", "1"))
+        conn.execute(
+            "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?) ON CONFLICT(version) DO NOTHING",
+            (schema_version, f"baseline_v{schema_version}", datetime.now(timezone.utc).isoformat()),
+        )
 
         for name, definition in {
             "premium_tier": "TEXT DEFAULT 'FREE'", "premium_until": "TEXT",
