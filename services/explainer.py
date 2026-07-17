@@ -100,73 +100,29 @@ class Explainer:
         drivers = self._component_text(data.get("strongest_drivers", []), "No major positive driver")
         negative = self._component_text(data.get("biggest_blockers", []), "No major negative component")
 
+        key_support = positive_text
+        key_blockers = "\n".join((warning_text + "\n" + blocker_text).splitlines()[:4])
         return f"""
 🧠 <b>Explain Pro — {escape(symbol.upper())}</b>
 
-━━━━━━━━━━━━━━━━━━
+🧭 <b>Почему {escape(direction)}</b>
+{key_support}
 
-🧭 <b>Market direction</b>
-{escape(str(data.get('market_bias', 'Unknown')))}
-Direction score: {fmt_number(data.get('direction_score', 0), 1)}/100
+⛔ <b>Почему входа сейчас нет</b>
+{key_blockers}
 
-⚡ <b>Execution bias</b>
-{escape(str(data.get('execution_bias', 'NEUTRAL / OBSERVE')))}
-{escape(str(data.get('execution_status', 'WATCHLIST')))}
-
-{escape(edge_explanation)}
-
-━━━━━━━━━━━━━━━━━━
-
-🧮 <b>Why the direction score looks this way</b>
-{breakdown_text}
-
-🚀 <b>Strongest drivers</b>
-{drivers}
-
-🚧 <b>Biggest blockers</b>
-{negative}
-
-━━━━━━━━━━━━━━━━━━
-
-📊 <b>Execution quality</b>
-Entry: {fmt_number(data.get('entry_quality', 0), 1)}/100 — {self._grade(float(data.get('entry_quality', 0)))}
-Risk: {fmt_number(data.get('risk_quality', 0), 1)}/100 — {self._grade(float(data.get('risk_quality', 0)))}
-Readiness: {fmt_number(data.get('execution_readiness', 0), 1)}/100 — {self._grade(float(data.get('execution_readiness', 0)))}
-AI Grade: {escape(str(data.get('ai_grade', 'N/A')))}
-
-<b>Final verdict:</b>
-{escape(str(data.get('final_verdict', 'Observe current conditions.')))}
-
-━━━━━━━━━━━━━━━━━━
-
-✅ <b>What supports {escape(direction)}</b>
-{positive_text}
-
-⚠️ <b>What weakens it</b>
-{warning_text}
-
-⛔ <b>What blocks execution</b>
-{blocker_text}
-
-━━━━━━━━━━━━━━━━━━
-
-📍 <b>Entry logic</b>
-Current price: {fmt_price(current_price)}
-Location: {escape(location)} ({fmt_number(position, 2)}%)
-Preferred zone: {fmt_price(preferred_low)} – {fmt_price(preferred_high)}
-Invalidation / stop reference: {fmt_price(stop)}
-
-🔔 <b>What must happen next</b>
+🔔 <b>Что должно произойти</b>
 {trigger_text}
 
-🔄 <b>What would strengthen {escape(opposite)}</b>
-{alternative_text}
+📊 <b>Качество решения</b>
+Вход: {fmt_number(data.get('entry_quality', 0), 1)}/100 · Риск: {fmt_number(data.get('risk_quality', 0), 1)}/100 · Готовность: {fmt_number(data.get('execution_readiness', 0), 1)}/100
+Итоговая оценка: {escape(str(data.get('ai_grade', 'N/A')))}
 
-━━━━━━━━━━━━━━━━━━
+📍 <b>План</b>
+Зона: {fmt_price(preferred_low)} – {fmt_price(preferred_high)}
+Инвалидация: {fmt_price(stop)}
 
-📚 <b>Historical intelligence</b>
+📚 <b>Исторический контекст</b>
 {escape(historical_text)}
-
-🧬 <b>Trade DNA evidence</b>
-{escape(dna_text)}
+🧬 {escape(dna_text)}
 """.strip()

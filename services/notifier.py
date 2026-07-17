@@ -9,6 +9,7 @@ from aiogram import Bot
 
 from services.probability_engine import ProbabilityEngine
 from utils.price import fmt_price
+from utils.presentation import action_label, status_label
 
 
 class Notifier:
@@ -196,21 +197,24 @@ class Notifier:
         except (TypeError, json.JSONDecodeError):
             pass
         probability = self.probability.live_context(signal)
+        if signal.get("break_even_at"):
+            risk_lines = ["🛡 Защита риска: <b>100%</b>", "Капитал под риском: <b>0R</b>", "Стоп: <b>Break Even</b>"]
+        else:
+            risk_lines = [f"Использованный риск {self._bar(risk_used)} {risk_used:.0f}%", f"До стопа: <b>{distance_to_sl:.0f}%</b>"]
 
         lines = [
             f"📡 <b>{html.escape(str(signal['symbol']))} {html.escape(side)} · LIVE</b>",
             "",
-            f"Status: <b>{html.escape(str(signal['status']))}</b>",
+            f"Статус: <b>{html.escape(status_label(signal['status']))}</b>",
             f"Entry / Current: <code>{fmt_price(entry)}</code> → <code>{fmt_price(price)}</code>",
             f"PnL: <b>{move_pct:+.2f}%</b> · <b>{r_value:+.2f}R</b>",
-            f"Trade Health: <b>{html.escape(health)}</b>",
-            f"Suggested Action: <b>{html.escape(str((json.loads(signal.get('intelligence_json') or '{}') if signal.get('intelligence_json') else {}).get('suggested_action') or 'HOLD'))}</b>",
+            f"Состояние: <b>{html.escape(health)}</b>",
+            f"Действие: <b>{html.escape(action_label((json.loads(signal.get('intelligence_json') or '{}') if signal.get('intelligence_json') else {}).get('suggested_action') or 'HOLD'))}</b>",
             "",
             f"TP1 {self._bar(tp1)} {tp1:.0f}%",
             f"TP2 {self._bar(tp2)} {tp2:.0f}%",
             f"TP3 {self._bar(tp3)} {tp3:.0f}%",
-            f"Risk used {self._bar(risk_used)} {risk_used:.0f}%",
-            f"Distance to SL: <b>{distance_to_sl:.0f}%</b>",
+            *risk_lines,
             "",
             f"🧠 Confidence {self._bar(confidence)} {confidence:.0f}% ({confidence_delta:+.0f}%)",
             f"Trend {self._bar(confidence_groups.get('Trend', 50))} {confidence_groups.get('Trend', 50):.0f}%",
@@ -218,20 +222,20 @@ class Notifier:
             f"Liquidity {self._bar(confidence_groups.get('Liquidity', 50))} {confidence_groups.get('Liquidity', 50):.0f}%",
             f"Momentum {self._bar(confidence_groups.get('Momentum', 50))} {confidence_groups.get('Momentum', 50):.0f}%",
             "",
-            "📊 <b>Probability Engine</b>",
+            "📊 <b>Историческая модель</b>",
             (f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · TP3 {probability['tp3_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%"
              if probability.get('sufficient') else "Statistical model disabled."),
             (f"Sample: {probability['samples']} · Reliability: {html.escape(probability['reliability'])}"
              if probability.get('sufficient') else html.escape(str(probability.get('disabled_reason') or 'Insufficient completed history.'))),
             "",
-            "🤖 <b>AI Commentary</b>",
+            "🤖 <b>Комментарий</b>",
             html.escape(commentary or "The trade remains under live monitoring."),
             "",
             f"Duration: <b>{duration}</b>",
             f"MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>",
         ]
         if signal.get("break_even_at"):
-            lines.append("🛡 Break Even protection is active.")
+            lines.append("🛡 Защита безубытком активна.")
         await self._send(signal, lines)
 
     async def smart_alert(self, signal: dict, price: float, reasons: list[str]) -> None:
@@ -239,37 +243,15 @@ class Notifier:
             return
         confidence, _ = self._confidence_components(signal)
         health = str(signal.get("trade_health") or "🟡 STABLE")
-        probability = self.probability.live_context(signal)
-        try:
-            commentary = str(json.loads(signal.get("intelligence_json") or "{}").get("commentary") or "")
-        except (TypeError, json.JSONDecodeError):
-            commentary = ""
         lines = [
-            f"🧠 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))} · INTELLIGENCE ALERT</b>",
+            f"🧠 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))} · ОБНОВЛЕНИЕ</b>",
+            f"Состояние: <b>{html.escape(health)}</b> · Уверенность: <b>{confidence:.0f}%</b>",
+            f"Цена: <code>{fmt_price(price)}</code>",
             "",
-            f"Trade Health: <b>{html.escape(health)}</b>",
-            f"Dynamic Confidence: <b>{confidence:.0f}%</b>",
-            f"Current price: <code>{fmt_price(price)}</code>",
+            *[f"• {html.escape(reason)}" for reason in reasons[:3]],
             "",
-            "<b>What changed</b>",
-            *[f"• {html.escape(reason)}" for reason in reasons],
+            f"Полная история: <code>/trade {signal.get('id')}</code>",
         ]
-        lines.extend([
-            "",
-            "📊 <b>Historical probability</b>",
-        ])
-        if probability.get('sufficient'):
-            lines.extend([
-                f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%",
-                f"Sample {probability['samples']} · {html.escape(probability['reliability'])}",
-            ])
-        else:
-            lines.extend([
-                "Statistical model disabled.",
-                html.escape(str(probability.get('disabled_reason') or 'Insufficient completed history.')),
-            ])
-        if commentary:
-            lines.extend(["", "🤖 <b>AI Commentary</b>", html.escape(commentary)])
         await self._send(signal, lines)
 
     async def break_even(self, signal: dict, price: float) -> None:

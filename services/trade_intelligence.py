@@ -151,7 +151,7 @@ class TradeIntelligenceEngine:
         )
         mfe = max(0.0, float(signal.get("max_profit_pct") or 0))
         current_move = ((price - entry) / max(abs(entry), 1e-12) * 100) * (1 if side == "LONG" else -1)
-        mfe_giveback = max(0.0, mfe - current_move)
+        mfe_giveback = max(0.0, mfe - max(0.0, current_move)) if mfe > 0.05 else 0.0
 
         tp1 = float(signal.get("tp1") or entry)
         tp_distance = max(abs(tp1 - entry), 1e-12)
@@ -178,7 +178,13 @@ class TradeIntelligenceEngine:
         confidence_delta = round(confidence - previous_confidence, 1)
 
         health_score = confidence
+        # Price risk is the primary health guardrail: weak components alone must not
+        # label a trade near invalidation while most of the stop distance remains.
         health_score -= max(0, risk_used - 55) * 0.40
+        if risk_used < 35:
+            health_score = max(health_score, 55)
+        elif risk_used < 65:
+            health_score = max(health_score, 43)
         health_score += max(-14, min(18, current_r * 10))
         health_score += min(18, target_progress * 0.18)
         health_score -= min(16, mfe_giveback * 3.0)
@@ -205,27 +211,26 @@ class TradeIntelligenceEngine:
         positive = sorted(components.items(), key=lambda item: item[1], reverse=True)
         weak = sorted(components.items(), key=lambda item: item[1])
         sentences: list[str] = []
+        labels = {"trend": "Тренд", "structure": "Структура", "liquidity": "Ликвидность", "momentum": "Импульс"}
         if target_progress >= 85 and current_r > 0:
-            sentences.append("The trade is close to TP1 and remains favorable; protect open profit rather than treating normal momentum cooling as failure.")
-        elif health_score >= 78:
-            sentences.append("The trade remains technically healthy.")
+            sentences.append("Цена близка к TP1; приоритет — защита открытой прибыли.")
+        elif risk_used >= 85:
+            sentences.append("Цена находится рядом с инвалидацией; риск требует немедленного контроля.")
+        elif risk_used >= 65:
+            sentences.append("Сделка под давлением и использовала большую часть допустимого риска.")
         elif health_score >= 60:
-            sentences.append("The setup remains valid, but follow-through is not yet decisive.")
-        elif health_score >= 42:
-            sentences.append("The trade is weakening and requires closer risk control.")
+            sentences.append("Сценарий остаётся валидным, но продолжение движения пока не подтверждено.")
         else:
-            sentences.append("The trade is at risk as price approaches invalidation.")
-        sentences.append(f"{positive[0][0].capitalize()} is the strongest live component at {positive[0][1]:.0f}%.")
+            sentences.append("Сделка ослабевает, однако до инвалидации ещё остаётся запас.")
+        sentences.append(f"Сильнейший компонент — {labels.get(positive[0][0], positive[0][0])}: {positive[0][1]:.0f}%.")
         if weak[0][1] < 50:
-            sentences.append(f"{weak[0][0].capitalize()} is the main weakness at {weak[0][1]:.0f}%.")
+            sentences.append(f"Главная слабость — {labels.get(weak[0][0], weak[0][0])}: {weak[0][1]:.0f}%.")
         if risk_used >= 75:
-            sentences.append(f"Risk consumption is elevated at {risk_used:.0f}%.")
+            sentences.append(f"Использовано {risk_used:.0f}% первоначального риска.")
         if mfe_giveback >= 1:
-            sentences.append(f"Price has given back {mfe_giveback:.2f}% from maximum favorable excursion.")
-        if current_r > 0:
-            sentences.append("Price remains on the favorable side of the entry.")
-        else:
-            sentences.append("Price is currently trading against the entry.")
+            sentences.append(f"От максимального благоприятного движения возвращено {mfe_giveback:.2f}%.")
+        elif current_r < 0:
+            sentences.append(f"Текущая просадка от входа составляет {abs(current_move):.2f}%.")
 
 
         if signal.get("tp1_hit_at"):

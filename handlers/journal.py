@@ -117,15 +117,15 @@ async def journal_handler(message: Message):
 👀 Watching: {stats.get('watching_count') or 0}
 🔔 Triggered: {stats.get('triggered_count') or 0}
 ⚡ Active: {stats.get('active_count') or 0}
-✅ Closed: {stats.get('closed_count') or 0}
+✅ Завершённые сделки: {stats.get('closed_count') or 0}
+⚡ Активированные сделки: {stats.get('activated_count') or 0}
 📚 Total tracked: {stats.get('total') or 0}
 👁 Observations: {observation_count}
 
-🏆 Win rate by TP1: {stats.get('win_rate') or 0}%
-🎯 TP1 rate: {stats.get('tp1_rate') or 0}%
-🎯 TP2 rate: {stats.get('tp2_rate') or 0}%
-🎯 TP3 rate: {stats.get('tp3_rate') or 0}%
-🛑 Stops: {stats.get('stop_hits') or 0}
+🏆 Достигли TP1: {stats.get('tp1_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp1_rate') or 0}%
+🎯 Достигли TP2: {stats.get('tp2_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp2_rate') or 0}%
+🎯 Достигли TP3: {stats.get('tp3_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp3_rate') or 0}%
+🛑 Стопы: {stats.get('stop_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('stop_rate') or 0}%
 🛡 Break Even: {stats.get('breakeven_count') or 0}
 ⚠️ Invalidated: {stats.get('invalidated_count') or 0}
 ⌛ Expired: {stats.get('expired_count') or 0}

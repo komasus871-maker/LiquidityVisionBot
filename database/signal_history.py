@@ -254,7 +254,8 @@ class SignalHistory:
                     SUM(CASE WHEN status='WATCHING' THEN 1 ELSE 0 END) watching_count,
                     SUM(CASE WHEN status='TRIGGERED' THEN 1 ELSE 0 END) triggered_count,
                     SUM(CASE WHEN status IN ('ACTIVE','TP1','TP2') THEN 1 ELSE 0 END) active_count,
-                    SUM(CASE WHEN status IN ('TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED') THEN 1 ELSE 0 END) closed_count,
+                    SUM(CASE WHEN status IN ('TP3','STOP','BREAKEVEN') THEN 1 ELSE 0 END) closed_count,
+                    SUM(CASE WHEN activated_at IS NOT NULL THEN 1 ELSE 0 END) activated_count,
                     SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp1_hits,
                     SUM(CASE WHEN tp2_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp2_hits,
                     SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp3_hits,
@@ -262,15 +263,15 @@ class SignalHistory:
                     SUM(CASE WHEN status='BREAKEVEN' THEN 1 ELSE 0 END) breakeven_count,
                     SUM(CASE WHEN status='INVALIDATED' THEN 1 ELSE 0 END) invalidated_count,
                     SUM(CASE WHEN status='EXPIRED' THEN 1 ELSE 0 END) expired_count,
-                    AVG(CASE WHEN closed_at IS NOT NULL THEN max_profit_pct END) avg_mfe,
-                    AVG(CASE WHEN closed_at IS NOT NULL THEN max_drawdown_pct END) avg_mae,
-                    AVG(CASE WHEN closed_at IS NOT NULL THEN realized_r END) avg_realized_r
+                    AVG(CASE WHEN activated_at IS NOT NULL AND status IN ('TP3','STOP','BREAKEVEN') THEN max_profit_pct END) avg_mfe,
+                    AVG(CASE WHEN activated_at IS NOT NULL AND status IN ('TP3','STOP','BREAKEVEN') THEN max_drawdown_pct END) avg_mae,
+                    AVG(CASE WHEN activated_at IS NOT NULL AND status IN ('TP3','STOP','BREAKEVEN') THEN realized_r END) avg_realized_r
                 FROM signals {where}
             """, params).fetchone()
         data = dict(row)
-        active_population = (data.get("tp1_hits") or 0) + (data.get("stop_hits") or 0)
-        data["win_rate"] = round((data.get("tp1_hits") or 0) / active_population * 100, 2) if active_population else 0
-        total = data.get("total") or 0
+        activated = int(data.get("activated_count") or 0)
+        data["win_rate"] = round((data.get("tp1_hits") or 0) / activated * 100, 2) if activated else 0
         for key in ("tp1", "tp2", "tp3"):
-            data[f"{key}_rate"] = round((data.get(f"{key}_hits") or 0) / total * 100, 2) if total else 0
+            data[f"{key}_rate"] = round((data.get(f"{key}_hits") or 0) / activated * 100, 2) if activated else 0
+        data["stop_rate"] = round((data.get("stop_hits") or 0) / activated * 100, 2) if activated else 0
         return data

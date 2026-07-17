@@ -51,7 +51,8 @@ class Scanner:
                     "confirmations": result["confirmations"],
                     "risk": risks[0] if risks else "No major blocker",
                     "rr": result["rr"],
-                    "ranking_score": result["ranking_score"],
+                    "raw_ranking_score": result["ranking_score"],
+                    "ranking_score": self._execution_score(result),
                     "edge": result["directional_edge"],
                     "category": result["opportunity_category"],
                     "entry_quality": result["entry_quality"],
@@ -62,6 +63,22 @@ class Scanner:
             except Exception as exc:
                 logging.warning("Scanner failed for %s: %s", symbol, exc)
                 return None
+
+    @staticmethod
+    def _execution_score(result: dict) -> float:
+        direction = float(result.get("confidence") or 0)
+        readiness = float(result.get("execution_readiness") or 0)
+        entry = float(result.get("entry_quality") or 0)
+        risk = float(result.get("risk_quality") or 50)
+        category = str(result.get("opportunity_category") or "WATCHLIST")
+        score = direction * 0.28 + readiness * 0.34 + entry * 0.28 + risk * 0.10
+        penalties = {"REGIME_BLOCKED": 20, "REGIME_CONFIRMATION": 8, "WATCHLIST": 5}
+        score -= penalties.get(category, 0)
+        if entry < 25:
+            score -= (25 - entry) * 0.7
+        if readiness < 35:
+            score -= (35 - readiness) * 0.5
+        return round(max(0.0, min(100.0, score)), 1)
 
     async def scan(self, force: bool = False) -> list[dict]:
         now = time.monotonic()
