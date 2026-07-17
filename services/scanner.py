@@ -62,7 +62,7 @@ class Scanner:
                     "readiness": result["execution_readiness"],
                     "preferred_entry_low": result["preferred_entry_low"],
                     "preferred_entry_high": result["preferred_entry_high"],
-                    "decision_action": (result.get("conviction") or {}).get("action", result.get("decision_action")),
+                    "decision_action": (result.get("unified_decision") or {}).get("action", result.get("decision_action")),
                     "conviction": result.get("conviction") or {},
                 }
             except Exception as exc:

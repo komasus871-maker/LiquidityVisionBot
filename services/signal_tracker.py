@@ -279,6 +279,21 @@ class SignalTracker:
         }
         signal.update(common)
 
+        # v7.9.1 lifecycle integrity: terminal price conditions always win.
+        # Never calculate health/confidence or send intelligence alerts for a
+        # trade that has already crossed its effective stop.
+        effective_stop = float(signal.get("effective_stop") or initial_stop)
+        if self._stop_hit(side, price, effective_stop):
+            is_be = bool(signal.get("break_even_at")) and abs(effective_stop - entry) <= max(abs(entry) * 1e-8, 1e-12)
+            event = "BREAKEVEN" if is_be else "STOP"
+            realized_r = 0.0 if is_be else self._r_multiple(side, entry, initial_stop, price)
+            await self._transition(
+                signal, event, price, stop_hit_at=now, closed_at=now,
+                exit_price=price, realized_r=realized_r,
+                result="BREAKEVEN_AFTER_TP1" if is_be else "STOP", **common,
+            )
+            return
+
         snapshot = self.intelligence.evaluate(signal, price, df)
         intelligence_payload = snapshot.to_dict()
         intelligence_fields = {
@@ -314,24 +329,6 @@ class SignalTracker:
                         "health": snapshot.health,
                     },
                 )
-
-        effective_stop = float(signal.get("effective_stop") or initial_stop)
-        if self._stop_hit(side, price, effective_stop):
-            is_be = bool(signal.get("break_even_at")) and abs(effective_stop - entry) <= max(abs(entry) * 1e-8, 1e-12)
-            event = "BREAKEVEN" if is_be else "STOP"
-            realized_r = 0.0 if is_be else self._r_multiple(side, entry, initial_stop, price)
-            await self._transition(
-                signal,
-                event,
-                price,
-                stop_hit_at=now,
-                closed_at=now,
-                exit_price=price,
-                realized_r=realized_r,
-                result="BREAKEVEN_AFTER_TP1" if is_be else "STOP",
-                **common,
-            )
-            return
 
         if not signal.get("tp3_hit_at") and self._reached(side, price, float(signal["tp3"])):
             common.update({

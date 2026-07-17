@@ -272,7 +272,8 @@ class ProbabilityEngine:
             "reliability": str(weighted.get("reliability") or "Insufficient"),
             "reliability_score": min(100.0, float(weighted.get("effective_samples") or 0) / self.MIN_RELIABLE_SAMPLE * 100.0),
             "display_probabilities": bool(weighted.get("estimated")) and int(weighted.get("samples") or 0) >= self.MIN_DISPLAY_SAMPLE,
-            "closest_case": asdict(cases[0]) if cases else None,
+            "closest_case": asdict(cases[0]) if cases and float(cases[0].similarity) >= 50.0 else None,
+            "closest_case_suppressed": bool(cases and float(cases[0].similarity) < 50.0),
         }
         try:
             dna = TradeDNABuilder.build(analysis, symbol=symbol, timeframe=timeframe)

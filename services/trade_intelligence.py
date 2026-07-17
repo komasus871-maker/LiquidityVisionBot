@@ -171,10 +171,12 @@ class TradeIntelligenceEngine:
         raw_confidence = round(self._clamp(confidence), 1)
 
         previous_confidence = float(signal.get("dynamic_confidence") or signal.get("confidence") or raw_confidence)
-        # Limit one-cycle changes so noisy candles cannot flip the model from
-        # healthy to failed instantly. Hard exits are still handled by price/stop logic.
-        max_step = 18.0
-        confidence = round(max(previous_confidence - max_step, min(previous_confidence + max_step, raw_confidence)), 1)
+        # v7.9.1 stabilization: use an EMA-like update and cap each cycle.
+        # Stop/target transitions are evaluated before this model, so smoothing
+        # can never delay a hard lifecycle exit.
+        smoothed_confidence = previous_confidence * 0.70 + raw_confidence * 0.30
+        max_step = 10.0
+        confidence = round(max(previous_confidence - max_step, min(previous_confidence + max_step, smoothed_confidence)), 1)
         confidence_delta = round(confidence - previous_confidence, 1)
 
         health_score = confidence
@@ -197,8 +199,12 @@ class TradeIntelligenceEngine:
         reasons: list[str] = []
         if previous_health and previous_health != health:
             reasons.append(f"Trade health changed: {previous_health} → {health}")
-        threshold = 8.0
-        if abs(confidence_delta) >= threshold:
+        threshold = 12.0
+        crossed_band = any(
+            (previous_confidence < level <= confidence) or (previous_confidence >= level > confidence)
+            for level in (40.0, 60.0, 80.0)
+        )
+        if abs(confidence_delta) >= threshold or crossed_band:
             reasons.append(f"Confidence changed: {previous_confidence:.0f}% → {confidence:.0f}%")
         previous_risk = float(signal.get("last_risk_used") or 0)
         for level in (75, 90):

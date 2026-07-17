@@ -643,7 +643,7 @@ class Analyzer:
         data["score"] = round(execution["readiness"], 1)
         data["setup_score"] = round(execution["readiness"], 1)
         data["directional_conviction"] = round(direction_score, 1)
-        data["confidence"] = round(execution["readiness"], 1)
+        data["confidence"] = round(direction_score, 1)
         data["probability"] = None
         try:
             TradePlanIntegrity.apply(data)

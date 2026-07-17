@@ -14,6 +14,18 @@ class Explainer:
         return reason.replace("✅ ", "").replace("⚠️ ", "").replace("⛔ ", "").strip()
 
     @staticmethod
+    def _dedupe(items):
+        seen = set()
+        result = []
+        for item in items or []:
+            text = str(item).strip()
+            key = " ".join(text.lower().split())
+            if key and key not in seen:
+                seen.add(key)
+                result.append(item)
+        return result
+
+    @staticmethod
     def _grade(value: float) -> str:
         if value >= 75:
             return "Strong"
@@ -35,10 +47,11 @@ class Explainer:
     def build(self, data: dict[str, Any], symbol: str) -> str:
         direction = str(data.get("direction", "NEUTRAL"))
         opposite = "SHORT" if direction == "LONG" else "LONG"
-        positives = [x for x in data.get("reasons", []) if str(x).startswith("✅")]
-        warnings = [x for x in data.get("reasons", []) if str(x).startswith("⚠️")]
-        blockers = [x for x in data.get("reasons", []) if str(x).startswith("⛔")]
-        triggers = data.get("triggers", []) or ["No additional trigger is currently required"]
+        reasons = self._dedupe(data.get("reasons", []))
+        positives = [x for x in reasons if str(x).startswith("✅")]
+        warnings = [x for x in reasons if str(x).startswith("⚠️")]
+        blockers = [x for x in reasons if str(x).startswith("⛔")]
+        triggers = self._dedupe(data.get("triggers", [])) or ["No additional trigger is currently required"]
         alternatives = data.get("alternative_conditions", []) or []
 
         positive_text = "\n".join(f"• {escape(self._clean_reason(x))}" for x in positives) or "• No strong directional confirmation"
@@ -74,12 +87,21 @@ class Explainer:
                 f"Reliability: {exact.get('reliability', 'Insufficient')}"
             )
         elif int(similar.get("samples") or 0) > 0:
-            historical_text = (
-                f"Similar completed setups: {int(similar.get('samples') or 0)}\n"
-                f"TP1 {similar.get('tp1_rate', 0)}% · TP2 {similar.get('tp2_rate', 0)}% · "
-                f"TP3 {similar.get('tp3_rate', 0)}% · Stop {similar.get('stop_rate', 0)}%\n"
-                f"Reliability: {similar.get('reliability', 'Insufficient')}"
-            )
+            sample_count = int(similar.get("samples") or 0)
+            reliability = str(similar.get("reliability") or "Insufficient")
+            if reliability.lower() == "insufficient" or sample_count < 10:
+                historical_text = (
+                    f"Historical sample: insufficient\n"
+                    f"{sample_count} comparable completed setups\n"
+                    "No reliable probability estimate yet."
+                )
+            else:
+                historical_text = (
+                    f"Similar completed setups: {sample_count}\n"
+                    f"TP1 {similar.get('tp1_rate', 0)}% · TP2 {similar.get('tp2_rate', 0)}% · "
+                    f"TP3 {similar.get('tp3_rate', 0)}% · Stop {similar.get('stop_rate', 0)}%\n"
+                    f"Reliability: {reliability}"
+                )
         else:
             historical_text = "No completed historical sample yet. The system is collecting outcomes."
 
@@ -115,8 +137,8 @@ class Explainer:
 {trigger_text}
 
 📊 <b>Качество решения</b>
-Вход: {fmt_number(data.get('entry_quality', 0), 1)}/100 · Риск: {fmt_number(data.get('risk_quality', 0), 1)}/100 · Готовность: {fmt_number(data.get('execution_readiness', 0), 1)}/100
-Итоговая оценка: {escape(str(data.get('ai_grade', 'N/A')))}
+Направление: {fmt_number(data.get('direction_score', 0), 1)}/100 · Исполнение: {fmt_number(data.get('execution_readiness', 0), 1)}/100
+Unified Decision: {fmt_number((data.get('unified_decision') or {}).get('score', 0), 1)}/100 · {escape(str((data.get('unified_decision') or {}).get('action', 'SKIP')))}
 
 📍 <b>План</b>
 Зона: {fmt_price(preferred_low)} – {fmt_price(preferred_high)}
