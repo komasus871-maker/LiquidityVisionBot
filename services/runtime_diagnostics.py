@@ -8,7 +8,7 @@ from typing import Any
 
 from database.database import connect, database_backend, get_runtime_states, persistent_database, ping_database
 
-APP_VERSION = os.getenv("APP_VERSION", "8.0.3")
+APP_VERSION = os.getenv("APP_VERSION", "8.4.0")
 _STARTED_AT = datetime.now(timezone.utc)
 
 

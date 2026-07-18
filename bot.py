@@ -16,6 +16,7 @@ from handlers.analyze import router as analyze_router
 from handlers.fear import router as fear_router
 from handlers.help import router as help_router
 from handlers.journal import router as journal_router
+from handlers.intelligence_hub import router as intelligence_hub_router
 from handlers.market import router as market_router
 from handlers.menu import router as menu_router
 from handlers.news import router as news_router
@@ -49,6 +50,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(market_router)
     dp.include_router(news_router)
     dp.include_router(journal_router)
+    dp.include_router(intelligence_hub_router)
     dp.include_router(premium_router)
     dp.include_router(menu_router)
     return dp
