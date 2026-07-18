@@ -180,7 +180,11 @@ class SignalTracker:
 
         if status in {"WATCHING", "TRIGGERED"}:
             pre_move = ((price - entry) / entry * 100) * (1 if side == "LONG" else -1) if entry else 0.0
-            pre_profit = max(float(signal.get("pre_activation_max_profit_pct") or 0), pre_move)
+            # A plan that has never touched its entry zone has no executable MFE.
+            # Track adverse excursion while WATCHING, but only track favorable movement after TRIGGERED.
+            pre_profit = float(signal.get("pre_activation_max_profit_pct") or 0)
+            if status == "TRIGGERED":
+                pre_profit = max(pre_profit, pre_move)
             pre_drawdown = min(float(signal.get("pre_activation_max_drawdown_pct") or 0), pre_move)
             pending_fields = {
                 "current_price": price,
@@ -240,6 +244,27 @@ class SignalTracker:
                 return
 
         if status == "TRIGGERED":
+            # Do not activate a stale plan after price has already run too far beyond the entry zone.
+            zone_anchor = entry
+            if zone_low is not None and zone_high is not None:
+                zone_anchor = float(zone_high if side == "LONG" else zone_low)
+            risk_distance = abs(entry - initial_stop)
+            favorable_run = ((price - zone_anchor) if side == "LONG" else (zone_anchor - price))
+            max_late_r = float(os.getenv("MAX_LATE_ACTIVATION_R", "0.75"))
+            if risk_distance > 0 and favorable_run > 0 and favorable_run / risk_distance >= max_late_r:
+                await self._transition(
+                    signal,
+                    "EXPIRED",
+                    price,
+                    closed_at=now,
+                    exit_price=price,
+                    result="MISSED_ENTRY",
+                )
+                self.history.add_event(signal["id"], "MISSED_ENTRY", price, {
+                    "late_r": round(favorable_run / risk_distance, 4),
+                    "threshold_r": max_late_r,
+                })
+                return
             candle = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
             if self._directional_candle(side, candle):
                 activation_check = self.integrity.validate_activation(signal, price)

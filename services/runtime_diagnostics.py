@@ -8,7 +8,7 @@ from typing import Any
 
 from database.database import connect, database_backend, get_runtime_states, persistent_database, ping_database
 
-APP_VERSION = os.getenv("APP_VERSION", "7.2.0")
+APP_VERSION = os.getenv("APP_VERSION", "8.0.3")
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -72,6 +72,11 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
                 HAVING COUNT(*) > 1
             ) x
         """)
+        watch_error_rows = [dict(row) for row in conn.execute("""
+            SELECT telegram_id, symbol, timeframe, consecutive_errors, last_error, last_checked_at
+            FROM watch_states WHERE consecutive_errors > 0
+            ORDER BY consecutive_errors DESC, updated_at DESC LIMIT 10
+        """).fetchall()]
         impossible_active = _scalar(conn, """
             SELECT COUNT(*) FROM signals
             WHERE status IN ('ACTIVE','TP1','TP2')
@@ -98,6 +103,7 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         "persistent_database": persistent_database(),
         "database": db,
         "counts": counts,
+        "watch_errors": watch_error_rows,
         "integrity": integrity,
         "workers": workers,
         "stale_workers": stale_workers,

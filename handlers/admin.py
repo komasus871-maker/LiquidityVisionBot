@@ -48,6 +48,18 @@ async def admin_status(message: Message) -> None:
     if not worker_lines:
         worker_lines.append("• No worker heartbeat records yet")
 
+    watch_error_lines = []
+    for item in report.get("watch_errors", []):
+        error = html.escape(str(item.get("last_error") or "unknown error"))
+        if len(error) > 180:
+            error = error[:177] + "..."
+        watch_error_lines.append(
+            f"• <b>{html.escape(str(item.get('symbol')))} · {html.escape(str(item.get('timeframe')))}</b> "
+            f"· errors {item.get('consecutive_errors') or 0}<br/><code>{error}</code>"
+        )
+    if not watch_error_lines:
+        watch_error_lines.append("• none")
+
     await message.answer(
         "\n".join([
             f"{icon} <b>Liquidity Vision · Admin Status</b>",
@@ -59,10 +71,10 @@ async def admin_status(message: Message) -> None:
             f"{report['database'].get('latency_ms', '—')} ms",
             f"Uptime: {report['uptime_seconds']}s",
             "",
-            "📊 <b>Runtime counts</b>",
+            "📊 <b>Global runtime counts</b>",
             f"Users: {counts['users']} · Watchlist: {counts['watchlist_items']}",
             f"Observations: {counts['observations']} · Open plans: {counts['open_signals']}",
-            f"Active trades: {counts['active_trades']} · Closed: {counts['closed_signals']}",
+            f"Global active trades: {counts['active_trades']} · Global closed records: {counts['closed_signals']}",
             f"Watch rows with errors: {counts['watch_errors']}",
             "",
             "🧩 <b>Lifecycle integrity</b>",
@@ -71,6 +83,9 @@ async def admin_status(message: Message) -> None:
             "",
             "⚙️ <b>Workers</b>",
             *worker_lines,
+            "",
+            "🚨 <b>Watch errors</b>",
+            *watch_error_lines,
         ]),
         parse_mode="HTML",
     )

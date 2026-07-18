@@ -250,7 +250,7 @@ class SignalHistory:
             unclassified = conn.execute(
                 """SELECT id,symbol,timeframe,side,status,result,realized_r FROM signals
                    WHERE owner_telegram_id=? AND activated_at IS NOT NULL AND closed_at IS NOT NULL
-                     AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                     AND (status IN ('TP3','STOP','BREAKEVEN') OR (status='MANUAL_STOP' AND realized_r IS NOT NULL) OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                      AND (realized_r IS NULL OR realized_r=0)
                      AND status!='BREAKEVEN'
                    ORDER BY id ASC""",
@@ -311,7 +311,9 @@ class SignalHistory:
                     SUM(CASE WHEN status='TRIGGERED' THEN 1 ELSE 0 END) triggered_count,
                     SUM(CASE WHEN status IN ('ACTIVE','TP1','TP2') THEN 1 ELSE 0 END) active_count,
                     SUM(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
-                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND (status IN ('TP3','STOP','BREAKEVEN')
+                                   OR (status='MANUAL_STOP' AND realized_r IS NOT NULL)
+                                   OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                              THEN 1 ELSE 0 END) closed_count,
                     SUM(CASE WHEN activated_at IS NOT NULL THEN 1 ELSE 0 END) activated_count,
                     SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp1_hits,
@@ -319,24 +321,24 @@ class SignalHistory:
                     SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp3_hits,
                     SUM(CASE WHEN status='STOP' THEN 1 ELSE 0 END) stop_hits,
                     SUM(CASE WHEN status='BREAKEVEN' THEN 1 ELSE 0 END) breakeven_count,
-                    SUM(CASE WHEN status='MANUAL_STOP' OR result='MANUAL_STOP' THEN 1 ELSE 0 END) manual_close_count,
+                    SUM(CASE WHEN status='MANUAL_STOP' AND activated_at IS NOT NULL AND realized_r IS NOT NULL THEN 1 ELSE 0 END) manual_close_count,
                     SUM(CASE WHEN status='INVALIDATED' AND activated_at IS NULL AND COALESCE(result,'')!='MANUAL_STOP' THEN 1 ELSE 0 END) invalidated_count,
                     SUM(CASE WHEN status='INVALIDATED' AND activated_at IS NOT NULL AND COALESCE(result,'')!='MANUAL_STOP' THEN 1 ELSE 0 END) activated_invalidated_count,
                     SUM(CASE WHEN status='EXPIRED' THEN 1 ELSE 0 END) expired_count,
                     SUM(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
-                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND (status IN ('TP3','STOP','BREAKEVEN') OR (status='MANUAL_STOP' AND realized_r IS NOT NULL) OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                               AND COALESCE(realized_r,0)>0 THEN 1 ELSE 0 END) wins,
                     SUM(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
-                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND (status IN ('TP3','STOP','BREAKEVEN') OR (status='MANUAL_STOP' AND realized_r IS NOT NULL) OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                               AND COALESCE(realized_r,0)<0 THEN 1 ELSE 0 END) losses,
                     AVG(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
-                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND (status IN ('TP3','STOP','BREAKEVEN') OR (status='MANUAL_STOP' AND realized_r IS NOT NULL) OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                              THEN max_profit_pct END) avg_mfe,
                     AVG(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
-                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND (status IN ('TP3','STOP','BREAKEVEN') OR (status='MANUAL_STOP' AND realized_r IS NOT NULL) OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                              THEN max_drawdown_pct END) avg_mae,
                     AVG(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
-                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND (status IN ('TP3','STOP','BREAKEVEN') OR (status='MANUAL_STOP' AND realized_r IS NOT NULL) OR (status='INVALIDATED' AND realized_r IS NOT NULL))
                              THEN realized_r END) avg_realized_r
                 FROM signals {where}
             """, params).fetchone()

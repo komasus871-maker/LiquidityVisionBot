@@ -44,10 +44,10 @@ def test_resolved_win_rate_excludes_unclassified(tmp_path, monkeypatch):
     _insert_signal(db, symbol="ETH", status="MANUAL_STOP", realized_r=-1.0, result="MANUAL_STOP")
     _insert_signal(db, symbol="SOL", status="MANUAL_STOP", realized_r=None, result="MANUAL_STOP")
     stats = history.get_stats(1)
-    assert stats["closed_count"] == 3
+    assert stats["closed_count"] == 2
     assert stats["wins"] == 1
     assert stats["losses"] == 1
-    assert stats["unclassified_count"] == 1
+    assert stats["unclassified_count"] == 0
     assert stats["win_rate"] == 50.0
 
 
