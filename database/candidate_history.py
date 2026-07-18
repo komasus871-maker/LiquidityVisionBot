@@ -80,12 +80,33 @@ class CandidateHistory:
                  owner_telegram_id, symbol.upper(), timeframe),
             )
 
-    def recent(self, owner_telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
+    def reconcile_stale_locks(self, owner_telegram_id: int) -> int:
+        """Resolve candidates whose blocker is no longer an active trade."""
+        now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
             rows = conn.execute(
-                """SELECT * FROM signal_candidates
-                   WHERE owner_telegram_id=? AND status='PENDING'
-                   ORDER BY updated_at DESC LIMIT ?""",
+                """SELECT c.id FROM signal_candidates c
+                   LEFT JOIN signals s ON s.id=c.blocked_by_signal_id
+                   WHERE c.owner_telegram_id=? AND c.status='PENDING'
+                     AND (s.id IS NULL OR s.status NOT IN ('ACTIVE','TP1','TP2'))""",
+                (owner_telegram_id,),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE signal_candidates SET status='RESOLVED',resolved_at=?,updated_at=? WHERE id=?",
+                    (now, now, int(row[0])),
+                )
+        return len(rows)
+
+    def recent(self, owner_telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        self.reconcile_stale_locks(owner_telegram_id)
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT c.* FROM signal_candidates c
+                   JOIN signals s ON s.id=c.blocked_by_signal_id
+                   WHERE c.owner_telegram_id=? AND c.status='PENDING'
+                     AND s.status IN ('ACTIVE','TP1','TP2')
+                   ORDER BY c.updated_at DESC LIMIT ?""",
                 (owner_telegram_id, limit),
             ).fetchall()
         return [dict(row) for row in rows]

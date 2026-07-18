@@ -27,8 +27,8 @@ def test_candidate_history_roundtrip(tmp_path, monkeypatch):
         snapshot={"direction_score": 71.0},
     )
     assert cid > 0
+    # An orphan blocker is stale and must be reconciled instead of remaining visible.
     rows = repo.recent(1)
-    assert len(rows) == 1
-    assert rows[0]["blocked_by_signal_id"] == 7
+    assert rows == []
     repo.resolve_market(1, "BTC", "1h", promoted_signal_id=9)
     assert repo.recent(1) == []

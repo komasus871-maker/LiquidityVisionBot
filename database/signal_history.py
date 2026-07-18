@@ -244,6 +244,30 @@ class SignalHistory:
                 closed.append(result)
         return closed
 
+    def audit_stats(self, owner_telegram_id: int) -> dict[str, Any]:
+        stats = self.get_stats(owner_telegram_id)
+        with self._connect() as conn:
+            unclassified = conn.execute(
+                """SELECT id,symbol,timeframe,side,status,result,realized_r FROM signals
+                   WHERE owner_telegram_id=? AND activated_at IS NOT NULL AND closed_at IS NOT NULL
+                     AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                     AND (realized_r IS NULL OR realized_r=0)
+                     AND status!='BREAKEVEN'
+                   ORDER BY id ASC""",
+                (owner_telegram_id,),
+            ).fetchall()
+            duplicates = conn.execute(
+                """SELECT symbol,timeframe,side,COUNT(*) count FROM signals
+                   WHERE owner_telegram_id=? AND status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
+                   GROUP BY symbol,timeframe,side HAVING COUNT(*)>1""",
+                (owner_telegram_id,),
+            ).fetchall()
+        return {
+            "stats": stats,
+            "unclassified": [dict(x) for x in unclassified],
+            "duplicates": [dict(x) for x in duplicates],
+        }
+
     def get_events(self, signal_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -320,7 +344,12 @@ class SignalHistory:
         activated = int(data.get("activated_count") or 0)
         closed = int(data.get("closed_count") or 0)
         wins = int(data.get("wins") or 0)
-        data["win_rate"] = round(wins / closed * 100, 2) if closed else 0
+        losses = int(data.get("losses") or 0)
+        breakeven = int(data.get("breakeven_count") or 0)
+        resolved = wins + losses
+        data["resolved_count"] = resolved
+        data["unclassified_count"] = max(0, closed - wins - losses - breakeven)
+        data["win_rate"] = round(wins / resolved * 100, 2) if resolved else 0
         data["activation_rate"] = round(activated / int(data.get("total") or 1) * 100, 2)
         for key in ("tp1", "tp2", "tp3"):
             data[f"{key}_rate"] = round((data.get(f"{key}_hits") or 0) / activated * 100, 2) if activated else 0

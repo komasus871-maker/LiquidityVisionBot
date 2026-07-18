@@ -94,7 +94,7 @@ async def journal_handler(message: Message):
             confidence = float(item.get("dynamic_confidence") or item.get("confidence") or 0)
             intelligence = f"\n   {health} · Confidence {confidence:.0f}%"
         recent_text.append(
-            f"{_status_icon(item['status'])} <b>#{item['id']} {item['symbol']} {item['side']}</b> — {item['status']}\n"
+            f"{_status_icon(item['status'])} <b>#{item['id']} {item['symbol']} {item['side']} · {item.get('timeframe') or '—'}</b> — {item['status']}\n"
             f"   Entry {fmt_price(item['entry'])} → {fmt_price(current)} | {metrics}{intelligence}{next_event}\n"
             f"   /trade {item['id']}"
         )
@@ -122,8 +122,10 @@ async def journal_handler(message: Message):
 📚 Total tracked: {stats.get('total') or 0}
 👁 Observations: {observation_count}
 
-🏆 Closed Win Rate: {stats.get('win_rate') or 0}%
+🏆 Resolved Win Rate: {stats.get('win_rate') or 0}%
 ✅ Wins / Losses: {stats.get('wins') or 0} / {stats.get('losses') or 0}
+🛡 Break Even: {stats.get('breakeven_count') or 0}
+❓ Unclassified closed: {stats.get('unclassified_count') or 0}
 🛑 Manual closes: {stats.get('manual_close_count') or 0}
 
 🎯 Target progression
@@ -179,7 +181,7 @@ async def _close_all_positions(message: Message) -> None:
         "🛑 <b>ALL ACTIVE TRADES CLOSED</b>\n\n"
         + "\n".join(lines)
         + f"\n\nЗакрыто: <b>{len(closed)}</b>\nОбщий результат: <b>{total_r:+.2f}R</b>"
-        + f"\nClosed Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b>",
+        + f"\nResolved Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b>",
         parse_mode="HTML",
     )
 
@@ -194,6 +196,31 @@ async def trade_replay_handler(message: Message):
     parts = (message.text or "").split()
     if len(parts) >= 3 and parts[1].lower() in {"all", "все"} and parts[2].lower() in {"stop", "close", "cancel", "стоп", "закрыть"}:
         await _close_all_positions(message)
+        return
+    if len(parts) >= 3 and parts[1].lower() in {"stats", "статистика"} and parts[2].lower() in {"audit", "аудит"}:
+        audit = history.audit_stats(message.from_user.id)
+        stats = audit["stats"]
+        unclassified = audit["unclassified"]
+        duplicates = audit["duplicates"]
+        unclassified_text = "\n".join(
+            f"• #{x['id']} {x['symbol']} {x.get('timeframe') or '—'} {x['side']} · {x['status']} · R={x.get('realized_r')}"
+            for x in unclassified[:10]
+        ) or "• none"
+        duplicate_text = "\n".join(
+            f"• {x['symbol']} {x['timeframe']} {x['side']}: {x['count']} open records"
+            for x in duplicates[:10]
+        ) or "• none"
+        await message.answer(
+            "🧪 <b>TRADE STATS AUDIT</b>\n\n"
+            f"Terminal closed: <b>{stats.get('closed_count') or 0}</b>\n"
+            f"Resolved outcomes: <b>{stats.get('resolved_count') or 0}</b>\n"
+            f"Wins / Losses / BE: <b>{stats.get('wins') or 0} / {stats.get('losses') or 0} / {stats.get('breakeven_count') or 0}</b>\n"
+            f"Unclassified: <b>{stats.get('unclassified_count') or 0}</b>\n"
+            f"Resolved Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b>\n\n"
+            f"<b>Unclassified records</b>\n{unclassified_text}\n\n"
+            f"<b>Duplicate open plans</b>\n{duplicate_text}",
+            parse_mode="HTML",
+        )
         return
     if len(parts) < 2 or not parts[1].isdigit():
         await message.answer(
