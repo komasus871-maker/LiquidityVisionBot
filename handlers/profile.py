@@ -36,8 +36,11 @@ Registered: {user[0] if user else 'today'}
 ✅ Closed: {stats.get('closed_count') or 0}
 📚 Total tracked: {stats.get('total') or 0}
 
-🏆 Win rate: {stats.get('win_rate') or 0}%
-🎯 TP1 / TP2 / TP3: {stats.get('tp1_rate') or 0}% / {stats.get('tp2_rate') or 0}% / {stats.get('tp3_rate') or 0}%
+🏆 Closed Win Rate: {stats.get('win_rate') or 0}%
+✅ Wins / Losses: {stats.get('wins') or 0} / {stats.get('losses') or 0}
+🛑 Manual closes: {stats.get('manual_close_count') or 0}
+🎯 TP1 / TP2 / TP3 progression: {stats.get('tp1_rate') or 0}% / {stats.get('tp2_rate') or 0}% / {stats.get('tp3_rate') or 0}%
+⚖️ Average realized: {round(stats.get('avg_realized_r') or 0, 2)}R
 📈 Average MFE: {round(stats.get('avg_mfe') or 0, 2)}%
 📉 Average MAE: {round(stats.get('avg_mae') or 0, 2)}%
 

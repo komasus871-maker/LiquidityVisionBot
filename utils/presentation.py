@@ -3,7 +3,7 @@ from __future__ import annotations
 STATUS_LABELS = {
     "WATCHING": "👀 Наблюдение", "TRIGGERED": "🔔 В зоне входа", "ACTIVE": "⚡ Активна",
     "TP1": "🎯 TP1", "TP2": "🏆 TP2", "TP3": "👑 TP3", "STOP": "🛑 Стоп",
-    "BREAKEVEN": "🛡 Безубыток", "INVALIDATED": "⚠️ Инвалидирована", "EXPIRED": "⌛ Истекла",
+    "BREAKEVEN": "🛡 Безубыток", "MANUAL_STOP": "🛑 Закрыта вручную", "INVALIDATED": "⚠️ Инвалидирована", "EXPIRED": "⌛ Истекла",
 }
 CATEGORY_LABELS = {
     "READY_NOW": "🚀 Готово к входу", "PULLBACK": "🎯 Ожидание отката",

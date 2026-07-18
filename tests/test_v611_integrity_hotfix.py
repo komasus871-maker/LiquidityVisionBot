@@ -64,7 +64,7 @@ def test_manual_stop_does_not_count_as_stop_loss(tmp_path, monkeypatch):
     })
     closed = repo.manual_stop(signal_id, owner_telegram_id=7)
     assert closed["status"] == "INVALIDATED"
-    assert closed["result"] == "MANUAL_STOP"
+    assert closed["result"] == "MANUAL_CANCEL"
     stats = repo.get_stats(7)
     assert stats["stop_hits"] == 0
     assert stats["invalidated_count"] == 1

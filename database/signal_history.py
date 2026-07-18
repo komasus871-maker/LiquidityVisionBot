@@ -7,7 +7,7 @@ from typing import Any
 from database.database import connect
 
 OPEN_STATUSES = ("WATCHING", "TRIGGERED", "ACTIVE", "TP1", "TP2")
-CLOSED_STATUSES = ("TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED")
+CLOSED_STATUSES = ("TP3", "STOP", "BREAKEVEN", "MANUAL_STOP", "INVALIDATED", "EXPIRED")
 
 
 class SignalHistory:
@@ -195,10 +195,21 @@ class SignalHistory:
             return None
         if owner_telegram_id is not None and signal.get("owner_telegram_id") != owner_telegram_id:
             return None
-        if signal.get("status") in {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "MANUAL_STOP"}:
+        status = str(signal.get("status") or "")
+        if status in {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "MANUAL_STOP"}:
             return signal
         now = datetime.now(timezone.utc).isoformat()
         price = float(signal.get("current_price") or signal.get("entry") or 0)
+        if status in {"WATCHING", "TRIGGERED"}:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE signals SET status='INVALIDATED', closed_at=?, invalidated_at=?, exit_price=?, realized_r=NULL, result='MANUAL_CANCEL', updated_at=? WHERE id=?",
+                    (now, now, price, now, signal_id),
+                )
+                self._add_event_conn(conn, signal_id, "MANUAL_CANCEL", price, {"reason": "cancelled_before_activation"})
+            return self.get_by_id(signal_id)
+        if status not in {"ACTIVE", "TP1", "TP2"}:
+            return None
         entry = float(signal.get("entry") or price)
         stop = float(signal.get("stop") or entry)
         side = str(signal.get("side") or "LONG")
@@ -206,11 +217,32 @@ class SignalHistory:
         realized_r = ((price - entry) if side == "LONG" else (entry - price)) / risk
         with self._connect() as conn:
             conn.execute(
-                "UPDATE signals SET status='INVALIDATED', closed_at=?, invalidated_at=?, exit_price=?, realized_r=?, result='MANUAL_STOP', updated_at=? WHERE id=?",
-                (now, now, price, realized_r, now, signal_id),
+                "UPDATE signals SET status='MANUAL_STOP', closed_at=?, exit_price=?, realized_r=?, result='MANUAL_STOP', updated_at=? WHERE id=?",
+                (now, price, realized_r, now, signal_id),
             )
             self._add_event_conn(conn, signal_id, "MANUAL_STOP", price, {"realized_r": realized_r})
         return self.get_by_id(signal_id)
+
+    def get_open_positions(self, owner_telegram_id: int) -> list[dict[str, Any]]:
+        """Return only activated positions that still carry lifecycle exposure."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM signals
+                   WHERE owner_telegram_id=?
+                     AND status IN ('ACTIVE','TP1','TP2')
+                   ORDER BY id ASC""",
+                (owner_telegram_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def manual_stop_all(self, owner_telegram_id: int) -> list[dict[str, Any]]:
+        """Close all activated positions for one owner at their latest stored price."""
+        closed: list[dict[str, Any]] = []
+        for signal in self.get_open_positions(owner_telegram_id):
+            result = self.manual_stop(int(signal["id"]), owner_telegram_id)
+            if result:
+                closed.append(result)
+        return closed
 
     def get_events(self, signal_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -254,24 +286,44 @@ class SignalHistory:
                     SUM(CASE WHEN status='WATCHING' THEN 1 ELSE 0 END) watching_count,
                     SUM(CASE WHEN status='TRIGGERED' THEN 1 ELSE 0 END) triggered_count,
                     SUM(CASE WHEN status IN ('ACTIVE','TP1','TP2') THEN 1 ELSE 0 END) active_count,
-                    SUM(CASE WHEN status IN ('TP3','STOP','BREAKEVEN') THEN 1 ELSE 0 END) closed_count,
+                    SUM(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
+                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                             THEN 1 ELSE 0 END) closed_count,
                     SUM(CASE WHEN activated_at IS NOT NULL THEN 1 ELSE 0 END) activated_count,
                     SUM(CASE WHEN tp1_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp1_hits,
                     SUM(CASE WHEN tp2_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp2_hits,
                     SUM(CASE WHEN tp3_hit_at IS NOT NULL THEN 1 ELSE 0 END) tp3_hits,
                     SUM(CASE WHEN status='STOP' THEN 1 ELSE 0 END) stop_hits,
                     SUM(CASE WHEN status='BREAKEVEN' THEN 1 ELSE 0 END) breakeven_count,
-                    SUM(CASE WHEN status='INVALIDATED' THEN 1 ELSE 0 END) invalidated_count,
+                    SUM(CASE WHEN status='MANUAL_STOP' OR result='MANUAL_STOP' THEN 1 ELSE 0 END) manual_close_count,
+                    SUM(CASE WHEN status='INVALIDATED' AND activated_at IS NULL AND COALESCE(result,'')!='MANUAL_STOP' THEN 1 ELSE 0 END) invalidated_count,
+                    SUM(CASE WHEN status='INVALIDATED' AND activated_at IS NOT NULL AND COALESCE(result,'')!='MANUAL_STOP' THEN 1 ELSE 0 END) activated_invalidated_count,
                     SUM(CASE WHEN status='EXPIRED' THEN 1 ELSE 0 END) expired_count,
-                    AVG(CASE WHEN activated_at IS NOT NULL AND status IN ('TP3','STOP','BREAKEVEN') THEN max_profit_pct END) avg_mfe,
-                    AVG(CASE WHEN activated_at IS NOT NULL AND status IN ('TP3','STOP','BREAKEVEN') THEN max_drawdown_pct END) avg_mae,
-                    AVG(CASE WHEN activated_at IS NOT NULL AND status IN ('TP3','STOP','BREAKEVEN') THEN realized_r END) avg_realized_r
+                    SUM(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
+                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND COALESCE(realized_r,0)>0 THEN 1 ELSE 0 END) wins,
+                    SUM(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
+                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                              AND COALESCE(realized_r,0)<0 THEN 1 ELSE 0 END) losses,
+                    AVG(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
+                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                             THEN max_profit_pct END) avg_mfe,
+                    AVG(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
+                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                             THEN max_drawdown_pct END) avg_mae,
+                    AVG(CASE WHEN activated_at IS NOT NULL AND closed_at IS NOT NULL
+                              AND (status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','INVALIDATED') OR result='MANUAL_STOP')
+                             THEN realized_r END) avg_realized_r
                 FROM signals {where}
             """, params).fetchone()
         data = dict(row)
         activated = int(data.get("activated_count") or 0)
-        data["win_rate"] = round((data.get("tp1_hits") or 0) / activated * 100, 2) if activated else 0
+        closed = int(data.get("closed_count") or 0)
+        wins = int(data.get("wins") or 0)
+        data["win_rate"] = round(wins / closed * 100, 2) if closed else 0
+        data["activation_rate"] = round(activated / int(data.get("total") or 1) * 100, 2)
         for key in ("tp1", "tp2", "tp3"):
             data[f"{key}_rate"] = round((data.get(f"{key}_hits") or 0) / activated * 100, 2) if activated else 0
         data["stop_rate"] = round((data.get("stop_hits") or 0) / activated * 100, 2) if activated else 0
         return data
+

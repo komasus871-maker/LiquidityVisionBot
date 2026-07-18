@@ -25,7 +25,7 @@ intelligence_layer = IntelligenceLayer()
 def _status_icon(status: str) -> str:
     return {
         "WATCHING": "👀", "TRIGGERED": "🔔", "ACTIVE": "⚡", "TP1": "🎯", "TP2": "🏆",
-        "TP3": "👑", "STOP": "🛑", "BREAKEVEN": "🛡", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
+        "TP3": "👑", "STOP": "🛑", "MANUAL_STOP": "🛑", "BREAKEVEN": "🛡", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
     }.get(status, "•")
 
 
@@ -122,13 +122,19 @@ async def journal_handler(message: Message):
 📚 Total tracked: {stats.get('total') or 0}
 👁 Observations: {observation_count}
 
-🏆 Достигли TP1: {stats.get('tp1_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp1_rate') or 0}%
-🎯 Достигли TP2: {stats.get('tp2_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp2_rate') or 0}%
-🎯 Достигли TP3: {stats.get('tp3_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp3_rate') or 0}%
-🛑 Стопы: {stats.get('stop_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('stop_rate') or 0}%
-🛡 Break Even: {stats.get('breakeven_count') or 0}
-⚠️ Invalidated: {stats.get('invalidated_count') or 0}
-⌛ Expired: {stats.get('expired_count') or 0}
+🏆 Closed Win Rate: {stats.get('win_rate') or 0}%
+✅ Wins / Losses: {stats.get('wins') or 0} / {stats.get('losses') or 0}
+🛑 Manual closes: {stats.get('manual_close_count') or 0}
+
+🎯 Target progression
+• TP1: {stats.get('tp1_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp1_rate') or 0}%
+• TP2: {stats.get('tp2_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp2_rate') or 0}%
+• TP3: {stats.get('tp3_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('tp3_rate') or 0}%
+• Stops: {stats.get('stop_hits') or 0}/{stats.get('activated_count') or 0} — {stats.get('stop_rate') or 0}%
+• Break Even: {stats.get('breakeven_count') or 0}
+• Invalidated before entry: {stats.get('invalidated_count') or 0}
+• Invalidated after activation: {stats.get('activated_invalidated_count') or 0}
+• Expired: {stats.get('expired_count') or 0}
 
 📈 Average MFE: {round(stats.get('avg_mfe') or 0, 2)}%
 📉 Average MAE: {round(stats.get('avg_mae') or 0, 2)}%
@@ -154,11 +160,47 @@ async def journal_handler(message: Message):
 """, parse_mode="HTML")
 
 
+async def _close_all_positions(message: Message) -> None:
+    closed = history.manual_stop_all(message.from_user.id)
+    if not closed:
+        await message.answer("Нет открытых активированных сделок для закрытия.")
+        return
+    lines = []
+    total_r = 0.0
+    for item in closed:
+        realized_r = float(item.get("realized_r") or 0)
+        total_r += realized_r
+        lines.append(
+            f"• #{item['id']} {html.escape(str(item['symbol']))} {html.escape(str(item['side']))}: "
+            f"<b>{realized_r:+.2f}R</b> @ <code>{fmt_price(item.get('exit_price'))}</code>"
+        )
+    stats = history.get_stats(message.from_user.id)
+    await message.answer(
+        "🛑 <b>ALL ACTIVE TRADES CLOSED</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\nЗакрыто: <b>{len(closed)}</b>\nОбщий результат: <b>{total_r:+.2f}R</b>"
+        + f"\nClosed Win Rate: <b>{float(stats.get('win_rate') or 0):.2f}%</b>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("closeall"))
+async def close_all_command(message: Message):
+    await _close_all_positions(message)
+
+
 @router.message(Command("trade"))
 async def trade_replay_handler(message: Message):
     parts = (message.text or "").split()
+    if len(parts) >= 3 and parts[1].lower() in {"all", "все"} and parts[2].lower() in {"stop", "close", "cancel", "стоп", "закрыть"}:
+        await _close_all_positions(message)
+        return
     if len(parts) < 2 or not parts[1].isdigit():
-        await message.answer("Использование: <code>/trade 12</code> или <code>/trade 12 stop</code>", parse_mode="HTML")
+        await message.answer(
+            "Использование: <code>/trade 12</code>, <code>/trade 12 close</code>, "
+            "<code>/trade all close</code> или <code>/closeall</code>",
+            parse_mode="HTML",
+        )
         return
     signal_id = int(parts[1])
     action = parts[2].lower() if len(parts) >= 3 else ""
@@ -167,12 +209,19 @@ async def trade_replay_handler(message: Message):
         if not closed:
             await message.answer("Сделка не найдена.")
             return
-        await message.answer(
-            f"🛑 <b>MANUAL STOP</b> · #{signal_id}\n"
-            f"Цена закрытия: <code>{fmt_price(closed.get('exit_price'))}</code>\n"
-            f"Результат: <b>{float(closed.get('realized_r') or 0):+.2f}R</b>",
-            parse_mode="HTML",
-        )
+        if closed.get("result") == "MANUAL_CANCEL":
+            await message.answer(
+                f"🚫 <b>PLAN CANCELLED</b> · #{signal_id}\n"
+                f"Позиция не была активирована, поэтому PnL и R не рассчитываются.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"🛑 <b>MANUAL CLOSE</b> · #{signal_id}\n"
+                f"Цена закрытия: <code>{fmt_price(closed.get('exit_price'))}</code>\n"
+                f"Результат: <b>{float(closed.get('realized_r') or 0):+.2f}R</b>",
+                parse_mode="HTML",
+            )
         return
     if action:
         await message.answer("Доступные действия: <code>stop</code>, <code>close</code>, <code>cancel</code>.", parse_mode="HTML")
@@ -187,7 +236,7 @@ async def trade_replay_handler(message: Message):
     meaningful_types = {
         "CREATED", "PLAN_UPDATED", "DIRECTION_FLIPPED", "DUPLICATE_RECONCILED",
         "TRIGGERED", "ACTIVE", "TP1", "BREAK_EVEN_SET", "TP2", "TP3",
-        "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "MANUAL_STOP", "INTELLIGENCE_ALERT",
+        "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "MANUAL_STOP", "MANUAL_CANCEL", "INTELLIGENCE_ALERT",
     }
     meaningful_events = [e for e in events if str(e.get("event_type")) in meaningful_types]
     labels = {
@@ -206,6 +255,7 @@ async def trade_replay_handler(message: Message):
         "INVALIDATED": "Scenario invalidated",
         "EXPIRED": "Scenario expired",
         "MANUAL_STOP": "Closed manually",
+        "MANUAL_CANCEL": "Plan cancelled manually",
         "INTELLIGENCE_ALERT": "Intelligence changed",
     }
     previous_dt = None

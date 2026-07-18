@@ -60,7 +60,7 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "observations": _scalar(conn, "SELECT COUNT(*) FROM analysis_observations"),
             "open_signals": _scalar(conn, "SELECT COUNT(*) FROM signals WHERE status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')"),
             "active_trades": _scalar(conn, "SELECT COUNT(*) FROM signals WHERE status IN ('ACTIVE','TP1','TP2')"),
-            "closed_signals": _scalar(conn, "SELECT COUNT(*) FROM signals WHERE status IN ('TP3','STOP','CLOSED','INVALIDATED','EXPIRED')"),
+            "closed_signals": _scalar(conn, "SELECT COUNT(*) FROM signals WHERE status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','CLOSED','INVALIDATED','EXPIRED')"),
             "watch_errors": _scalar(conn, "SELECT COUNT(*) FROM watch_states WHERE consecutive_errors > 0"),
         }
         duplicate_open_plans = _scalar(conn, """
