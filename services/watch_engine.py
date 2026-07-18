@@ -196,6 +196,7 @@ class WatchEngine:
     async def check_once(self) -> dict[str, int | bool]:
         lease_ttl = max(self.interval_seconds * 2, 180)
         if not acquire_lease(self.worker_name, self.owner_id, lease_ttl):
+            runtime_finished(self.worker_name, processed=0, errors=0, details={"skipped": "lease_busy"})
             return {"skipped": True, "processed": 0, "errors": 0, "notifications": 0, "promoted": 0}
         runtime_started(self.worker_name)
         try:
@@ -221,7 +222,11 @@ class WatchEngine:
         logging.info("WatchEngine started: interval=%ss, concurrency=%s", self.interval_seconds, self.concurrency)
         while not self._stop.is_set():
             try:
-                await self.check_once()
+                cycle_timeout = int(os.getenv("WATCH_ENGINE_CYCLE_TIMEOUT", str(max(180, self.interval_seconds * 2))))
+                await asyncio.wait_for(self.check_once(), timeout=cycle_timeout)
+            except asyncio.TimeoutError:
+                logging.error("WatchEngine cycle timed out")
+                runtime_finished(self.worker_name, processed=0, errors=1, error="cycle timeout")
             except Exception:
                 logging.exception("WatchEngine cycle failed")
             try:

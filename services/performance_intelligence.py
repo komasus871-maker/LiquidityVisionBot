@@ -47,6 +47,23 @@ class Segment:
     total_r: float
 
     @property
+    def maturity(self) -> str:
+        if self.trades < 5:
+            return "INSUFFICIENT"
+        if self.trades < 15:
+            return "EARLY"
+        if self.trades < 30:
+            return "DEVELOPING"
+        if self.trades < 60:
+            return "MODERATE"
+        return "MATURE"
+
+    @property
+    def reliability(self) -> float:
+        # Conservative shrinkage toward zero expectancy for small samples.
+        return round(self.expectancy * min(1.0, self.trades / 30.0), 2)
+
+    @property
     def win_rate(self) -> float:
         return round(self.wins / self.trades * 100, 2) if self.trades else 0.0
 
@@ -122,50 +139,80 @@ class PerformanceIntelligence:
         longs = sum(1 for x in active if str(x.get("side")) == "LONG")
         shorts = len(active) - longs
         open_r = 0.0
-        risk_r = 0.0
+        gross_risk = 0.0
+        effective_risk = 0.0
+        protected_r = 0.0
         symbols: dict[str, int] = defaultdict(int)
+        symbol_net: dict[str, float] = defaultdict(float)
+        enriched = []
         for row in active:
             entry = _f(row.get("entry"))
-            stop = _f(row.get("stop"))
+            initial_stop = _f(row.get("stop"))
+            effective_stop = _f(row.get("effective_stop"), initial_stop)
             current = _f(row.get("current_price"), entry)
             side = str(row.get("side") or "LONG")
-            unit = abs(entry - stop)
+            sign = 1.0 if side == "LONG" else -1.0
+            unit = abs(entry - initial_stop)
+            position_r = ((current - entry) / unit) * sign if unit > 0 else 0.0
+            open_r += position_r
+            initial_risk = 1.0 if unit > 0 else 0.0
+            gross_risk += initial_risk
             if unit > 0:
-                open_r += ((current - entry) / unit) * (1 if side == "LONG" else -1)
-                risk_r += 1.0
-            symbols[str(row.get("symbol") or "UNKNOWN")] += 1
+                # Remaining loss from current price to effective stop, expressed in initial R.
+                remaining = max(0.0, ((current - effective_stop) / unit) * sign)
+                remaining = min(initial_risk, remaining)
+                # TP states are expected to have reduced/protected exposure even when legacy stops lag.
+                if str(row.get("status")) == "TP1":
+                    remaining = min(remaining, 0.5)
+                elif str(row.get("status")) == "TP2":
+                    remaining = min(remaining, 0.2)
+            else:
+                remaining = 0.0
+            effective_risk += remaining
+            protected_r += max(0.0, initial_risk - remaining)
+            symbol = str(row.get("symbol") or "UNKNOWN")
+            symbols[symbol] += 1
+            symbol_net[symbol] += remaining * sign
+            item = dict(row)
+            item["position_r"] = round(position_r, 2)
+            item["effective_risk_r"] = round(remaining, 2)
+            enriched.append(item)
         dominant = "LONG" if longs > shorts else "SHORT" if shorts > longs else "BALANCED"
         concentration = max(symbols.values(), default=0)
-        heat = "LOW" if risk_r <= 2 else "MEDIUM" if risk_r <= 5 else "HIGH"
+        heat = "LOW" if effective_risk <= 2 else "MEDIUM" if effective_risk <= 4 else "HIGH"
         warnings = []
         if len(active) >= 3 and max(longs, shorts) / len(active) >= 0.75:
             warnings.append(f"Directional concentration: {max(longs, shorts)}/{len(active)} positions are {dominant}")
         if concentration >= 2:
             symbol = max(symbols, key=symbols.get)
             warnings.append(f"Symbol concentration: {symbols[symbol]} simultaneous {symbol} positions")
-        if risk_r > 5:
-            warnings.append("Portfolio heat is high; reduce total exposure or protect open risk")
+        conflicted = [symbol for symbol in symbols if any(str(x.get("symbol")) == symbol and str(x.get("side")) == "LONG" for x in active) and any(str(x.get("symbol")) == symbol and str(x.get("side")) == "SHORT" for x in active)]
+        for symbol in conflicted:
+            warnings.append(f"Conflicting {symbol} exposure: simultaneous LONG and SHORT scenarios")
+        if effective_risk > 4:
+            warnings.append("Effective portfolio heat is high; reduce exposure or protect stops")
         return {
-            "active": active,
-            "count": len(active),
-            "longs": longs,
-            "shorts": shorts,
-            "dominant": dominant,
-            "open_r": round(open_r, 2),
-            "risk_r": round(risk_r, 2),
-            "heat": heat,
-            "warnings": warnings,
+            "active": enriched, "count": len(active), "longs": longs, "shorts": shorts,
+            "dominant": dominant, "open_r": round(open_r, 2),
+            "risk_r": round(effective_risk, 2), "gross_risk_r": round(gross_risk, 2),
+            "protected_r": round(protected_r, 2), "heat": heat, "warnings": warnings,
+            "symbol_net": {k: round(v, 2) for k, v in symbol_net.items()},
         }
 
     def dna(self, owner_id: int) -> dict[str, Any]:
         report = self.performance(owner_id)
-        def first(items: list[Segment]) -> Segment | None:
-            qualified = [x for x in items if x.trades >= 2]
-            return qualified[0] if qualified else (items[0] if items else None)
-        best_symbol = first(report["symbols"])
-        best_tf = first(report["timeframes"])
-        best_side = first(report["sides"])
-        worst_symbol = min(report["symbols"], key=lambda x: x.expectancy, default=None)
+        def qualified_best(items: list[Segment]) -> Segment | None:
+            qualified = [x for x in items if x.trades >= 5]
+            pool = qualified or items
+            return max(pool, key=lambda x: (x.reliability, x.expectancy, x.trades), default=None)
+        def qualified_worst(items: list[Segment]) -> Segment | None:
+            qualified = [x for x in items if x.trades >= 5]
+            pool = qualified or items
+            return min(pool, key=lambda x: (x.reliability, x.expectancy, -x.trades), default=None)
+        best_symbol = qualified_best(report["symbols"])
+        best_tf = qualified_best(report["timeframes"])
+        best_side = qualified_best(report["sides"])
+        worst_symbol = qualified_worst(report["symbols"])
         strengths, weaknesses = [], []
         if report["expectancy"] > 0:
             strengths.append(f"Positive expectancy: {report['expectancy']:+.2f}R per resolved trade")
@@ -175,13 +222,11 @@ class PerformanceIntelligence:
             weaknesses.append("Low resolved win rate; entries or invalidation logic need review")
         if report["avg_loss"] < -1.2:
             weaknesses.append("Average loss exceeds planned 1R; audit manual exits and slippage")
-        return {
-            **report,
-            "best_symbol": best_symbol,
-            "worst_symbol": worst_symbol,
-            "best_timeframe": best_tf,
-            "best_side": best_side,
-            "strengths": strengths,
-            "weaknesses": weaknesses,
-            "sample_ready": report["trades"] >= 30,
-        }
+        low_samples = [x for x in report["symbols"] if x.trades < 5]
+        if low_samples:
+            weaknesses.append(f"{len(low_samples)} symbol cohorts have fewer than 5 trades; avoid strong conclusions")
+        trades = report["trades"]
+        overall_maturity = "INSUFFICIENT" if trades < 10 else "EARLY" if trades < 30 else "DEVELOPING" if trades < 60 else "MATURE"
+        return {**report, "best_symbol": best_symbol, "worst_symbol": worst_symbol,
+            "best_timeframe": best_tf, "best_side": best_side, "strengths": strengths,
+            "weaknesses": weaknesses, "sample_ready": trades >= 30, "maturity": overall_maturity}

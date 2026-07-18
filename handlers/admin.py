@@ -41,10 +41,16 @@ async def admin_status(message: Message) -> None:
     for worker in report["workers"]:
         state = "🔴 stale" if worker.get("stale") else "🟢 healthy"
         age = worker.get("age_seconds")
-        worker_lines.append(
-            f"• <b>{html.escape(str(worker.get('worker_name')))}</b>: {state} · "
-            f"age {age if age is not None else '—'}s · errors {worker.get('error_count') or 0}"
-        )
+        details = worker.get("details") or {}
+        cycle = worker.get("cycle_seconds")
+        running = " · running" if worker.get("running") else ""
+        last_error = worker.get("last_error")
+        line = (f"• <b>{html.escape(str(worker.get('worker_name')))}</b>: {state}{running} · "
+                f"age {age if age is not None else '—'}s · cycle {cycle if cycle is not None else '—'}s · "
+                f"processed {worker.get('processed_count') or 0} · errors {worker.get('error_count') or 0}")
+        if last_error:
+            line += f"<br/><code>{html.escape(str(last_error))[:180]}</code>"
+        worker_lines.append(line)
     if not worker_lines:
         worker_lines.append("• No worker heartbeat records yet")
 
@@ -89,3 +95,23 @@ async def admin_status(message: Message) -> None:
         ]),
         parse_mode="HTML",
     )
+
+
+@router.message(Command("workers"))
+async def workers_status(message: Message) -> None:
+    if not message.from_user or message.from_user.id not in _admin_ids():
+        await message.answer("⛔ Admin command.")
+        return
+    report = collect_runtime_diagnostics()
+    lines = ["⚙️ <b>WORKER RELIABILITY</b>", ""]
+    for worker in report["workers"]:
+        state = "🔴 STALE" if worker.get("stale") else "🟢 HEALTHY"
+        details = worker.get("details") or {}
+        lines.extend([
+            f"<b>{html.escape(str(worker.get('worker_name')))}</b> · {state}",
+            f"Running: {bool(worker.get('running'))} · heartbeat age: {worker.get('age_seconds')}s",
+            f"Last cycle: {worker.get('cycle_seconds')}s · processed/errors: {worker.get('processed_count') or 0}/{worker.get('error_count') or 0}",
+            f"Details: <code>{html.escape(str(details))[:350]}</code>",
+            f"Last error: <code>{html.escape(str(worker.get('last_error') or 'none'))[:350]}</code>", ""
+        ])
+    await message.answer("\n".join(lines), parse_mode="HTML")

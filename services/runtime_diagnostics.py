@@ -8,7 +8,7 @@ from typing import Any
 
 from database.database import connect, database_backend, get_runtime_states, persistent_database, ping_database
 
-APP_VERSION = os.getenv("APP_VERSION", "8.4.0")
+from version import APP_VERSION
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -42,8 +42,18 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         item = dict(state)
         success_at = _parse_time(item.get("last_success_at"))
         age = int((now - success_at).total_seconds()) if success_at else None
+        started_at = _parse_time(item.get("last_started_at"))
+        finished_at = _parse_time(item.get("last_finished_at"))
+        started_age = int((now - started_at).total_seconds()) if started_at else None
+        running = bool(started_at and (not finished_at or started_at > finished_at))
+        cycle_seconds = None
+        if started_at and finished_at and finished_at >= started_at:
+            cycle_seconds = round((finished_at - started_at).total_seconds(), 2)
         item["age_seconds"] = age
-        item["stale"] = age is None or age > stale_after
+        item["started_age_seconds"] = started_age
+        item["running"] = running
+        item["cycle_seconds"] = cycle_seconds
+        item["stale"] = (running and started_age is not None and started_age > stale_after) or (not running and (age is None or age > stale_after))
         try:
             item["details"] = json.loads(item.get("details_json") or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):

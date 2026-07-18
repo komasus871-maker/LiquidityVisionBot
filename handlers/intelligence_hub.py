@@ -18,7 +18,7 @@ premium = PremiumService()
 def _segment(x: Segment | None) -> str:
     if not x:
         return "—"
-    return f"{html.escape(x.name)} · {x.trades} trades · {x.win_rate:.1f}% WR · {x.expectancy:+.2f}R EV"
+    return f"{html.escape(x.name)} · {x.trades} trades · {x.win_rate:.1f}% WR · {x.expectancy:+.2f}R EV · {x.maturity}"
 
 
 @router.message(Command("performance"))
@@ -56,7 +56,8 @@ async def portfolio_handler(message: Message):
         f"Active: <b>{r['count']}</b> · LONG/SHORT: <b>{r['longs']}/{r['shorts']}</b>\n"
         f"Dominant exposure: <b>{r['dominant']}</b>\n"
         f"Estimated open result: <b>{r['open_r']:+.2f}R</b>\n"
-        f"Portfolio heat: <b>{r['risk_r']:.1f}R · {r['heat']}</b>\n\n"
+        f"Effective / gross heat: <b>{r['risk_r']:.2f}R / {r['gross_risk_r']:.2f}R · {r['heat']}</b>\n"
+        f"Protected risk: <b>{r['protected_r']:.2f}R</b>\n\n"
         + "\n".join(positions) + "\n\n<b>Risk intelligence</b>\n" + warnings,
         parse_mode="HTML")
 
@@ -66,7 +67,7 @@ async def dna_handler(message: Message):
     r = engine.dna(message.from_user.id)
     strengths = "\n".join(f"✅ {html.escape(x)}" for x in r["strengths"]) or "• Still collecting positive patterns"
     weaknesses = "\n".join(f"⚠️ {html.escape(x)}" for x in r["weaknesses"]) or "✅ No major statistical weakness detected"
-    sample = "MATURE" if r["sample_ready"] else "EARLY — interpret carefully"
+    sample = r["maturity"]
     text = (
         "🧬 <b>TRADE DNA</b>\n\n"
         f"Dataset: <b>{r['trades']} resolved trades · {sample}</b>\n\n"

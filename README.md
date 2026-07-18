@@ -1,4 +1,4 @@
-# Liquidity Vision Intelligence v7.2.0
+# Liquidity Vision Intelligence v8.5.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
@@ -31,7 +31,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=7.2.0
+APP_VERSION=8.5.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
