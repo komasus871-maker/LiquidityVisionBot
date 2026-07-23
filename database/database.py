@@ -279,6 +279,33 @@ def create_tables() -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS copy_profiles(
+                id {id_col}, telegram_id BIGINT NOT NULL UNIQUE, enabled INTEGER DEFAULT 0,
+                mode TEXT NOT NULL DEFAULT 'PAPER', exchange TEXT, risk_pct DOUBLE PRECISION DEFAULT 0.5,
+                max_positions INTEGER DEFAULT 3, max_heat_r DOUBLE PRECISION DEFAULT 2.5,
+                daily_loss_pct DOUBLE PRECISION DEFAULT 2.0, max_slippage_pct DOUBLE PRECISION DEFAULT 0.25,
+                paper_balance DOUBLE PRECISION DEFAULT 10000, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_positions(
+                id {id_col}, telegram_id BIGINT NOT NULL, signal_id BIGINT NOT NULL, symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL, side TEXT NOT NULL, status TEXT NOT NULL, entry_price DOUBLE PRECISION,
+                last_price DOUBLE PRECISION, exit_price DOUBLE PRECISION, stop_price DOUBLE PRECISION,
+                tp1 DOUBLE PRECISION, tp2 DOUBLE PRECISION, tp3 DOUBLE PRECISION, quantity DOUBLE PRECISION,
+                notional DOUBLE PRECISION, risk_amount DOUBLE PRECISION, initial_risk_r DOUBLE PRECISION DEFAULT 1.0,
+                remaining_fraction DOUBLE PRECISION DEFAULT 1.0, realized_r DOUBLE PRECISION DEFAULT 0,
+                rejection_code TEXT, rejection_reason TEXT, close_reason TEXT, opened_at TEXT, closed_at TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(telegram_id,signal_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS execution_events(
+                id {id_col}, telegram_id BIGINT NOT NULL, signal_id BIGINT, event_type TEXT NOT NULL,
+                price DOUBLE PRECISION, details_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations(
                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
@@ -357,6 +384,10 @@ def create_tables() -> None:
                 )
 
         for sql in (
+            "CREATE INDEX IF NOT EXISTS idx_copy_profiles_enabled ON copy_profiles(enabled,mode)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_positions_owner_status ON paper_positions(telegram_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_positions_signal ON paper_positions(signal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_execution_events_owner ON execution_events(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

@@ -13,6 +13,7 @@ from config import BOT_TOKEN
 from database.database import create_tables, database_backend, persistent_database, ping_database
 from handlers.admin import router as admin_router
 from handlers.analyze import router as analyze_router
+from handlers.copy_trading import router as copy_trading_router
 from handlers.fear import router as fear_router
 from handlers.help import router as help_router
 from handlers.journal import router as journal_router
@@ -30,6 +31,7 @@ from services.signal_tracker import SignalTracker
 from services.watch_engine import WatchEngine
 from services.webhook_server import WebhookServer
 from services.trade_memory import TradeMemoryService
+from services.copy_execution_worker import CopyExecutionWorker
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -44,6 +46,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(help_router)
     dp.include_router(price_router)
     dp.include_router(analyze_router)
+    dp.include_router(copy_trading_router)
     dp.include_router(profile_router)
     dp.include_router(scanner_router)
     dp.include_router(fear_router)
@@ -96,11 +99,13 @@ async def main() -> None:
     tracker = SignalTracker(interval_seconds=int(os.getenv("SIGNAL_CHECK_INTERVAL", "60")), bot=bot)
     observation_monitor = ObservationMonitor(bot=bot)
     watch_engine = WatchEngine(bot=bot)
-    workers = [tracker, observation_monitor, watch_engine]
+    copy_execution = CopyExecutionWorker()
+    workers = [tracker, observation_monitor, watch_engine, copy_execution]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
         asyncio.create_task(watch_engine.run_forever(), name="watch-engine"),
+        asyncio.create_task(copy_execution.run_forever(), name="copy-execution"),
     ]
 
     mode = deployment_mode()
@@ -116,12 +121,14 @@ async def main() -> None:
                 watch_result = await watch_engine.check_once()
                 observation_result = await observation_monitor.check_once()
                 tracker_result = await tracker.check_once()
+                copy_result = await copy_execution.check_once()
                 return {
                     "database_backend": database_backend(),
                     "persistent_database": persistent_database(),
                     "watch_engine": watch_result,
                     "observation_monitor": observation_result,
                     "signal_tracker": tracker_result,
+                    "copy_execution": copy_result,
                 }
 
             webhook_server = WebhookServer(
