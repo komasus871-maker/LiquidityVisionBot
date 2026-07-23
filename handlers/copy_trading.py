@@ -39,7 +39,7 @@ Average: {float(stats.get('avg_r') or 0):+.2f}R
 <code>/copy_stats</code> — execution statistics
 <code>/panic</code> — close paper positions and disable execution
 
-🔒 LIVE execution is hard-disabled in v9.0.0."""
+🔒 LIVE execution is hard-disabled in v9.1.0."""
 
 
 @router.message(Command("copy"))
