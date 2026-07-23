@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.4.0 — Execution Intelligence & Rejection Analytics
+
+- Added a read-only copy-execution decision funnel for accepted and rejected attempts.
+- Added ranked rejection diagnostics by guardrail code, symbol, and timeframe.
+- Added dominant rejection reason to copy status and statistics.
+- Added `/copy_rejections` with recent rejected attempts and 30-day acceptance rate.
+- Kept all analytics observational: no guardrail is weakened automatically.
+- Added v9.4 regression coverage and release documentation.
+
 ## 9.3.0 — Copy Training Foundation
 
 - Added leakage-safe `CopyTrainingService` trained exclusively on closed paper executions.

@@ -1,11 +1,11 @@
-# Liquidity Vision Intelligence v9.3.0
+# Liquidity Vision Intelligence v9.4.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
-## v9.3.0 — Copy Training Foundation
+## v9.4.0 — Execution Intelligence & Rejection Analytics
 
-Closed paper executions now feed a conservative adaptive policy for copy confidence, risk scaling and negative-cohort blocking. Use `/copy_training` to inspect learning readiness and cohort performance. LIVE execution remains disabled.
+The paper executor now exposes a 30-day decision funnel, ranked rejection reasons, rejected symbols and timeframes, and recent rejected attempts through `/copy_rejections`. Analytics remain read-only and LIVE execution remains disabled.
 
 ## Release notes — v9.3.0
 
@@ -43,7 +43,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.3.0
+APP_VERSION=9.4.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

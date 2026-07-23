@@ -6,10 +6,12 @@ from aiogram.types import Message
 
 from services.copy_trading import CopyTradingService
 from services.copy_training import CopyTrainingService
+from services.copy_execution_intelligence import CopyExecutionIntelligenceService
 
 router = Router()
 service = CopyTradingService()
 training_service = CopyTrainingService()
+intelligence_service = CopyExecutionIntelligenceService()
 
 
 def _status_text(profile: dict, stats: dict) -> str:
@@ -32,6 +34,7 @@ Symbol cooldown: <b>{int(profile.get('symbol_cooldown_min') or 30)} min</b>
 Open: {int(stats.get('open_count') or 0)}
 Closed: {int(stats.get('closed_count') or 0)}
 Rejected: {int(stats.get('rejected_count') or 0)}
+Top rejection: <b>{stats.get("top_rejection_code") or "—"}</b> ({int(stats.get("top_rejection_count") or 0)})
 Equity: <b>${float(stats.get('equity') or profile['paper_balance']):,.2f}</b>
 Today: <b>${float(stats.get('daily_pnl') or 0):+,.2f}</b>
 Total PnL: <b>${float(stats.get('realized_pnl') or 0):+,.2f}</b>
@@ -48,9 +51,10 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_guard 55 35 30 0.25</code> — confidence, notional %, cooldown min, slippage %
 <code>/copy_stats</code> — execution statistics
 <code>/copy_training</code> — adaptive learning report
+<code>/copy_rejections</code> — execution rejection intelligence
 <code>/panic</code> — close paper positions and disable execution
 
-🧠 v9.3.0 learns conservatively from closed paper executions only.
+🧠 v9.4.0 adds decision-funnel and rejection intelligence.
 🔒 LIVE execution remains fail-closed."""
 
 
@@ -174,4 +178,53 @@ Total: <b>{report['total_r']:+.2f}R</b>
 {render(report['weakest_cohorts'])}
 
 The adaptive policy starts after 8 closed paper executions and can block a persistently negative cohort only after 15+ samples. Open and rejected positions are never used for training."""
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("copy_rejections"))
+async def copy_rejections(message: Message):
+    report = intelligence_service.report(message.from_user.id)
+
+    def render_buckets(items) -> str:
+        if not items:
+            return "• No data"
+        return "\n".join(
+            f"• <code>{item.key}</code> — {item.count} · {item.share_pct:.1f}%"
+            for item in items
+        )
+
+    if report["attempts"] == 0:
+        await message.answer(
+            "🔎 <b>Copy Execution Intelligence</b>\n\nNo execution attempts were recorded in the last 30 days.",
+            parse_mode="HTML",
+        )
+        return
+
+    recent = report["recent"]
+    recent_text = "\n".join(
+        f"• #{row['signal_id']} {row['symbol']} {row['side']} · <code>{row.get('rejection_code') or 'UNKNOWN'}</code>"
+        for row in recent
+    ) or "• No rejected executions"
+
+    text = f"""🔎 <b>Copy Execution Intelligence</b>
+
+Window: <b>{report['days']} days</b>
+Attempts: <b>{report['attempts']}</b>
+Accepted: <b>{report['accepted']}</b>
+Rejected: <b>{report['rejected']}</b>
+Acceptance rate: <b>{report['acceptance_rate']:.1f}%</b>
+
+🚧 <b>Rejection reasons</b>
+{render_buckets(report['by_code'])}
+
+🪙 <b>Most rejected symbols</b>
+{render_buckets(report['by_symbol'])}
+
+⏱ <b>Most rejected timeframes</b>
+{render_buckets(report['by_timeframe'])}
+
+🕘 <b>Recent rejected attempts</b>
+{recent_text}
+
+This report is diagnostic only. Guardrails are never weakened automatically from rejection volume."""
     await message.answer(text, parse_mode="HTML")

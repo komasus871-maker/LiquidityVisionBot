@@ -100,7 +100,26 @@ class CopyTradingService:
         result["equity"] = float(profile["paper_balance"]) + float(result.get("realized_pnl") or 0.0)
         closed = int(result.get("closed_count") or 0)
         result["win_rate"] = (float(result.get("wins") or 0) / closed * 100.0) if closed else 0.0
+        top_rejection = self.rejection_summary(telegram_id, limit=1)
+        result["top_rejection_code"] = top_rejection[0]["code"] if top_rejection else None
+        result["top_rejection_count"] = top_rejection[0]["count"] if top_rejection else 0
         return result
+
+    def rejection_summary(self, telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 20))
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT rejection_code, COUNT(*) count
+                   FROM paper_positions
+                   WHERE telegram_id=? AND status='REJECTED'
+                   GROUP BY rejection_code
+                   ORDER BY count DESC""",
+                (telegram_id,),
+            ).fetchall()
+        return [
+            {"code": str(row[0] or "UNKNOWN"), "count": int(row[1] or 0)}
+            for row in rows[:safe_limit]
+        ]
 
     def sync_signal(self, signal: dict[str, Any]) -> dict[str, int]:
         opened = updated = closed = rejected = skipped = 0
