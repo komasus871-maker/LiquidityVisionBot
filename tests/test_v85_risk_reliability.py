@@ -2,7 +2,7 @@ from services.performance_intelligence import Segment
 from version import APP_VERSION
 
 def test_release_version():
-    assert APP_VERSION == "9.4.0"
+    assert APP_VERSION == "9.5.0"
 
 def test_segment_maturity_and_reliability():
     assert Segment("X", 2, 1, 2.0).maturity == "INSUFFICIENT"

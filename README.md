@@ -1,7 +1,11 @@
-# Liquidity Vision Intelligence v9.4.0
+# Liquidity Vision Intelligence v9.5.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
+
+## v9.5.0 — Guardrail Outcome Intelligence
+
+Rejected copy attempts are now tracked through terminal lifecycle states with zero exposure, allowing the platform to quantify losses avoided and profitable trades missed by each guardrail. Use `/copy_guardrails`.
 
 ## v9.4.0 — Execution Intelligence & Rejection Analytics
 
@@ -43,7 +47,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.4.0
+APP_VERSION=9.5.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

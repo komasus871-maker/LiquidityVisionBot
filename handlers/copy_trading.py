@@ -7,11 +7,13 @@ from aiogram.types import Message
 from services.copy_trading import CopyTradingService
 from services.copy_training import CopyTrainingService
 from services.copy_execution_intelligence import CopyExecutionIntelligenceService
+from services.copy_guardrail_outcomes import CopyGuardrailOutcomeService
 
 router = Router()
 service = CopyTradingService()
 training_service = CopyTrainingService()
 intelligence_service = CopyExecutionIntelligenceService()
+outcome_service = CopyGuardrailOutcomeService()
 
 
 def _status_text(profile: dict, stats: dict) -> str:
@@ -52,9 +54,10 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_stats</code> — execution statistics
 <code>/copy_training</code> — adaptive learning report
 <code>/copy_rejections</code> — execution rejection intelligence
+<code>/copy_guardrails</code> — rejected-signal outcome report
 <code>/panic</code> — close paper positions and disable execution
 
-🧠 v9.4.0 adds decision-funnel and rejection intelligence.
+🧠 v9.5.0 measures the real counterfactual value of every resolved rejection.
 🔒 LIVE execution remains fail-closed."""
 
 
@@ -227,4 +230,47 @@ Acceptance rate: <b>{report['acceptance_rate']:.1f}%</b>
 {recent_text}
 
 This report is diagnostic only. Guardrails are never weakened automatically from rejection volume."""
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("copy_guardrails"))
+async def copy_guardrails(message: Message):
+    report = outcome_service.report(message.from_user.id)
+    if report["resolved"] == 0:
+        await message.answer(
+            "🛡 <b>Guardrail Outcome Intelligence</b>\n\n"
+            "No rejected signal has reached a terminal lifecycle state yet. "
+            "The report will populate automatically as rejected signals close.",
+            parse_mode="HTML",
+        )
+        return
+
+    codes = "\n".join(
+        f"• <code>{item.code}</code> — {item.resolved} resolved · "
+        f"{item.avoided_losses} losses avoided · {item.missed_wins} wins missed · "
+        f"{item.net_shadow_r:+.2f}R shadow"
+        for item in report["by_code"]
+    ) or "• No data"
+    recent = "\n".join(
+        f"• #{row['signal_id']} {row['symbol']} {row['side']} · "
+        f"<code>{row.get('rejection_code') or 'UNKNOWN'}</code> · "
+        f"{float(row.get('shadow_realized_r') or 0):+.2f}R"
+        for row in report["recent"]
+    ) or "• No data"
+    text = f"""🛡 <b>Guardrail Outcome Intelligence</b>
+
+Window: <b>{report['days']} days</b>
+Resolved rejected signals: <b>{report['resolved']}</b>
+Losses avoided: <b>{report['avoided_losses']}</b>
+Profitable trades missed: <b>{report['missed_wins']}</b>
+Counterfactual net: <b>{report['net_shadow_r']:+.2f}R</b>
+Counterfactual average: <b>{report['average_shadow_r']:+.2f}R</b>
+
+🧱 <b>Guardrail value by reason</b>
+{codes}
+
+🕘 <b>Recently resolved rejections</b>
+{recent}
+
+Shadow outcomes are diagnostic only. They never modify equity, realized PnL, or live risk limits."""
     await message.answer(text, parse_mode="HTML")

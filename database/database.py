@@ -359,6 +359,10 @@ def create_tables() -> None:
         for name, definition in {
             "realized_pnl": "DOUBLE PRECISION DEFAULT 0",
             "last_signal_status": "TEXT",
+            "shadow_exit_price": "DOUBLE PRECISION",
+            "shadow_realized_r": "DOUBLE PRECISION",
+            "shadow_result": "TEXT",
+            "shadow_closed_at": "TEXT",
         }.items():
             _add_column(conn, "paper_positions", name, definition)
         _add_column(conn, "execution_events", "realized_pnl_delta", "DOUBLE PRECISION DEFAULT 0")

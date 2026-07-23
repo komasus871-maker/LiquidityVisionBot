@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.5.0 — Guardrail Outcome Intelligence
+
+- Added zero-exposure shadow lifecycle tracking for rejected paper executions.
+- Added counterfactual R attribution by rejection guardrail.
+- Added `/copy_guardrails` report for losses avoided, wins missed, and net shadow expectancy.
+- Added additive database migration fields with PostgreSQL and SQLite compatibility.
+- Preserved fail-closed LIVE execution and all existing risk limits.
+
+
 ## 9.4.0 — Execution Intelligence & Rejection Analytics
 
 - Added a read-only copy-execution decision funnel for accepted and rejected attempts.

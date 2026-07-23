@@ -140,6 +140,10 @@ class CopyTradingService:
                 updated += int(outcome == "UPDATED")
                 closed += int(outcome == "CLOSED")
                 skipped += int(outcome == "SKIPPED")
+            elif existing and existing["status"] == "REJECTED":
+                outcome = self._sync_rejected(existing, signal)
+                updated += int(outcome == "UPDATED")
+                skipped += int(outcome == "SKIPPED")
             else:
                 skipped += 1
         return {"opened": opened, "updated": updated, "closed": closed, "rejected": rejected, "skipped": skipped}
@@ -238,12 +242,14 @@ class CopyTradingService:
             with connect() as conn:
                 conn.execute(
                     """INSERT INTO paper_positions(
-                           telegram_id,signal_id,symbol,timeframe,side,status,rejection_code,rejection_reason,
-                           last_signal_status,created_at,updated_at
-                       ) VALUES(?,?,?,?,?,'REJECTED',?,?,?,?,?)
+                           telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,stop_price,
+                           rejection_code,rejection_reason,last_signal_status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,'REJECTED',?,?,?,?,?,?,?,?)
                        ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
                     (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
-                     decision.code, decision.reason, signal.get("status"), now, now),
+                     float(signal.get("entry") or 0.0), float(signal.get("current_price") or signal.get("entry") or 0.0),
+                     float(signal.get("stop") or 0.0), decision.code, decision.reason,
+                     signal.get("status"), now, now),
                 )
                 self._event_conn(conn, telegram_id, signal["id"], "REJECTED", None, 0.0, {
                     "code": decision.code, "reason": decision.reason,
@@ -275,6 +281,36 @@ class CopyTradingService:
                 "training_risk_multiplier": decision.risk_multiplier,
             })
         return "OPEN"
+
+    def _sync_rejected(self, position: dict[str, Any], signal: dict[str, Any]) -> str:
+        """Resolve the counterfactual outcome without ever creating exposure or PnL."""
+        if position.get("shadow_closed_at"):
+            return "SKIPPED"
+        signal_status = str(signal.get("status") or "").upper()
+        terminal = signal_status in self.TERMINAL_SIGNAL_STATUSES or bool(signal.get("closed_at"))
+        if not terminal:
+            return "SKIPPED"
+        price = float(signal.get("exit_price") or signal.get("current_price") or signal.get("entry") or 0.0)
+        entry = float(signal.get("entry") or position.get("entry_price") or 0.0)
+        stop = float(signal.get("stop") or position.get("stop_price") or 0.0)
+        side = str(signal.get("side") or position.get("side") or "").upper()
+        risk = abs(entry - stop)
+        shadow_r = 0.0 if risk <= 0 else (((price - entry) if side == "LONG" else (entry - price)) / risk)
+        now = _now()
+        result = str(signal.get("result") or signal_status)
+        with connect() as conn:
+            conn.execute(
+                """UPDATE paper_positions SET shadow_exit_price=?,shadow_realized_r=?,shadow_result=?,
+                   shadow_closed_at=?,last_signal_status=?,updated_at=? WHERE id=?""",
+                (price, shadow_r, result, now, signal_status, now, position["id"]),
+            )
+            self._event_conn(conn, int(position["telegram_id"]), int(position["signal_id"]),
+                             "REJECTION_RESOLVED", price, 0.0, {
+                                 "rejection_code": position.get("rejection_code") or "UNKNOWN",
+                                 "shadow_realized_r": shadow_r, "shadow_result": result,
+                                 "diagnostic_only": True,
+                             })
+        return "UPDATED"
 
     def _sync_existing(self, position: dict[str, Any], signal: dict[str, Any]) -> str:
         now = _now()
