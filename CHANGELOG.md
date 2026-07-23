@@ -1,3 +1,11 @@
+# v9.8.8 — Autonomous Demo Execution Core
+
+- Added automatic BingX demo MARKET/LIMIT order submission without manual confirmation.
+- Added demo cancellation and status synchronization.
+- Added execution serialization, deterministic idempotency keys, audit JSONL, runtime kill switch and circuit breaker.
+- Preserved the v9.8.7 fail-closed safety validator and hard rejection of non-demo credentials.
+- Live execution remains unavailable.
+
 # Changelog
 
 ## 9.8.7 — Authenticated Safety Core

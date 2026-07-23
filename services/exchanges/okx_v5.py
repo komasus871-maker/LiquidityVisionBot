@@ -106,7 +106,7 @@ class OkxV5Adapter(ExchangeAdapter):
         payload = {key: value for key, value in (params or {}).items() if value is not None}
         query = urlencode(payload, doseq=True)
         request_path = path + (f"?{query}" if query else "")
-        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.7"}
+        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.8"}
         if self.credentials.testnet:
             headers["x-simulated-trading"] = "1"
         if signed:

@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.8.7"
-    assert RELEASE_NAME == "Authenticated Safety Core"
+    assert APP_VERSION == "9.8.8"
+    assert RELEASE_NAME == "Autonomous Demo Execution Core"
 
 
 @pytest.mark.asyncio

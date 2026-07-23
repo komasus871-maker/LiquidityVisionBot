@@ -10,6 +10,7 @@ from aiogram.types import Message
 
 from services.exchanges.base import ExchangeConfigurationError, ExchangeError
 from services.exchanges.manager import ExchangeManager
+from services.exchanges.execution import DemoExecutionManager, DemoOrderRequest
 from services.exchanges.models import ExchangeName, ExchangeStatus
 from services.exchanges.safety import (
     ExecutionSafetyPolicy,
@@ -24,6 +25,9 @@ registry = build_exchange_registry()
 manager = ExchangeManager(
     registry,
     operation_timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25")),
+)
+execution_manager = DemoExecutionManager(
+    registry, timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25"))
 )
 
 _STATUS_LABELS = {
@@ -73,8 +77,8 @@ async def _adapter_call(exchange: ExchangeName, operation: str, *args):
 async def exchanges_status(message: Message) -> None:
     lines = [
         "🔌 <b>Exchange Foundation</b>", "",
-        "v9.8.7 adds authenticated account snapshots and a fail-closed execution safety preflight.",
-        "Order submission remains unavailable: this release validates intent but cannot execute it.", "",
+        "v9.8.8 adds automatic BingX demo execution with queueing, idempotency, audit and circuit breaking.",
+        "Live execution remains unavailable. Demo orders may execute automatically when explicitly enabled.", "",
     ]
     for exchange in registry.available():
         health = await _adapter_call(exchange, "health")
@@ -94,7 +98,11 @@ async def exchanges_status(message: Message) -> None:
         "<code>/exchange_symbol [okx|bingx|bybit|binance] BTCUSDT</code>",
         "<code>/exchange_account [okx|bingx]</code>",
         "<code>/exchange_safety</code>",
-        "<code>/exchange_preflight [okx|bingx] BTCUSDT BUY 0.001 60000 3</code>", "",
+        "<code>/exchange_preflight [okx|bingx] BTCUSDT BUY 0.001 60000 3</code>",
+        "<code>/demo_order bingx BTCUSDT BUY MARKET 0.001 60000 3</code>",
+        "<code>/demo_cancel bingx BTCUSDT ORDER_ID</code>",
+        "<code>/demo_status bingx BTCUSDT ORDER_ID</code>",
+        "<code>/demo_kill</code> · <code>/demo_resume</code>", "",
         "🔒 API secrets stay in environment variables and are never stored in the database.",
     ])
     await message.answer("\n".join(lines), parse_mode="HTML")
@@ -202,7 +210,8 @@ async def exchange_safety(message: Message) -> None:
         f"Maximum leverage: <code>{policy.max_leverage}x</code>\n"
         f"Maximum open positions: <code>{policy.max_open_positions}</code>\n"
         f"Allowed symbols: <code>{escape(symbols)}</code>\n\n"
-        "This release only validates proposed orders. It cannot submit them.",
+        f"Demo execution: <b>{'ENABLED' if execution_manager.enabled else 'LOCKED'}</b>\n"
+        "Live execution remains unavailable.",
         parse_mode="HTML",
     )
 
@@ -280,4 +289,99 @@ async def exchange_preflight(message: Message) -> None:
         f"{escape(portfolio_note)}\n"
         "🔒 Validation only. No order was sent.",
         parse_mode="HTML",
+    )
+
+
+@router.message(Command("demo_order"))
+async def demo_order(message: Message) -> None:
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if exchange is not ExchangeName.BINGX or len(args) < 6:
+        await message.answer(
+            "Usage: <code>/demo_order bingx BTCUSDT BUY MARKET 0.001 60000 3</code>\n"
+            "Limit: <code>/demo_order bingx BTCUSDT BUY LIMIT 0.001 60000 3 59000</code>",
+            parse_mode="HTML",
+        )
+        return
+    symbol, side_raw, order_type, quantity_raw, reference_raw, leverage_raw, *extra = args
+    try:
+        side = OrderSide(side_raw.upper())
+        quantity = Decimal(quantity_raw)
+        reference_price = Decimal(reference_raw)
+        leverage = int(leverage_raw)
+        limit_price = Decimal(extra[0]) if order_type.upper() == "LIMIT" and extra else None
+    except (ValueError, ArithmeticError):
+        await message.answer("⚠️ Invalid demo order arguments.")
+        return
+    if order_type.upper() not in {"MARKET", "LIMIT"} or (order_type.upper() == "LIMIT" and limit_price is None):
+        await message.answer("⚠️ Supported types: MARKET or LIMIT; LIMIT requires a final price.")
+        return
+    try:
+        receipt = await execution_manager.submit(DemoOrderRequest(
+            exchange=exchange, symbol=symbol, side=side, order_type=order_type.upper(),
+            quantity=quantity, reference_price=reference_price, leverage=leverage,
+            limit_price=limit_price,
+        ))
+    except ExchangeError as exc:
+        await message.answer(f"⛔ <b>Demo execution failed</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    if not receipt.order:
+        violations = "\n".join(f"• <code>{escape(v)}</code>" for v in receipt.violations) or "• none"
+        await message.answer(f"⛔ <b>Demo order rejected</b>\n\n{violations}", parse_mode="HTML")
+        return
+    order = receipt.order
+    await message.answer(
+        f"✅ <b>BingX demo order accepted automatically</b>\n\n"
+        f"Order ID: <code>{escape(order.order_id or 'pending')}</code>\n"
+        f"Client ID: <code>{escape(receipt.client_order_id)}</code>\n"
+        f"{escape(order.symbol or symbol)} · {escape(order.side or side.value)} · {escape(order.order_type or order_type.upper())}\n"
+        f"Quantity: <code>{_money(order.quantity or quantity)}</code>\n"
+        f"Status: <b>{escape(order.status)}</b>\n"
+        f"Latency: <code>{receipt.latency_ms or 0} ms</code>\n\n"
+        "🔒 Demo account only. No manual confirmation was required.", parse_mode="HTML"
+    )
+
+
+@router.message(Command("demo_cancel"))
+async def demo_cancel(message: Message) -> None:
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if exchange is not ExchangeName.BINGX or len(args) < 2:
+        await message.answer("Usage: <code>/demo_cancel bingx BTCUSDT ORDER_ID</code>", parse_mode="HTML")
+        return
+    try:
+        order = await execution_manager.cancel(exchange, args[0], args[1])
+    except ExchangeError as exc:
+        await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer(f"🛑 Demo order <code>{escape(order.order_id)}</code>: <b>{escape(order.status)}</b>", parse_mode="HTML")
+
+
+@router.message(Command("demo_status"))
+async def demo_status(message: Message) -> None:
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if exchange is not ExchangeName.BINGX or len(args) < 2:
+        await message.answer("Usage: <code>/demo_status bingx BTCUSDT ORDER_ID</code>", parse_mode="HTML")
+        return
+    try:
+        order = await execution_manager.status(exchange, args[0], args[1])
+    except ExchangeError as exc:
+        await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer(
+        f"📍 <b>Demo order status</b>\n\nID: <code>{escape(order.order_id)}</code>\n"
+        f"Status: <b>{escape(order.status)}</b>\nFilled: <code>{_money(order.executed_quantity)}/{_money(order.quantity)}</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("demo_kill"))
+async def demo_kill(message: Message) -> None:
+    execution_manager.kill()
+    await message.answer("🛑 <b>Demo execution killed for this runtime.</b>", parse_mode="HTML")
+
+
+@router.message(Command("demo_resume"))
+async def demo_resume(message: Message) -> None:
+    execution_manager.resume()
+    await message.answer(
+        "▶️ Runtime kill switch released. Environment policy still applies.", parse_mode="HTML"
     )

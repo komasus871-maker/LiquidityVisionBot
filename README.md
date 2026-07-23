@@ -1,9 +1,9 @@
-# Liquidity Vision Intelligence v9.8.7
+# Liquidity Vision Intelligence v9.8.8
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
-## v9.8.7 — Authenticated Safety Core
+## v9.8.8 — Authenticated Safety Core
 
 - Captures authenticated balances, positions, and open orders through one fail-closed `ExchangeManager` snapshot.
 - Adds `/exchange_account`, `/exchange_safety`, and `/exchange_preflight`.
@@ -151,3 +151,8 @@ pytest -q
 - Added schema migration registry foundation.
 - Added production smoke test.
 - Cleaned duplicate nested source tree and embedded Git metadata from release archive.
+
+
+## v9.8.8 Autonomous Demo Execution
+
+See `V9_8_8_AUTONOMOUS_DEMO_EXECUTION.md`. BingX demo orders can be submitted automatically when `DEMO_EXECUTION_ENABLED=true`; live writes remain blocked.

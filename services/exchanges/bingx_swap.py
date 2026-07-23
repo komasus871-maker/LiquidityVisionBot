@@ -98,9 +98,9 @@ class BingXSwapAdapter(ExchangeAdapter):
         if self._owns_session and self._session is not None and not self._session.closed:
             await self._session.close()
 
-    async def _request_once(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False) -> Any:
+    async def _request_once(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False, method: str = "GET") -> Any:
         payload = {key: value for key, value in (params or {}).items() if value is not None}
-        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.7"}
+        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.8"}
         if signed:
             if not self.configured:
                 raise ExchangeConfigurationError("BINGX_API_KEY and BINGX_API_SECRET are required")
@@ -114,7 +114,7 @@ class BingXSwapAdapter(ExchangeAdapter):
 
         session = await self._client()
         try:
-            async with session.get(f"{self.base_url}{path}", params=payload, headers=headers) as response:
+            async with session.request(method.upper(), f"{self.base_url}{path}", params=payload, headers=headers) as response:
                 raw = await response.text()
                 status = response.status
         except asyncio.TimeoutError as exc:
@@ -140,11 +140,11 @@ class BingXSwapAdapter(ExchangeAdapter):
             raise ExchangeRequestError(f"BingX API error {status} ({code}): {message[:240]}")
         return data.get("data", data)
 
-    async def _request(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False) -> Any:
+    async def _request(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False, method: str = "GET") -> Any:
         last_error: ExchangeRequestError | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
-                return await self._request_once(path, params=params, signed=signed)
+                return await self._request_once(path, params=params, signed=signed, method=method)
             except (ExchangeTimeoutError, ExchangeRateLimitError, ExchangeResponseError, ExchangeRequestError) as exc:
                 if isinstance(exc, (ExchangeAuthenticationError, ExchangeConfigurationError)):
                     raise
@@ -249,3 +249,67 @@ class BingXSwapAdapter(ExchangeAdapter):
         if self.symbol_cache_ttl_seconds > 0:
             _SYMBOL_RULES_CACHE[cache_key] = (now, rules)
         return rules
+
+    @staticmethod
+    def _parse_order(item: Mapping[str, Any]) -> ExchangeOrder:
+        return ExchangeOrder(
+            order_id=str(item.get("orderId") or item.get("orderID") or ""),
+            symbol=str(item.get("symbol") or ""),
+            side=str(item.get("side") or "").upper(),
+            order_type=str(item.get("type") or item.get("orderType") or "").upper(),
+            status=str(item.get("status") or "NEW").upper(),
+            quantity=_decimal(item.get("origQty") or item.get("quantity")),
+            executed_quantity=_decimal(item.get("executedQty") or item.get("executedQuantity")),
+            price=_decimal(item.get("price")) if _decimal(item.get("price")) > 0 else None,
+            stop_price=_decimal(item.get("stopPrice")) if _decimal(item.get("stopPrice")) > 0 else None,
+            reduce_only=str(item.get("reduceOnly", "false")).lower() in {"1", "true", "yes"},
+        )
+
+    async def create_demo_order(
+        self, *, symbol: str, side: str, order_type: str, quantity: Decimal,
+        price: Decimal | None = None, leverage: int = 1, reduce_only: bool = False,
+        position_side: str | None = None, client_order_id: str | None = None,
+    ) -> ExchangeOrder:
+        if not self.credentials.testnet:
+            raise ExchangeConfigurationError("BingX demo execution refuses non-demo credentials")
+        normalized = _symbol(symbol)
+        side = side.upper()
+        position_side = (position_side or ("LONG" if side == "BUY" else "SHORT")).upper()
+        await self._request(
+            "/openApi/swap/v2/trade/leverage",
+            params={"symbol": normalized, "side": position_side, "leverage": leverage},
+            signed=True, method="POST",
+        )
+        payload = {
+            "symbol": normalized, "side": side, "positionSide": position_side,
+            "type": order_type.upper(), "quantity": str(quantity),
+            "price": str(price) if price is not None else None,
+            "timeInForce": "GTC" if order_type.upper() == "LIMIT" else None,
+            "reduceOnly": str(bool(reduce_only)).lower(),
+            "clientOrderID": client_order_id,
+        }
+        data = await self._request("/openApi/swap/v2/trade/order", params=payload, signed=True, method="POST")
+        item = data.get("order", data) if isinstance(data, dict) else {}
+        return self._parse_order(item)
+
+    async def cancel_demo_order(self, *, symbol: str, order_id: str) -> ExchangeOrder:
+        if not self.credentials.testnet:
+            raise ExchangeConfigurationError("BingX demo cancellation refuses non-demo credentials")
+        data = await self._request(
+            "/openApi/swap/v2/trade/order",
+            params={"symbol": _symbol(symbol), "orderId": order_id}, signed=True, method="DELETE",
+        )
+        item = data.get("order", data) if isinstance(data, dict) else {}
+        order = self._parse_order(item)
+        if not order.order_id:
+            order = ExchangeOrder(order_id, _symbol(symbol), "", "", "CANCELLED", Decimal("0"), Decimal("0"))
+        return order
+
+    async def demo_order_status(self, *, symbol: str, order_id: str) -> ExchangeOrder:
+        data = await self._request(
+            "/openApi/swap/v2/trade/order",
+            params={"symbol": _symbol(symbol), "orderId": order_id}, signed=True, method="GET",
+        )
+        item = data.get("order", data) if isinstance(data, dict) else {}
+        return self._parse_order(item)
+

@@ -1,2 +1,2 @@
-APP_VERSION = "9.8.7"
-RELEASE_NAME = "Authenticated Safety Core"
+APP_VERSION = "9.8.8"
+RELEASE_NAME = "Autonomous Demo Execution Core"

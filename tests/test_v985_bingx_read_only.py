@@ -9,7 +9,7 @@ from version import APP_VERSION
 
 
 def test_version_and_registry(monkeypatch):
-    assert APP_VERSION == "9.8.7"
+    assert APP_VERSION == "9.8.8"
     registry = build_exchange_registry()
     assert ExchangeName.BINGX in registry.available()
     adapter = registry.create(ExchangeName.BINGX)

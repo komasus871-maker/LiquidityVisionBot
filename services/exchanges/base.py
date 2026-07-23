@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from decimal import Decimal
+
 from services.exchanges.models import (
     ExchangeBalance,
     ExchangeHealth,
@@ -61,6 +63,20 @@ class ExchangeAdapter(ABC):
     @abstractmethod
     async def symbol_rules(self, symbol: str) -> SymbolRules:
         raise NotImplementedError
+
+
+    async def create_demo_order(
+        self, *, symbol: str, side: str, order_type: str, quantity: Decimal,
+        price: Decimal | None = None, leverage: int = 1, reduce_only: bool = False,
+        position_side: str | None = None, client_order_id: str | None = None,
+    ) -> ExchangeOrder:
+        raise ExchangeConfigurationError(f"{type(self).__name__} does not support demo execution")
+
+    async def cancel_demo_order(self, *, symbol: str, order_id: str) -> ExchangeOrder:
+        raise ExchangeConfigurationError(f"{type(self).__name__} does not support demo execution")
+
+    async def demo_order_status(self, *, symbol: str, order_id: str) -> ExchangeOrder:
+        raise ExchangeConfigurationError(f"{type(self).__name__} does not support demo execution")
 
     async def close(self) -> None:
         """Release transport resources. Stateless adapters may keep the default no-op."""
