@@ -28,7 +28,7 @@ def test_release_and_registry_transport_settings(monkeypatch):
     monkeypatch.setenv("EXCHANGE_READ_TIMEOUT", "9")
     monkeypatch.setenv("EXCHANGE_MAX_ATTEMPTS", "4")
     adapter = build_exchange_registry().create("okx")
-    assert APP_VERSION == "9.9.0"
+    assert APP_VERSION == "9.9.1"
     assert RELEASE_NAME == "Multi-User Exchange Accounts"
     assert adapter.connect_timeout_seconds == 2.5
     assert adapter.read_timeout_seconds == 9

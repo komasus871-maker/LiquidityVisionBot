@@ -28,7 +28,7 @@ class StubOkx(OkxV5Adapter):
 def test_release_registry_and_symbol_normalization(monkeypatch):
     monkeypatch.setenv("OKX_DEMO", "true")
     registry = build_exchange_registry()
-    assert APP_VERSION == "9.9.0"
+    assert APP_VERSION == "9.9.1"
     assert "Multi-User Exchange Accounts" in RELEASE_NAME
     assert ExchangeName.OKX in registry.available()
     assert isinstance(registry.create("okx"), OkxV5Adapter)

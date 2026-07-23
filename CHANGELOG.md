@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.9.1 — BingX Hedge Execution Hotfix
+
+- Fixed BingX error 109400 in hedge mode by omitting `reduceOnly` from normal opening orders.
+- Preserved explicit `reduceOnly=true` support for future close/reduce flows.
+- Clarified `/demo_order` argument validation and retained per-user encrypted execution credentials.
+
 ## 9.9.0 — Multi-User Exchange Accounts
 
 - Hotfixed BingX error 100001 by signing parameters in the exact order sent on the wire.

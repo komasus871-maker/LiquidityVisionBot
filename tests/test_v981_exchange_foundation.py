@@ -30,7 +30,7 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.0"
+    assert APP_VERSION == "9.9.1"
     assert "Multi-User Exchange Accounts" in RELEASE_NAME
 
 

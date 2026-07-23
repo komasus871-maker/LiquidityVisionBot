@@ -293,9 +293,13 @@ class BingXSwapAdapter(ExchangeAdapter):
             "type": order_type.upper(), "quantity": str(quantity),
             "price": str(price) if price is not None else None,
             "timeInForce": "GTC" if order_type.upper() == "LIMIT" else None,
-            "reduceOnly": str(bool(reduce_only)).lower(),
             "clientOrderID": client_order_id,
         }
+        # BingX hedge mode rejects the reduceOnly field even when its value is
+        # false (error 109400).  Omit it for normal opening orders and send it
+        # only when the caller explicitly requests a reduce-only close.
+        if reduce_only:
+            payload["reduceOnly"] = "true"
         data = await self._request("/openApi/swap/v2/trade/order", params=payload, signed=True, method="POST")
         item = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(item)

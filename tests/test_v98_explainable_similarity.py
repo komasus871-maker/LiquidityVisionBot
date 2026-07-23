@@ -7,7 +7,7 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.9.0"
+    assert APP_VERSION == "9.9.1"
     assert RELEASE_NAME == "Multi-User Exchange Accounts"
 
 
