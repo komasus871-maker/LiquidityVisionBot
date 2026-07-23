@@ -100,21 +100,29 @@ class BingXSwapAdapter(ExchangeAdapter):
 
     async def _request_once(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False, method: str = "GET") -> Any:
         payload = {key: value for key, value in (params or {}).items() if value is not None}
-        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.8"}
+        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.9.1"}
+        request_params: list[tuple[str, Any]] = list(payload.items())
         if signed:
             if not self.configured:
                 raise ExchangeConfigurationError("BINGX_API_KEY and BINGX_API_SECRET are required")
             payload.setdefault("timestamp", int(time.time() * 1000))
             payload.setdefault("recvWindow", self.recv_window)
-            query = urlencode(sorted(payload.items()))
-            payload["signature"] = hmac.new(
-                self.credentials.api_secret.encode(), query.encode(), hashlib.sha256
+            # BingX validates the signature against the exact query-string order sent
+            # over the wire.  Signing sorted parameters but sending insertion-order
+            # parameters produces error 100001 (signature mismatch).
+            request_params = list(payload.items())
+            query = urlencode(request_params)
+            signature = hmac.new(
+                self.credentials.api_secret.encode("utf-8"),
+                query.encode("utf-8"),
+                hashlib.sha256,
             ).hexdigest()
+            request_params.append(("signature", signature))
             headers["X-BX-APIKEY"] = self.credentials.api_key
 
         session = await self._client()
         try:
-            async with session.request(method.upper(), f"{self.base_url}{path}", params=payload, headers=headers) as response:
+            async with session.request(method.upper(), f"{self.base_url}{path}", params=request_params, headers=headers) as response:
                 raw = await response.text()
                 status = response.status
         except asyncio.TimeoutError as exc:

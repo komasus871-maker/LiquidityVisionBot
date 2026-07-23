@@ -2,6 +2,9 @@
 
 ## 9.9.0 — Multi-User Exchange Accounts
 
+- Hotfixed BingX error 100001 by signing parameters in the exact order sent on the wire.
+- Clarified that the BingX adapter targets USDT-M perpetual/swap permissions, not spot-only permissions.
+
 - Added encrypted per-user exchange credential storage keyed by Telegram user ID and exchange.
 - Added `/connect_exchange`, `/disconnect_exchange`, and `/my_exchanges`.
 - Routed authenticated balances, positions, orders, account snapshots, preflight portfolio state, and BingX demo execution through the sender's own credentials.
