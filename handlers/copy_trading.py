@@ -63,7 +63,8 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/genome [signal_id]</code> — inspect Strategy Genome
 <code>/panic</code> — close paper positions and disable execution
 
-🧬 v9.8.0 explains similarity by feature groups, differences and sample reliability.
+🧬 v9.8.1 keeps explainable similarity and adds a read-only Binance exchange foundation.
+🔌 Use /exchanges to inspect connectivity; LIVE order submission is not available.
 🔒 LIVE execution remains fail-closed."""
 
 

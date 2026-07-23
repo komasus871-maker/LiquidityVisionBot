@@ -1,2 +1,2 @@
-APP_VERSION = "9.8.0"
-RELEASE_NAME = "Explainable Similarity Intelligence"
+APP_VERSION = "9.8.1"
+RELEASE_NAME = "Exchange Foundation: Binance Read-Only"

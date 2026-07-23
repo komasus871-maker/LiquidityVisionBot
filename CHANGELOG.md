@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.8.1 — Exchange Foundation: Binance Read-Only
+
+- Added a typed, async, read-only `ExchangeAdapter` contract and normalized exchange models/errors.
+- Added an environment-backed exchange registry that never persists API credentials.
+- Added a working Binance USD-M Futures adapter for health, balances, positions, open orders and symbol execution rules.
+- Added `/exchanges`, `/exchange_balance`, `/exchange_positions`, `/exchange_orders`, and `/exchange_symbol`.
+- LIVE execution remains impossible by contract: no order write methods exist in this release.
+- Added mocked exchange regression tests and deployment configuration documentation.
+
 ## 9.8.0 — Explainable Similarity Intelligence
 
 - Added feature-level similarity explanations with weighted Structure, Liquidity, Market, Indicators, and Execution breakdowns.

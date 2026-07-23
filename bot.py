@@ -15,6 +15,7 @@ from handlers.admin import router as admin_router
 from handlers.analyze import router as analyze_router
 from handlers.copy_trading import router as copy_trading_router
 from handlers.fear import router as fear_router
+from handlers.exchanges import router as exchanges_router
 from handlers.help import router as help_router
 from handlers.journal import router as journal_router
 from handlers.intelligence_hub import router as intelligence_hub_router
@@ -47,6 +48,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(price_router)
     dp.include_router(analyze_router)
     dp.include_router(copy_trading_router)
+    dp.include_router(exchanges_router)
     dp.include_router(profile_router)
     dp.include_router(scanner_router)
     dp.include_router(fear_router)

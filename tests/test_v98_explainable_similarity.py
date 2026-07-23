@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.8.0"
-    assert RELEASE_NAME == "Explainable Similarity Intelligence"
+    assert APP_VERSION == "9.8.1"
+    assert RELEASE_NAME == "Exchange Foundation: Binance Read-Only"
 
 
 def test_similarity_details_explain_groups_and_features():

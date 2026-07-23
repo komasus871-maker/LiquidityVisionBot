@@ -1,7 +1,11 @@
-# Liquidity Vision Intelligence v9.8.0
+# Liquidity Vision Intelligence v9.8.1
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
+
+## v9.8.1 — Exchange Foundation: Binance Read-Only
+
+The platform now has a typed async exchange boundary and a working Binance USD-M Futures read-only adapter. `/exchanges` checks public reachability and authenticated access; balance, positions, open orders and symbol rules can be inspected without exposing credentials. No LIVE order method exists yet, so Paper Copy Trading remains the only execution path.
 
 ## v9.8.0 — Strategy Genome & Similar Trade Intelligence
 
@@ -51,7 +55,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.8.0
+APP_VERSION=9.8.1
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
