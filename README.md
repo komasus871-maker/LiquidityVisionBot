@@ -1,9 +1,9 @@
-# Liquidity Vision Intelligence v9.7.0
+# Liquidity Vision Intelligence v9.8.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
-## v9.7.0 — Strategy Genome & Similar Trade Intelligence
+## v9.8.0 — Strategy Genome & Similar Trade Intelligence
 
 Every paper execution attempt now stores an immutable Strategy Genome built from the full available signal context: structure, liquidity, BOS/CHOCH, FVG/OB, regime, session, volatility, execution quality and indicator state. `/copy_similar [signal_id]` searches resolved executed and zero-exposure shadow trades, then reports Win Rate, average R, MFE, MAE and closest Replay IDs.
 
@@ -51,7 +51,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.7.0
+APP_VERSION=9.8.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

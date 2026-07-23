@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import escape
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -57,10 +59,11 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_training</code> — adaptive learning report
 <code>/copy_rejections</code> — execution rejection intelligence
 <code>/copy_guardrails</code> — rejected-signal outcome report
-<code>/copy_similar [signal_id]</code> — similar historical executions
+<code>/copy_similar [signal_id]</code> — explainable similar-trade intelligence
+<code>/genome [signal_id]</code> — inspect Strategy Genome
 <code>/panic</code> — close paper positions and disable execution
 
-🧬 v9.7.0 snapshots Strategy Genomes and retrieves similar resolved trades.
+🧬 v9.8.0 explains similarity by feature groups, differences and sample reliability.
 🔒 LIVE execution remains fail-closed."""
 
 
@@ -279,6 +282,18 @@ Shadow outcomes are diagnostic only. They never modify equity, realized PnL, or 
     await message.answer(text, parse_mode="HTML")
 
 
+def _render_feature_list(items: list[str]) -> str:
+    return ", ".join(escape(item) for item in items) if items else "—"
+
+
+def _render_genome_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float):
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return escape(str(value))
+
+
 @router.message(Command("copy_similar"))
 async def copy_similar(message: Message):
     parts = (message.text or "").split()
@@ -289,7 +304,7 @@ async def copy_similar(message: Message):
         )
     except (ValueError, LookupError) as exc:
         await message.answer(
-            f"🧬 <b>Similar Trade Intelligence</b>\n\n{exc}\n"
+            f"🧬 <b>Similar Trade Intelligence</b>\n\n{escape(str(exc))}\n"
             "Usage: <code>/copy_similar</code> or <code>/copy_similar 123</code>",
             parse_mode="HTML",
         )
@@ -304,22 +319,73 @@ async def copy_similar(message: Message):
         )
         return
 
-    matches = "\n".join(
-        f"• Replay <code>#{item.signal_id}</code> · {item.symbol} {item.side} {item.timeframe.upper()} · "
-        f"{item.similarity:.0f}% · {item.realized_r:+.2f}R · {item.source}"
+    breakdown = "\n".join(
+        f"• {escape(group)}: <b>{score:.0f}%</b>"
+        for group, score in report["breakdown"].items()
+    ) or "• Not enough shared features"
+    matches = "\n\n".join(
+        f"• Replay <code>#{item.signal_id}</code> · {escape(item.symbol)} {escape(item.side)} {escape(item.timeframe.upper())}\n"
+        f"  Similarity: <b>{item.similarity:.0f}%</b> · {item.realized_r:+.2f}R · {escape(item.source)}\n"
+        f"  Matched: {_render_feature_list(list(item.matched_features))}\n"
+        f"  Different: {_render_feature_list(list(item.different_features))}"
         for item in report["matches"]
     )
+    confidence = report["statistical_confidence"]
     text = f"""🧬 <b>Similar Trade Intelligence · #{report['signal_id']}</b>
 
 Found: <b>{report['found']} similar resolved trades</b>
+Displayed: <b>{report['shown']} closest replays</b>
+Average similarity: <b>{report['average_similarity']:.1f}%</b>
+Statistical confidence: <b>{confidence['level']}</b> ({confidence['score']:.0f}/100)
 Win rate: <b>{report['win_rate']:.1f}%</b>
 Average R: <b>{report['average_r']:+.2f}R</b>
 Average MFE: <b>{report['average_mfe']:+.2f}%</b>
 Average MAE: <b>{report['average_mae']:+.2f}%</b>
 Genome: <code>{report['fingerprint']}</code>
 
+📊 <b>Similarity Breakdown</b>
+{breakdown}
+
+✅ <b>Top matching features</b>
+{_render_feature_list(report['top_matching_features'])}
+
+⚠️ <b>Largest differences</b>
+{_render_feature_list(report['largest_differences'])}
+
 🎞 <b>Closest Replays</b>
 {matches}
 
-Executed and zero-exposure shadow outcomes are both included. Open trades are excluded to prevent outcome leakage."""
+Executed and zero-exposure shadow outcomes are included. Open trades are excluded to prevent outcome leakage."""
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("genome"))
+async def genome(message: Message):
+    parts = (message.text or "").split()
+    try:
+        report = (
+            similarity_service.genome_for_signal(int(parts[1]))
+            if len(parts) > 1 else similarity_service.latest_genome(message.from_user.id)
+        )
+    except (ValueError, LookupError) as exc:
+        await message.answer(
+            f"🧬 <b>Strategy Genome</b>\n\n{escape(str(exc))}\n"
+            "Usage: <code>/genome</code> or <code>/genome 123</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    sections: list[str] = []
+    for group, values in report["groups"].items():
+        rows = "\n".join(
+            f"• {escape(key.replace('_', ' ').title())}: <b>{_render_genome_value(value)}</b>"
+            for key, value in values.items()
+        )
+        sections.append(f"<b>{escape(group)}</b>\n{rows}")
+    text = (
+        f"🧬 <b>Strategy Genome · #{report['signal_id']}</b>\n\n"
+        f"Fingerprint: <code>{report['fingerprint']}</code>\n\n"
+        + "\n\n".join(sections)
+        + "\n\nThis is the normalized execution-time context used by Similarity Intelligence."
+    )
     await message.answer(text, parse_mode="HTML")

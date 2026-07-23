@@ -1,5 +1,16 @@
 # Changelog
 
+## 9.8.0 — Explainable Similarity Intelligence
+
+- Added feature-level similarity explanations with weighted Structure, Liquidity, Market, Indicators, and Execution breakdowns.
+- Added matched-feature and difference attribution for every closest Replay.
+- Added aggregate top matches, largest differences, average similarity, and sample-based statistical confidence.
+- Corrected report semantics so `Found` and performance metrics use the complete qualifying history while Telegram output remains bounded.
+- Added `/genome [signal_id]` for grouped inspection of the normalized Strategy Genome and fingerprint.
+- Preserved leakage protection: only closed paper and resolved zero-exposure shadow outcomes are eligible.
+- Preserved all copy guardrails, portfolio accounting, adaptive policy boundaries, and fail-closed LIVE execution.
+- Added v9.8 regression coverage and updated production documentation.
+
 ## 9.7.0 — Strategy Genome & Similar Trade Intelligence
 
 - Added deterministic Strategy Genome snapshots for every accepted and rejected copy attempt.
