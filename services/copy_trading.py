@@ -8,6 +8,7 @@ from database.database import connect
 from services.execution_models import PortfolioState, RiskProfile
 from services.execution_validator import ExecutionValidator
 from services.copy_training import CopyTrainingService
+from services.copy_similarity import CopySimilarityService
 
 
 def _now() -> str:
@@ -28,6 +29,7 @@ class CopyTradingService:
     def __init__(self) -> None:
         self.validator = ExecutionValidator()
         self.training = CopyTrainingService()
+        self.similarity = CopySimilarityService()
 
     def ensure_profile(self, telegram_id: int) -> dict[str, Any]:
         now = _now()
@@ -238,18 +240,19 @@ class CopyTradingService:
             training_policy=training_policy,
         )
         now = _now()
+        genome_json, genome_fingerprint = self.similarity.snapshot(signal)
         if not decision.allowed or decision.size is None:
             with connect() as conn:
                 conn.execute(
                     """INSERT INTO paper_positions(
                            telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,stop_price,
-                           rejection_code,rejection_reason,last_signal_status,created_at,updated_at
-                       ) VALUES(?,?,?,?,?,'REJECTED',?,?,?,?,?,?,?,?)
+                           rejection_code,rejection_reason,last_signal_status,genome_json,genome_fingerprint,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,'REJECTED',?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
                     (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
                      float(signal.get("entry") or 0.0), float(signal.get("current_price") or signal.get("entry") or 0.0),
                      float(signal.get("stop") or 0.0), decision.code, decision.reason,
-                     signal.get("status"), now, now),
+                     signal.get("status"), genome_json, genome_fingerprint, now, now),
                 )
                 self._event_conn(conn, telegram_id, signal["id"], "REJECTED", None, 0.0, {
                     "code": decision.code, "reason": decision.reason,
@@ -266,12 +269,12 @@ class CopyTradingService:
                 """INSERT INTO paper_positions(
                        telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,stop_price,
                        tp1,tp2,tp3,quantity,notional,risk_amount,initial_risk_r,remaining_fraction,
-                       realized_r,realized_pnl,last_signal_status,opened_at,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,1.0,1.0,0,0,?,?,?,?)
+                       realized_r,realized_pnl,last_signal_status,genome_json,genome_fingerprint,opened_at,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,1.0,1.0,0,0,?,?,?,?,?,?)
                    ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
                 (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
                  fill, fill, signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"],
-                 size.quantity, size.notional, size.risk_amount, signal.get("status"), now, now, now),
+                 size.quantity, size.notional, size.risk_amount, signal.get("status"), genome_json, genome_fingerprint, now, now, now),
             )
             self._event_conn(conn, telegram_id, signal["id"], "OPENED", fill, 0.0, {
                 "quantity": size.quantity, "notional": size.notional, "risk_amount": size.risk_amount,

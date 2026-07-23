@@ -8,12 +8,14 @@ from services.copy_trading import CopyTradingService
 from services.copy_training import CopyTrainingService
 from services.copy_execution_intelligence import CopyExecutionIntelligenceService
 from services.copy_guardrail_outcomes import CopyGuardrailOutcomeService
+from services.copy_similarity import CopySimilarityService
 
 router = Router()
 service = CopyTradingService()
 training_service = CopyTrainingService()
 intelligence_service = CopyExecutionIntelligenceService()
 outcome_service = CopyGuardrailOutcomeService()
+similarity_service = CopySimilarityService()
 
 
 def _status_text(profile: dict, stats: dict) -> str:
@@ -55,9 +57,10 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_training</code> — adaptive learning report
 <code>/copy_rejections</code> — execution rejection intelligence
 <code>/copy_guardrails</code> — rejected-signal outcome report
+<code>/copy_similar [signal_id]</code> — similar historical executions
 <code>/panic</code> — close paper positions and disable execution
 
-🧠 v9.5.0 measures the real counterfactual value of every resolved rejection.
+🧬 v9.7.0 snapshots Strategy Genomes and retrieves similar resolved trades.
 🔒 LIVE execution remains fail-closed."""
 
 
@@ -273,4 +276,50 @@ Counterfactual average: <b>{report['average_shadow_r']:+.2f}R</b>
 {recent}
 
 Shadow outcomes are diagnostic only. They never modify equity, realized PnL, or live risk limits."""
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("copy_similar"))
+async def copy_similar(message: Message):
+    parts = (message.text or "").split()
+    try:
+        report = (
+            similarity_service.report_for_signal(message.from_user.id, int(parts[1]))
+            if len(parts) > 1 else similarity_service.latest_report(message.from_user.id)
+        )
+    except (ValueError, LookupError) as exc:
+        await message.answer(
+            f"🧬 <b>Similar Trade Intelligence</b>\n\n{exc}\n"
+            "Usage: <code>/copy_similar</code> or <code>/copy_similar 123</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if report["found"] == 0:
+        await message.answer(
+            f"🧬 <b>Similar Trade Intelligence · #{report['signal_id']}</b>\n\n"
+            "No sufficiently similar resolved execution or shadow trade exists yet. "
+            "The Strategy Genome has been created and the report will improve as history grows.",
+            parse_mode="HTML",
+        )
+        return
+
+    matches = "\n".join(
+        f"• Replay <code>#{item.signal_id}</code> · {item.symbol} {item.side} {item.timeframe.upper()} · "
+        f"{item.similarity:.0f}% · {item.realized_r:+.2f}R · {item.source}"
+        for item in report["matches"]
+    )
+    text = f"""🧬 <b>Similar Trade Intelligence · #{report['signal_id']}</b>
+
+Found: <b>{report['found']} similar resolved trades</b>
+Win rate: <b>{report['win_rate']:.1f}%</b>
+Average R: <b>{report['average_r']:+.2f}R</b>
+Average MFE: <b>{report['average_mfe']:+.2f}%</b>
+Average MAE: <b>{report['average_mae']:+.2f}%</b>
+Genome: <code>{report['fingerprint']}</code>
+
+🎞 <b>Closest Replays</b>
+{matches}
+
+Executed and zero-exposure shadow outcomes are both included. Open trades are excluded to prevent outcome leakage."""
     await message.answer(text, parse_mode="HTML")

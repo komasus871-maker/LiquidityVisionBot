@@ -1,5 +1,15 @@
 # Changelog
 
+## 9.7.0 — Strategy Genome & Similar Trade Intelligence
+
+- Added deterministic Strategy Genome snapshots for every accepted and rejected copy attempt.
+- Added full-context similarity scoring across structure, liquidity, regime, timeframe, setup, indicators, volatility and execution features.
+- Added leakage-safe search over closed paper positions and resolved zero-exposure shadow outcomes only.
+- Added `/copy_similar [signal_id]` with Win Rate, average R, MFE, MAE and closest Replay IDs.
+- Added indexed genome persistence with additive SQLite/PostgreSQL-compatible migrations.
+- Preserved all guardrails, adaptive policy limits and fail-closed LIVE execution.
+- Added v9.7 regression coverage; full suite passes with 102 tests.
+
 ## 9.5.0 — Guardrail Outcome Intelligence
 
 - Added zero-exposure shadow lifecycle tracking for rejected paper executions.

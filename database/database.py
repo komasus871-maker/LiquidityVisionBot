@@ -363,6 +363,8 @@ def create_tables() -> None:
             "shadow_realized_r": "DOUBLE PRECISION",
             "shadow_result": "TEXT",
             "shadow_closed_at": "TEXT",
+            "genome_json": "TEXT",
+            "genome_fingerprint": "TEXT",
         }.items():
             _add_column(conn, "paper_positions", name, definition)
         _add_column(conn, "execution_events", "realized_pnl_delta", "DOUBLE PRECISION DEFAULT 0")
@@ -407,6 +409,7 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_copy_profiles_enabled ON copy_profiles(enabled,mode)",
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_owner_status ON paper_positions(telegram_id,status)",
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_signal ON paper_positions(signal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_positions_genome ON paper_positions(genome_fingerprint)",
             "CREATE INDEX IF NOT EXISTS idx_execution_events_owner ON execution_events(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
