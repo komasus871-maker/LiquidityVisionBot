@@ -1,5 +1,44 @@
 # Changelog
 
+## 9.8.5 — BingX Read-Only Reachability
+
+- Added a read-only BingX USDT-M perpetual adapter for health, contract rules, balances, positions, and open orders.
+- Added Render reachability diagnostics through BingX public server time.
+- Added `BTCUSDT` → `BTC-USDT` normalization and cached public contract rules.
+- Reused bounded retries, split timeouts, safe non-JSON diagnostics, and fail-fast authentication handling.
+- Added BingX environment configuration while keeping credentials environment-only.
+- Preserved the strict read-only contract: no order placement, modification, or cancellation methods exist.
+- Added v9.8.5 regression coverage and release documentation.
+
+## 9.8.4 — Resilient Exchange Transport
+
+- Added bounded exponential-backoff retries for OKX timeouts, transient transport failures, rate limits, malformed responses, and HTTP 5xx failures.
+- Added separate connect and read timeout configuration for more reliable Render networking.
+- Added typed timeout, rate-limit, and response errors while preserving the normalized ExchangeError contract.
+- Added a short-lived process cache for public OKX symbol rules to reduce redundant exchange requests.
+- Kept authentication/configuration failures fail-fast and preserved the strict read-only exchange contract.
+- Added v9.8.4 regression coverage and deployment configuration documentation.
+
+## 9.8.3 — Exchange Reachability: OKX Read-Only
+
+- Added a read-only OKX V5 adapter for public health, swap instrument rules, balances, positions, and pending orders.
+- Added OKX Demo Trading support through `x-simulated-trading: 1`; API credentials remain environment-only.
+- Added automatic `BTCUSDT` → `BTC-USDT-SWAP` normalization while accepting native OKX instrument IDs.
+- Added robust non-JSON/HTML response diagnostics with HTTP status and a bounded safe preview.
+- Added OKX as an independently diagnosed exchange and made it the default in the example configuration.
+- Preserved the read-only contract: no order placement, modification, or cancellation methods exist.
+- Added v9.8.3 regression coverage and release documentation.
+
+## 9.8.2 — Multi-Exchange Foundation: Bybit Read-Only
+
+- Added a working read-only Bybit V5 adapter for health, Unified wallet balances, linear positions, open orders, and symbol rules.
+- Added independent exchange health classification: CONNECTED, PUBLIC ONLY, NOT CONFIGURED, GEO BLOCKED, AUTH FAILED, and UNAVAILABLE.
+- Binance HTTP 451 restricted-location responses now report GEO BLOCKED instead of PUBLIC ONLY.
+- Added optional exchange routing to all exchange Telegram commands and `EXCHANGE_DEFAULT` configuration.
+- Added safe endpoint diagnostics without exposing credentials.
+- Preserved the read-only contract: no adapter can place, modify, or cancel orders.
+- Added v9.8.2 regression tests and updated deployment documentation.
+
 ## 9.8.1 — Exchange Foundation: Binance Read-Only
 
 - Added a typed, async, read-only `ExchangeAdapter` contract and normalized exchange models/errors.

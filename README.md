@@ -1,11 +1,25 @@
-# Liquidity Vision Intelligence v9.8.1
+# Liquidity Vision Intelligence v9.8.5
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
-## v9.8.1 — Exchange Foundation: Binance Read-Only
+## v9.8.5 — BingX Read-Only Reachability
 
-The platform now has a typed async exchange boundary and a working Binance USD-M Futures read-only adapter. `/exchanges` checks public reachability and authenticated access; balance, positions, open orders and symbol rules can be inspected without exposing credentials. No LIVE order method exists yet, so Paper Copy Trading remains the only execution path.
+- Adds bounded automatic retry for OKX timeouts, temporary transport failures, rate limits, non-JSON responses, and HTTP 5xx responses.
+- Separates connect and read deadlines for Render-friendly network behavior.
+- Reuses the adapter HTTP session and caches public symbol rules for a configurable TTL.
+- Authentication, configuration, and permanent API errors remain fail-fast and are never retried.
+- LIVE order submission remains unavailable by contract.
+
+## v9.8.3 — Exchange Reachability: OKX Read-Only
+
+- Adds a read-only Bybit V5 linear-contract adapter alongside Binance USD-M.
+- Classifies connectivity as CONNECTED, PUBLIC ONLY, NOT CONFIGURED, GEO BLOCKED, AUTH FAILED, or UNAVAILABLE.
+- Exchange commands accept an optional exchange name; `EXCHANGE_DEFAULT=okx` selects the default.
+- OKX accepts both `BTCUSDT` and native `BTC-USDT-SWAP` instrument IDs.
+- Demo Trading uses the official OKX REST endpoint with `x-simulated-trading: 1`.
+- `/exchanges` diagnoses each adapter independently and safely displays the public endpoint.
+- LIVE order submission remains unavailable by contract.
 
 ## v9.8.0 — Strategy Genome & Similar Trade Intelligence
 
@@ -55,7 +69,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.8.1
+APP_VERSION=9.8.5
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

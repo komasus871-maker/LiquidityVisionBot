@@ -3,7 +3,7 @@ from services.copy_similarity import CopySimilarityService, StrategyGenomeBuilde
 from version import APP_VERSION
 
 def test_release_version():
-    assert APP_VERSION == "9.8.1"
+    assert APP_VERSION == "9.8.5"
 
 def test_genome_is_deterministic_and_contextual():
     signal = {"symbol":"BTCUSDT","side":"LONG","timeframe":"1h","setup_key":"sweep_fvg","confidence":78,"rr":2.8,

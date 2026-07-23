@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from html import escape
 
@@ -8,22 +9,51 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from services.exchanges.base import ExchangeError
-from services.exchanges.models import ExchangeName
+from services.exchanges.models import ExchangeName, ExchangeStatus
 from services.exchanges.registry import build_exchange_registry
 
 router = Router()
 registry = build_exchange_registry()
+
+_STATUS_LABELS = {
+    ExchangeStatus.CONNECTED: "🟢 CONNECTED",
+    ExchangeStatus.PUBLIC_ONLY: "🟡 PUBLIC ONLY",
+    ExchangeStatus.NOT_CONFIGURED: "⚪ NOT CONFIGURED",
+    ExchangeStatus.GEO_BLOCKED: "🔴 GEO BLOCKED",
+    ExchangeStatus.AUTH_FAILED: "🟠 AUTH FAILED",
+    ExchangeStatus.UNAVAILABLE: "🔴 UNAVAILABLE",
+}
 
 
 def _money(value: Decimal) -> str:
     return f"{value:,.4f}".rstrip("0").rstrip(".")
 
 
+def _default_exchange() -> ExchangeName:
+    raw = os.getenv("EXCHANGE_DEFAULT", "okx").strip().lower()
+    try:
+        candidate = ExchangeName(raw)
+    except ValueError:
+        candidate = ExchangeName.OKX
+    return candidate if candidate in registry.available() else registry.available()[0]
+
+
+def _parse_exchange(parts: list[str]) -> tuple[ExchangeName, list[str]]:
+    if parts:
+        try:
+            name = ExchangeName(parts[0].lower())
+        except ValueError:
+            pass
+        else:
+            if name in registry.available():
+                return name, parts[1:]
+    return _default_exchange(), parts
+
+
 async def _adapter_call(exchange: ExchangeName, operation: str, *args):
     adapter = registry.create(exchange)
     try:
-        method = getattr(adapter, operation)
-        return await method(*args)
+        return await getattr(adapter, operation)(*args)
     finally:
         await adapter.close()
 
@@ -31,105 +61,83 @@ async def _adapter_call(exchange: ExchangeName, operation: str, *args):
 @router.message(Command("exchanges"))
 async def exchanges_status(message: Message) -> None:
     lines = [
-        "🔌 <b>Exchange Foundation</b>",
-        "",
-        "v9.8.1 introduces a read-only exchange contract. No adapter can place, modify, or cancel orders.",
-        "",
+        "🔌 <b>Exchange Foundation</b>", "",
+        "v9.8.5 adds a read-only BingX USDT-M adapter with reachability diagnostics and resilient public transport.",
+        "No adapter can place, modify, or cancel orders.", "",
     ]
     for exchange in registry.available():
         health = await _adapter_call(exchange, "health")
         environment = "TESTNET" if health.testnet else "PRODUCTION"
-        if health.reachable and health.authenticated:
-            state = "🟢 CONNECTED"
-        elif health.reachable:
-            state = "🟡 PUBLIC ONLY"
-        else:
-            state = "🔴 UNREACHABLE"
         latency = f" · {health.latency_ms:.0f} ms" if health.latency_ms is not None else ""
-        lines.append(f"• <b>{exchange.value.upper()}</b> — {state} · {environment}{latency}")
+        default = " · DEFAULT" if exchange is _default_exchange() else ""
+        lines.append(f"• <b>{exchange.value.upper()}</b> — {_STATUS_LABELS[health.status]} · {environment}{latency}{default}")
+        if health.endpoint:
+            lines.append(f"  Endpoint: <code>{escape(health.endpoint)}</code>")
         if health.error and health.error != "credentials_not_configured":
             lines.append(f"  <code>{escape(health.error[:180])}</code>")
-    lines.extend(
-        [
-            "",
-            "<b>Commands</b>",
-            "<code>/exchange_balance</code> — non-zero futures balances",
-            "<code>/exchange_positions</code> — open futures positions",
-            "<code>/exchange_orders [SYMBOL]</code> — open futures orders",
-            "<code>/exchange_symbol BTCUSDT</code> — tick, step and minimum rules",
-            "",
-            "🔒 API secrets are read only from environment variables and are never stored in the database.",
-        ]
-    )
+    lines.extend([
+        "", "<b>Commands</b>",
+        "<code>/exchange_balance [okx|bingx|bybit|binance]</code>",
+        "<code>/exchange_positions [okx|bingx|bybit|binance]</code>",
+        "<code>/exchange_orders [okx|bingx|bybit|binance] [SYMBOL]</code>",
+        "<code>/exchange_symbol [okx|bingx|bybit|binance] BTCUSDT</code>", "",
+        "🔒 API secrets stay in environment variables and are never stored in the database.",
+    ])
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("exchange_balance"))
 async def exchange_balance(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
     try:
-        balances = await _adapter_call(ExchangeName.BINANCE, "balances")
+        balances = await _adapter_call(exchange, "balances")
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>Binance balance unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} balance unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
-    rows = [
-        f"• <b>{escape(item.asset)}</b> · wallet {_money(item.wallet_balance)} · available {_money(item.available_balance)}"
-        for item in balances
-    ]
-    await message.answer("💰 <b>Binance USD-M balances</b>\n\n" + ("\n".join(rows) if rows else "No non-zero balances."), parse_mode="HTML")
+    rows = [f"• <b>{escape(i.asset)}</b> · wallet {_money(i.wallet_balance)} · available {_money(i.available_balance)}" for i in balances]
+    await message.answer(f"💰 <b>{exchange.value.title()} balances</b>\n\n" + ("\n".join(rows) if rows else "No non-zero balances."), parse_mode="HTML")
 
 
 @router.message(Command("exchange_positions"))
 async def exchange_positions(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
     try:
-        positions = await _adapter_call(ExchangeName.BINANCE, "positions")
+        positions = await _adapter_call(exchange, "positions")
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>Binance positions unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} positions unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
-    rows = [
-        f"• <b>{escape(item.symbol)} {item.side}</b> · qty {_money(item.quantity)} · "
-        f"entry {_money(item.entry_price)} · PnL {_money(item.unrealized_pnl)} · {item.leverage}x"
-        for item in positions
-    ]
-    await message.answer("📌 <b>Binance USD-M positions</b>\n\n" + ("\n".join(rows) if rows else "No open positions."), parse_mode="HTML")
+    rows = [f"• <b>{escape(i.symbol)} {i.side}</b> · qty {_money(i.quantity)} · entry {_money(i.entry_price)} · PnL {_money(i.unrealized_pnl)} · {i.leverage}x" for i in positions]
+    await message.answer(f"📌 <b>{exchange.value.title()} positions</b>\n\n" + ("\n".join(rows) if rows else "No open positions."), parse_mode="HTML")
 
 
 @router.message(Command("exchange_orders"))
 async def exchange_orders(message: Message) -> None:
-    parts = (message.text or "").split(maxsplit=1)
-    symbol = parts[1].strip().upper() if len(parts) > 1 else None
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    symbol = args[0].upper() if args else None
     try:
-        orders = await _adapter_call(ExchangeName.BINANCE, "open_orders", symbol)
+        orders = await _adapter_call(exchange, "open_orders", symbol)
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>Binance orders unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} orders unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
-    rows = [
-        f"• <b>{escape(item.symbol)} {item.side}</b> · {escape(item.order_type)} · "
-        f"qty {_money(item.quantity)} · filled {_money(item.executed_quantity)}"
-        for item in orders
-    ]
-    await message.answer("📋 <b>Binance USD-M open orders</b>\n\n" + ("\n".join(rows) if rows else "No open orders."), parse_mode="HTML")
+    rows = [f"• <b>{escape(i.symbol)} {i.side}</b> · {escape(i.order_type)} · qty {_money(i.quantity)} · filled {_money(i.executed_quantity)}" for i in orders]
+    await message.answer(f"📋 <b>{exchange.value.title()} open orders</b>\n\n" + ("\n".join(rows) if rows else "No open orders."), parse_mode="HTML")
 
 
 @router.message(Command("exchange_symbol"))
 async def exchange_symbol(message: Message) -> None:
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Usage: <code>/exchange_symbol BTCUSDT</code>", parse_mode="HTML")
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if not args:
+        await message.answer("Usage: <code>/exchange_symbol [okx|bingx|bybit|binance] BTCUSDT</code>\nOKX accepts <code>BTC-USDT-SWAP</code>; BingX normalizes to <code>BTC-USDT</code>.", parse_mode="HTML")
         return
-    symbol = parts[1].strip().upper()
+    symbol = args[0].upper()
     try:
-        rules = await _adapter_call(ExchangeName.BINANCE, "symbol_rules", symbol)
+        rules = await _adapter_call(exchange, "symbol_rules", symbol)
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>Symbol rules unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} symbol rules unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
     minimum = _money(rules.min_notional) if rules.min_notional is not None else "not published"
     await message.answer(
-        f"⚙️ <b>{escape(rules.symbol)} execution rules</b>\n\n"
-        f"Status: <b>{escape(rules.status)}</b>\n"
-        f"Pair: <b>{escape(rules.base_asset)}/{escape(rules.quote_asset)}</b>\n"
-        f"Price tick: <code>{_money(rules.price_tick)}</code>\n"
-        f"Quantity step: <code>{_money(rules.quantity_step)}</code>\n"
-        f"Minimum quantity: <code>{_money(rules.min_quantity)}</code>\n"
-        f"Minimum notional: <code>{minimum}</code>",
-        parse_mode="HTML",
-    )
+        f"⚙️ <b>{exchange.value.title()} · {escape(rules.symbol)} execution rules</b>\n\n"
+        f"Status: <b>{escape(rules.status)}</b>\nPair: <b>{escape(rules.base_asset)}/{escape(rules.quote_asset)}</b>\n"
+        f"Price tick: <code>{_money(rules.price_tick)}</code>\nQuantity step: <code>{_money(rules.quantity_step)}</code>\n"
+        f"Minimum quantity: <code>{_money(rules.min_quantity)}</code>\nMinimum notional: <code>{minimum}</code>", parse_mode="HTML")

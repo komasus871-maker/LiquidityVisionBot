@@ -1,2 +1,2 @@
-APP_VERSION = "9.8.1"
-RELEASE_NAME = "Exchange Foundation: Binance Read-Only"
+APP_VERSION = "9.8.5"
+RELEASE_NAME = "BingX Read-Only Reachability"

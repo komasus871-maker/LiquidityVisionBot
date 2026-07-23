@@ -27,6 +27,18 @@ class ExchangeRequestError(ExchangeError):
     """Raised for transport, rate-limit, validation, or remote API failures."""
 
 
+class ExchangeTimeoutError(ExchangeRequestError):
+    """Raised when an exchange request exceeds its connect/read deadline."""
+
+
+class ExchangeRateLimitError(ExchangeRequestError):
+    """Raised when an exchange asks the client to slow down."""
+
+
+class ExchangeResponseError(ExchangeRequestError):
+    """Raised when a remote response cannot be safely decoded or validated."""
+
+
 class ExchangeAdapter(ABC):
     """Read-only exchange contract used before LIVE order execution is enabled."""
 

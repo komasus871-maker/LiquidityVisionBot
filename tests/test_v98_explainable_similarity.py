@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.8.1"
-    assert RELEASE_NAME == "Exchange Foundation: Binance Read-Only"
+    assert APP_VERSION == "9.8.5"
+    assert RELEASE_NAME == "BingX Read-Only Reachability"
 
 
 def test_similarity_details_explain_groups_and_features():

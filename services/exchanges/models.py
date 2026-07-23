@@ -6,11 +6,21 @@ from enum import StrEnum
 from typing import Any
 
 
+class ExchangeStatus(StrEnum):
+    CONNECTED = "connected"
+    PUBLIC_ONLY = "public_only"
+    NOT_CONFIGURED = "not_configured"
+    GEO_BLOCKED = "geo_blocked"
+    AUTH_FAILED = "auth_failed"
+    UNAVAILABLE = "unavailable"
+
+
 class ExchangeName(StrEnum):
     BINANCE = "binance"
     BYBIT = "bybit"
     BINGX = "bingx"
     BITUNIX = "bitunix"
+    OKX = "okx"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +43,8 @@ class ExchangeHealth:
     latency_ms: float | None = None
     server_time_ms: int | None = None
     error: str | None = None
+    status: ExchangeStatus = ExchangeStatus.UNAVAILABLE
+    endpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

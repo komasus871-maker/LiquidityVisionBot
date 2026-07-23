@@ -12,6 +12,7 @@ from services.exchanges.models import (
     ExchangeName,
     ExchangeOrder,
     ExchangePosition,
+    ExchangeStatus,
     SymbolRules,
 )
 from services.exchanges.registry import ExchangeRegistry, build_exchange_registry
@@ -27,6 +28,7 @@ __all__ = [
     "ExchangeName",
     "ExchangeOrder",
     "ExchangePosition",
+    "ExchangeStatus",
     "ExchangeRegistry",
     "ExchangeRequestError",
     "SymbolRules",

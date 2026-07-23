@@ -23,6 +23,7 @@ from services.exchanges.models import (
     ExchangeName,
     ExchangeOrder,
     ExchangePosition,
+    ExchangeStatus,
     SymbolRules,
 )
 
@@ -126,6 +127,8 @@ class BinanceUsdmAdapter(ExchangeAdapter):
                     latency_ms=round(latency_ms, 2),
                     server_time_ms=server_time,
                     error="credentials_not_configured",
+                    status=ExchangeStatus.PUBLIC_ONLY,
+                    endpoint=self.base_url,
                 )
             await self._request("GET", "/fapi/v3/balance", signed=True)
             return ExchangeHealth(
@@ -135,14 +138,27 @@ class BinanceUsdmAdapter(ExchangeAdapter):
                 testnet=self.credentials.testnet,
                 latency_ms=round(latency_ms, 2),
                 server_time_ms=server_time,
+                status=ExchangeStatus.CONNECTED,
+                endpoint=self.base_url,
             )
         except (ExchangeConfigurationError, ExchangeAuthenticationError, ExchangeRequestError) as exc:
+            message = str(exc)
+            lower = message.lower()
+            if "451" in lower or "restricted location" in lower:
+                status = ExchangeStatus.GEO_BLOCKED
+                reachable = False
+            elif isinstance(exc, ExchangeAuthenticationError):
+                status = ExchangeStatus.AUTH_FAILED
+                reachable = True
+            elif isinstance(exc, ExchangeConfigurationError):
+                status = ExchangeStatus.NOT_CONFIGURED
+                reachable = True
+            else:
+                status = ExchangeStatus.UNAVAILABLE
+                reachable = False
             return ExchangeHealth(
-                exchange=ExchangeName.BINANCE,
-                reachable=not isinstance(exc, ExchangeRequestError) or "request failed" not in str(exc).lower(),
-                authenticated=False,
-                testnet=self.credentials.testnet,
-                error=str(exc),
+                exchange=ExchangeName.BINANCE, reachable=reachable, authenticated=False,
+                testnet=self.credentials.testnet, error=message, status=status, endpoint=self.base_url,
             )
 
     async def balances(self) -> list[ExchangeBalance]:
