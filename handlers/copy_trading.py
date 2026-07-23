@@ -5,9 +5,11 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from services.copy_trading import CopyTradingService
+from services.copy_training import CopyTrainingService
 
 router = Router()
 service = CopyTradingService()
+training_service = CopyTrainingService()
 
 
 def _status_text(profile: dict, stats: dict) -> str:
@@ -45,9 +47,11 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_limits 3 2.5 2</code> — positions, heat R, daily loss %
 <code>/copy_guard 55 35 30 0.25</code> — confidence, notional %, cooldown min, slippage %
 <code>/copy_stats</code> — execution statistics
+<code>/copy_training</code> — adaptive learning report
 <code>/panic</code> — close paper positions and disable execution
 
-🔒 LIVE execution remains fail-closed. v9.2.0 uses a full paper execution ledger."""
+🧠 v9.3.0 learns conservatively from closed paper executions only.
+🔒 LIVE execution remains fail-closed."""
 
 
 @router.message(Command("copy"))
@@ -139,3 +143,35 @@ async def copy_guard(message: Message):
         symbol_cooldown_min=cooldown, max_slippage_pct=slippage,
     )
     await message.answer("✅ Execution guardrails updated.", parse_mode="HTML")
+
+
+@router.message(Command("copy_training"))
+async def copy_training(message: Message):
+    report = training_service.report(message.from_user.id)
+    readiness = "🟢 READY" if report["learning_ready"] else "🟡 COLLECTING DATA"
+
+    def render(items: list[dict]) -> str:
+        if not items:
+            return "No cohort has at least 3 closed executions yet."
+        return "\n".join(
+            f"• {item['cohort']} — {item['sample_size']} trades · "
+            f"{item['average_r']:+.2f}R avg · {item['win_rate']:.0f}% WR"
+            for item in items
+        )
+
+    text = f"""🧠 <b>Copy Training</b>
+
+State: <b>{readiness}</b>
+Closed sample: <b>{report['sample_size']}</b>
+Win rate: <b>{report['win_rate']:.1f}%</b>
+Average: <b>{report['average_r']:+.2f}R</b>
+Total: <b>{report['total_r']:+.2f}R</b>
+
+🏆 <b>Best cohorts</b>
+{render(report['best_cohorts'])}
+
+⚠️ <b>Weakest cohorts</b>
+{render(report['weakest_cohorts'])}
+
+The adaptive policy starts after 8 closed paper executions and can block a persistently negative cohort only after 15+ samples. Open and rejected positions are never used for training."""
+    await message.answer(text, parse_mode="HTML")

@@ -1,5 +1,15 @@
 # Changelog
 
+## 9.3.0 — Copy Training Foundation
+
+- Added leakage-safe `CopyTrainingService` trained exclusively on closed paper executions.
+- Added conservative Bayesian cohort policy with minimum samples, bounded confidence adjustment and bounded risk scaling.
+- Integrated adaptive policy into the fail-closed execution validator.
+- Added persistent negative-cohort rejection through `NEGATIVE_COHORT_EDGE`.
+- Added training metadata to execution audit events.
+- Added `/copy_training` reporting for readiness and cohort performance.
+- Added v9.3 regression coverage and release documentation.
+
 ## 9.2.0 — Copy Execution Ledger & Portfolio Guardrails
 
 - Rebuilt paper copy execution around an idempotent lifecycle ledger.

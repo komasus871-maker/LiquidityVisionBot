@@ -55,3 +55,5 @@ class ExecutionDecision:
     reason: str
     size: PositionSize | None = None
     expected_slippage_pct: float = 0.0
+    risk_multiplier: float = 1.0
+    training_sample_size: int = 0

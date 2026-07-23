@@ -7,6 +7,7 @@ from typing import Any
 from database.database import connect
 from services.execution_models import PortfolioState, RiskProfile
 from services.execution_validator import ExecutionValidator
+from services.copy_training import CopyTrainingService
 
 
 def _now() -> str:
@@ -26,6 +27,7 @@ class CopyTradingService:
 
     def __init__(self) -> None:
         self.validator = ExecutionValidator()
+        self.training = CopyTrainingService()
 
     def ensure_profile(self, telegram_id: int) -> dict[str, Any]:
         now = _now()
@@ -204,11 +206,13 @@ class CopyTradingService:
         state = self._portfolio_state(telegram_id, str(signal["symbol"]), risk_profile.symbol_cooldown_min)
         stats = self.profile_stats(telegram_id)
         equity = max(0.0, float(stats["equity"]))
+        training_policy = self.training.policy_for(telegram_id, signal)
         decision = self.validator.validate(
             signal=signal,
             profile=risk_profile,
             balance=equity,
             portfolio=state,
+            training_policy=training_policy,
         )
         now = _now()
         if not decision.allowed or decision.size is None:
@@ -225,6 +229,8 @@ class CopyTradingService:
                 self._event_conn(conn, telegram_id, signal["id"], "REJECTED", None, 0.0, {
                     "code": decision.code, "reason": decision.reason,
                     "daily_pnl": state.daily_realized_pnl, "heat_r": state.current_heat_r,
+                    "training_sample_size": decision.training_sample_size,
+                    "training_expectancy_r": training_policy.expectancy_r,
                 })
             return "REJECTED"
 
@@ -245,6 +251,9 @@ class CopyTradingService:
             self._event_conn(conn, telegram_id, signal["id"], "OPENED", fill, 0.0, {
                 "quantity": size.quantity, "notional": size.notional, "risk_amount": size.risk_amount,
                 "slippage_pct": decision.expected_slippage_pct, "equity_before": equity,
+                "training_sample_size": decision.training_sample_size,
+                "training_expectancy_r": training_policy.expectancy_r,
+                "training_risk_multiplier": decision.risk_multiplier,
             })
         return "OPEN"
 

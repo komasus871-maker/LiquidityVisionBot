@@ -6,6 +6,7 @@ from typing import Any
 from services.data_integrity import DataIntegrityEngine
 from services.execution_models import ExecutionDecision, PortfolioState, RiskProfile
 from services.position_sizer import PositionSizer
+from services.copy_training import CopyTrainingPolicy
 
 
 class ExecutionValidator:
@@ -25,8 +26,12 @@ class ExecutionValidator:
         current_heat_r: float = 0.0,
         market_price: float | None = None,
         portfolio: PortfolioState | None = None,
+        training_policy: CopyTrainingPolicy | None = None,
     ) -> ExecutionDecision:
         state = portfolio or PortfolioState(open_positions=open_positions, current_heat_r=current_heat_r)
+        policy = training_policy or CopyTrainingPolicy()
+        if policy.blocked:
+            return ExecutionDecision(False, policy.code, policy.reason, training_sample_size=policy.sample_size)
         if str(signal.get("status")) not in {"ACTIVE", "TP1", "TP2"}:
             return ExecutionDecision(False, "SIGNAL_NOT_ACTIVE", "Signal is not executable")
         if state.open_positions >= profile.max_positions:
@@ -42,8 +47,13 @@ class ExecutionValidator:
             return ExecutionDecision(False, "DAILY_LOSS_LIMIT", "Daily copy-trading loss limit reached")
         confidence_raw = signal.get("dynamic_confidence") if signal.get("dynamic_confidence") is not None else signal.get("confidence")
         confidence = float(100.0 if confidence_raw is None else confidence_raw)
-        if confidence < profile.min_confidence:
-            return ExecutionDecision(False, "LOW_CONFIDENCE", f"Signal confidence {confidence:.1f} is below {profile.min_confidence:.1f}")
+        adaptive_min_confidence = max(0.0, min(100.0, profile.min_confidence - policy.confidence_adjustment))
+        if confidence < adaptive_min_confidence:
+            return ExecutionDecision(
+                False, "LOW_CONFIDENCE",
+                f"Signal confidence {confidence:.1f} is below adaptive threshold {adaptive_min_confidence:.1f}",
+                training_sample_size=policy.sample_size,
+            )
 
         plan = {
             "direction": signal.get("side"), "entry": signal.get("entry"), "stop": signal.get("stop"),
@@ -64,6 +74,13 @@ class ExecutionValidator:
             if not activation.valid:
                 return ExecutionDecision(False, activation.code, activation.reason)
             size = self.sizer.calculate(balance=balance, risk_pct=profile.risk_pct, entry=price, stop=float(signal["stop"]))
+            if policy.risk_multiplier != 1.0:
+                size = type(size)(
+                    quantity=size.quantity * policy.risk_multiplier,
+                    notional=size.notional * policy.risk_multiplier,
+                    risk_amount=size.risk_amount * policy.risk_multiplier,
+                    stop_distance_pct=size.stop_distance_pct,
+                )
             max_notional = balance * profile.max_notional_pct / 100.0
             if size.notional > max_notional > 0:
                 scale = max_notional / size.notional
@@ -85,4 +102,8 @@ class ExecutionValidator:
                     return ExecutionDecision(False, "FUTURE_TIMESTAMP", "Activation timestamp is in the future")
             except ValueError:
                 return ExecutionDecision(False, "INVALID_TIMESTAMP", "Activation timestamp is invalid")
-        return ExecutionDecision(True, "APPROVED", "Execution checks passed", size=size, expected_slippage_pct=slippage_pct)
+        return ExecutionDecision(
+            True, "APPROVED", "Execution checks passed", size=size,
+            expected_slippage_pct=slippage_pct, risk_multiplier=policy.risk_multiplier,
+            training_sample_size=policy.sample_size,
+        )

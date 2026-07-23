@@ -65,6 +65,6 @@ def test_admin_version_and_watch_error_details(tmp_path, monkeypatch):
             telegram_id,symbol,timeframe,snapshot_json,updated_at,last_checked_at,last_error,consecutive_errors
         ) VALUES(?,?,?,?,?,?,?,?)""", (1,"KAT","15m","{}",now,now,"API timeout",2))
     report = rd.collect_runtime_diagnostics()
-    assert report["version"] == "9.2.0"
+    assert report["version"] == "9.3.0"
     assert report["watch_errors"][0]["symbol"] == "KAT"
     assert report["watch_errors"][0]["last_error"] == "API timeout"
