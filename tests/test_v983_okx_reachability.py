@@ -28,8 +28,8 @@ class StubOkx(OkxV5Adapter):
 def test_release_registry_and_symbol_normalization(monkeypatch):
     monkeypatch.setenv("OKX_DEMO", "true")
     registry = build_exchange_registry()
-    assert APP_VERSION == "9.8.8"
-    assert "Autonomous Demo Execution Core" in RELEASE_NAME
+    assert APP_VERSION == "9.9.0"
+    assert "Multi-User Exchange Accounts" in RELEASE_NAME
     assert ExchangeName.OKX in registry.available()
     assert isinstance(registry.create("okx"), OkxV5Adapter)
     assert _instrument_id("BTCUSDT") == "BTC-USDT-SWAP"

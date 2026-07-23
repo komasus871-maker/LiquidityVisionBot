@@ -1,2 +1,2 @@
-APP_VERSION = "9.8.8"
-RELEASE_NAME = "Autonomous Demo Execution Core"
+APP_VERSION = "9.9.0"
+RELEASE_NAME = "Multi-User Exchange Accounts"

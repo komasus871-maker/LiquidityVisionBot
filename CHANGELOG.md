@@ -1,3 +1,15 @@
+# Changelog
+
+## 9.9.0 — Multi-User Exchange Accounts
+
+- Added encrypted per-user exchange credential storage keyed by Telegram user ID and exchange.
+- Added `/connect_exchange`, `/disconnect_exchange`, and `/my_exchanges`.
+- Routed authenticated balances, positions, orders, account snapshots, preflight portfolio state, and BingX demo execution through the sender's own credentials.
+- Added immediate deletion of credential-bearing Telegram messages and private-chat-only connection flow.
+- Added authentication validation with rollback of invalid credentials.
+- Added live-connection lock, encrypted OKX passphrase support, database schema, deployment variables, tests, and release documentation.
+- Removed the shared owner-account assumption from user execution commands.
+
 # v9.8.8 — Autonomous Demo Execution Core
 
 - Added automatic BingX demo MARKET/LIMIT order submission without manual confirmation.

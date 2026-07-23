@@ -11,7 +11,7 @@ from aiogram.types import Message
 from services.exchanges.base import ExchangeConfigurationError, ExchangeError
 from services.exchanges.manager import ExchangeManager
 from services.exchanges.execution import DemoExecutionManager, DemoOrderRequest
-from services.exchanges.models import ExchangeName, ExchangeStatus
+from services.exchanges.models import ExchangeCredentials, ExchangeName, ExchangeStatus
 from services.exchanges.safety import (
     ExecutionSafetyPolicy,
     ExecutionSafetyValidator,
@@ -19,9 +19,14 @@ from services.exchanges.safety import (
     OrderSide,
 )
 from services.exchanges.registry import build_exchange_registry
+from services.exchanges.credentials_store import CredentialCipher, UserExchangeCredentialStore
 
 router = Router()
-registry = build_exchange_registry()
+_EMPTY_CREDENTIALS = {
+    exchange: ExchangeCredentials("", "", testnet=True)
+    for exchange in (ExchangeName.BINANCE, ExchangeName.BYBIT, ExchangeName.BINGX, ExchangeName.OKX)
+}
+registry = build_exchange_registry(credentials_override=_EMPTY_CREDENTIALS, okx_passphrase="")
 manager = ExchangeManager(
     registry,
     operation_timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25")),
@@ -29,6 +34,41 @@ manager = ExchangeManager(
 execution_manager = DemoExecutionManager(
     registry, timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25"))
 )
+
+
+def _credential_store() -> UserExchangeCredentialStore:
+    return UserExchangeCredentialStore(CredentialCipher())
+
+
+def _user_registry(telegram_id: int, exchange: ExchangeName):
+    connection = _credential_store().get(telegram_id, exchange)
+    if connection is None:
+        raise ExchangeConfigurationError(
+            f"{exchange.value} is not connected for your Telegram account; use /connect_exchange"
+        )
+    return build_exchange_registry(
+        credentials_override={exchange: connection.credentials},
+        okx_passphrase=connection.passphrase if exchange is ExchangeName.OKX else None,
+    )
+
+
+async def _user_adapter_call(telegram_id: int, exchange: ExchangeName, operation: str, *args):
+    user_registry = _user_registry(telegram_id, exchange)
+    adapter = user_registry.create(exchange)
+    try:
+        return await getattr(adapter, operation)(*args)
+    finally:
+        await adapter.close()
+
+
+def _user_execution_manager(telegram_id: int, exchange: ExchangeName) -> DemoExecutionManager:
+    manager = DemoExecutionManager(
+        _user_registry(telegram_id, exchange),
+        timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25")),
+    )
+    if os.getenv(f"USER_EXECUTION_KILLED_{telegram_id}", "").lower() == "true":
+        manager.kill()
+    return manager
 
 _STATUS_LABELS = {
     ExchangeStatus.CONNECTED: "🟢 CONNECTED",
@@ -73,15 +113,117 @@ async def _adapter_call(exchange: ExchangeName, operation: str, *args):
         await adapter.close()
 
 
+@router.message(Command("connect_exchange"))
+async def connect_exchange(message: Message) -> None:
+    parts = (message.text or "").split()
+    if getattr(message.chat, "type", "private") != "private":
+        await message.answer("⛔ Connect exchange accounts only in a private chat with the bot.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if len(parts) < 5:
+        await message.answer(
+            "🔐 <b>Connect your own exchange account</b>\n\n"
+            "BingX: <code>/connect_exchange bingx demo API_KEY API_SECRET</code>\n"
+            "OKX: <code>/connect_exchange okx demo API_KEY API_SECRET PASSPHRASE</code>\n\n"
+            "Send this only in a private chat. The credential message is deleted immediately. "
+            "Enable Read + Trade only; never enable Withdraw.",
+            parse_mode="HTML",
+        )
+        return
+    _, exchange_raw, environment, api_key, api_secret, *extra = parts
+    try:
+        exchange = ExchangeName(exchange_raw.lower())
+    except ValueError:
+        await message.answer("⚠️ Unsupported exchange.")
+        return
+    if exchange not in {ExchangeName.BINGX, ExchangeName.OKX, ExchangeName.BYBIT, ExchangeName.BINANCE}:
+        await message.answer("⚠️ Unsupported exchange.")
+        return
+    testnet = environment.lower() in {"demo", "testnet", "paper"}
+    if not testnet and os.getenv("ALLOW_USER_LIVE_CONNECTIONS", "false").lower() not in {"1", "true", "yes", "on"}:
+        await message.answer("⛔ Live account connections are locked. Use <code>demo</code>.", parse_mode="HTML")
+        return
+    passphrase = extra[0] if extra else ""
+    if exchange is ExchangeName.OKX and not passphrase:
+        await message.answer("⚠️ OKX requires an API passphrase.")
+        return
+    try:
+        store = _credential_store()
+        store.save(message.from_user.id, exchange, api_key, api_secret, testnet=testnet, passphrase=passphrase)
+        user_registry = _user_registry(message.from_user.id, exchange)
+        adapter = user_registry.create(exchange)
+        try:
+            health = await adapter.health()
+        finally:
+            await adapter.close()
+        if not health.authenticated:
+            store.delete(message.from_user.id, exchange)
+            await message.answer(
+                f"⛔ <b>{exchange.value.title()} connection rejected</b>\n"
+                f"<code>{escape(health.error or 'authentication failed')}</code>\n\n"
+                "Nothing was saved.",
+                parse_mode="HTML",
+            )
+            return
+    except ExchangeError as exc:
+        await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer(
+        f"✅ <b>{exchange.value.title()} connected to your Telegram account</b>\n\n"
+        f"Environment: <b>{'DEMO/TESTNET' if testnet else 'LIVE'}</b>\n"
+        "Credentials are encrypted at rest and used only for your commands.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("disconnect_exchange"))
+async def disconnect_exchange(message: Message) -> None:
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: <code>/disconnect_exchange bingx</code>", parse_mode="HTML")
+        return
+    try:
+        exchange = ExchangeName(parts[1].lower())
+        removed = _credential_store().delete(message.from_user.id, exchange)
+    except (ValueError, ExchangeError) as exc:
+        await message.answer(f"⚠️ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer("✅ Exchange disconnected." if removed else "ℹ️ That exchange was not connected.")
+
+
+@router.message(Command("my_exchanges"))
+async def my_exchanges(message: Message) -> None:
+    try:
+        connections = _credential_store().list(message.from_user.id)
+    except ExchangeError as exc:
+        await message.answer(f"⚠️ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    if not connections:
+        await message.answer("🔌 You have no connected exchanges. Use <code>/connect_exchange</code>.", parse_mode="HTML")
+        return
+    rows = [
+        f"• <b>{name.value.upper()}</b> · {'DEMO/TESTNET' if testnet else 'LIVE'} · {escape(status)}"
+        for name, testnet, status in connections
+    ]
+    await message.answer("🔐 <b>Your exchange accounts</b>\n\n" + "\n".join(rows), parse_mode="HTML")
+
+
 @router.message(Command("exchanges"))
 async def exchanges_status(message: Message) -> None:
     lines = [
         "🔌 <b>Exchange Foundation</b>", "",
-        "v9.8.8 adds automatic BingX demo execution with queueing, idempotency, audit and circuit breaking.",
-        "Live execution remains unavailable. Demo orders may execute automatically when explicitly enabled.", "",
+        "v9.9.0 adds encrypted, isolated exchange accounts for every Telegram user.",
+        "Every authenticated command uses only the credentials of the user who sent it.", "",
     ]
+    connected = {item[0] for item in _credential_store().list(message.from_user.id)}
     for exchange in registry.available():
-        health = await _adapter_call(exchange, "health")
+        if exchange in connected:
+            health = await _user_adapter_call(message.from_user.id, exchange, "health")
+        else:
+            health = await _adapter_call(exchange, "health")
         environment = "TESTNET" if health.testnet else "PRODUCTION"
         latency = f" · {health.latency_ms:.0f} ms" if health.latency_ms is not None else ""
         default = " · DEFAULT" if exchange is _default_exchange() else ""
@@ -92,6 +234,8 @@ async def exchanges_status(message: Message) -> None:
             lines.append(f"  <code>{escape(health.error[:180])}</code>")
     lines.extend([
         "", "<b>Commands</b>",
+        "<code>/connect_exchange bingx demo API_KEY API_SECRET</code>",
+        "<code>/disconnect_exchange bingx</code> · <code>/my_exchanges</code>",
         "<code>/exchange_balance [okx|bingx|bybit|binance]</code>",
         "<code>/exchange_positions [okx|bingx|bybit|binance]</code>",
         "<code>/exchange_orders [okx|bingx|bybit|binance] [SYMBOL]</code>",
@@ -103,7 +247,7 @@ async def exchanges_status(message: Message) -> None:
         "<code>/demo_cancel bingx BTCUSDT ORDER_ID</code>",
         "<code>/demo_status bingx BTCUSDT ORDER_ID</code>",
         "<code>/demo_kill</code> · <code>/demo_resume</code>", "",
-        "🔒 API secrets stay in environment variables and are never stored in the database.",
+        "🔒 User API secrets are encrypted in the database and isolated by Telegram user ID.",
     ])
     await message.answer("\n".join(lines), parse_mode="HTML")
 
@@ -112,7 +256,7 @@ async def exchanges_status(message: Message) -> None:
 async def exchange_balance(message: Message) -> None:
     exchange, _ = _parse_exchange((message.text or "").split()[1:])
     try:
-        balances = await _adapter_call(exchange, "balances")
+        balances = await _user_adapter_call(message.from_user.id, exchange, "balances")
     except ExchangeError as exc:
         await message.answer(f"⚠️ <b>{exchange.value.title()} balance unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
@@ -124,7 +268,7 @@ async def exchange_balance(message: Message) -> None:
 async def exchange_positions(message: Message) -> None:
     exchange, _ = _parse_exchange((message.text or "").split()[1:])
     try:
-        positions = await _adapter_call(exchange, "positions")
+        positions = await _user_adapter_call(message.from_user.id, exchange, "positions")
     except ExchangeError as exc:
         await message.answer(f"⚠️ <b>{exchange.value.title()} positions unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
@@ -137,7 +281,7 @@ async def exchange_orders(message: Message) -> None:
     exchange, args = _parse_exchange((message.text or "").split()[1:])
     symbol = args[0].upper() if args else None
     try:
-        orders = await _adapter_call(exchange, "open_orders", symbol)
+        orders = await _user_adapter_call(message.from_user.id, exchange, "open_orders", symbol)
     except ExchangeError as exc:
         await message.answer(f"⚠️ <b>{exchange.value.title()} orders unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
@@ -170,7 +314,9 @@ async def exchange_account(message: Message) -> None:
     exchange, args = _parse_exchange((message.text or "").split()[1:])
     symbol = args[0].upper() if args else None
     try:
-        snapshot = await manager.snapshot(exchange, symbol=symbol)
+        user_registry = _user_registry(message.from_user.id, exchange)
+        user_manager = ExchangeManager(user_registry, operation_timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25")))
+        snapshot = await user_manager.snapshot(exchange, symbol=symbol)
     except ExchangeError as exc:
         await message.answer(
             f"⚠️ <b>{exchange.value.title()} authenticated snapshot unavailable</b>\n"
@@ -235,7 +381,11 @@ async def exchange_preflight(message: Message) -> None:
         await message.answer("⚠️ Invalid side, quantity, price, or leverage.")
         return
 
-    adapter = registry.create(exchange)
+    try:
+        user_registry = _user_registry(message.from_user.id, exchange)
+        adapter = user_registry.create(exchange)
+    except ExchangeConfigurationError:
+        adapter = registry.create(exchange)
     try:
         rules = await adapter.symbol_rules(symbol)
     except ExchangeError as exc:
@@ -251,7 +401,9 @@ async def exchange_preflight(message: Message) -> None:
     orders = ()
     portfolio_note = "Public-only preflight; portfolio duplicate/position checks were not available."
     try:
-        snapshot = await manager.snapshot(exchange, symbol=symbol)
+        user_registry = _user_registry(message.from_user.id, exchange)
+        user_manager = ExchangeManager(user_registry, operation_timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25")))
+        snapshot = await user_manager.snapshot(exchange, symbol=symbol)
     except (ExchangeConfigurationError, ExchangeError):
         pass
     else:
@@ -316,7 +468,8 @@ async def demo_order(message: Message) -> None:
         await message.answer("⚠️ Supported types: MARKET or LIMIT; LIMIT requires a final price.")
         return
     try:
-        receipt = await execution_manager.submit(DemoOrderRequest(
+        user_execution = _user_execution_manager(message.from_user.id, exchange)
+        receipt = await user_execution.submit(DemoOrderRequest(
             exchange=exchange, symbol=symbol, side=side, order_type=order_type.upper(),
             quantity=quantity, reference_price=reference_price, leverage=leverage,
             limit_price=limit_price,
@@ -348,7 +501,7 @@ async def demo_cancel(message: Message) -> None:
         await message.answer("Usage: <code>/demo_cancel bingx BTCUSDT ORDER_ID</code>", parse_mode="HTML")
         return
     try:
-        order = await execution_manager.cancel(exchange, args[0], args[1])
+        order = await _user_execution_manager(message.from_user.id, exchange).cancel(exchange, args[0], args[1])
     except ExchangeError as exc:
         await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
@@ -362,7 +515,7 @@ async def demo_status(message: Message) -> None:
         await message.answer("Usage: <code>/demo_status bingx BTCUSDT ORDER_ID</code>", parse_mode="HTML")
         return
     try:
-        order = await execution_manager.status(exchange, args[0], args[1])
+        order = await _user_execution_manager(message.from_user.id, exchange).status(exchange, args[0], args[1])
     except ExchangeError as exc:
         await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
         return
@@ -375,13 +528,13 @@ async def demo_status(message: Message) -> None:
 
 @router.message(Command("demo_kill"))
 async def demo_kill(message: Message) -> None:
-    execution_manager.kill()
-    await message.answer("🛑 <b>Demo execution killed for this runtime.</b>", parse_mode="HTML")
+    os.environ[f"USER_EXECUTION_KILLED_{message.from_user.id}"] = "true"
+    await message.answer("🛑 <b>Your execution is disabled for this runtime.</b>", parse_mode="HTML")
 
 
 @router.message(Command("demo_resume"))
 async def demo_resume(message: Message) -> None:
-    execution_manager.resume()
+    os.environ.pop(f"USER_EXECUTION_KILLED_{message.from_user.id}", None)
     await message.answer(
         "▶️ Runtime kill switch released. Environment policy still applies.", parse_mode="HTML"
     )

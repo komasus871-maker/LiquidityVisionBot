@@ -163,6 +163,15 @@ def create_tables() -> None:
     with connect() as conn:
         id_col = _id_column()
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS user_exchange_credentials(
+                id {id_col}, telegram_id BIGINT NOT NULL, exchange TEXT NOT NULL,
+                api_key_encrypted TEXT NOT NULL, api_secret_encrypted TEXT NOT NULL,
+                passphrase_encrypted TEXT DEFAULT '', testnet INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'connected', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(telegram_id, exchange)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS users(
                 id {id_col}, telegram_id BIGINT UNIQUE,
                 username TEXT, first_name TEXT,

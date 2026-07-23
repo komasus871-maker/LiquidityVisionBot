@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.8.8"
-    assert RELEASE_NAME == "Autonomous Demo Execution Core"
+    assert APP_VERSION == "9.9.0"
+    assert RELEASE_NAME == "Multi-User Exchange Accounts"
 
 
 @pytest.mark.asyncio

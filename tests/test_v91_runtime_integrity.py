@@ -17,7 +17,7 @@ def _frame(rows: int = 260) -> pd.DataFrame:
 
 def test_release_integrity_and_version():
     report = validate_release(required_modules=("services.brain", "services.unified_core"))
-    assert APP_VERSION == "9.8.8"
+    assert APP_VERSION == "9.9.0"
     assert report.valid, report.as_dict()
 
 

@@ -35,16 +35,17 @@ class ExchangeRegistry:
         return tuple(sorted(self._factories, key=lambda item: item.value))
 
 
-def build_exchange_registry() -> ExchangeRegistry:
+def build_exchange_registry(*, credentials_override: dict[ExchangeName, ExchangeCredentials] | None = None, okx_passphrase: str | None = None) -> ExchangeRegistry:
+    credentials_override = credentials_override or {}
     registry = ExchangeRegistry()
     registry.register(
         ExchangeName.BINANCE,
         lambda: BinanceUsdmAdapter(
-            ExchangeCredentials(
+            credentials_override.get(ExchangeName.BINANCE, ExchangeCredentials(
                 api_key=os.getenv("BINANCE_API_KEY", "").strip(),
                 api_secret=os.getenv("BINANCE_API_SECRET", "").strip(),
                 testnet=os.getenv("BINANCE_TESTNET", "true").strip().lower() in {"1", "true", "yes", "on"},
-            ),
+            )),
             recv_window=int(os.getenv("BINANCE_RECV_WINDOW", "5000")),
             timeout_seconds=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")),
         ),
@@ -52,11 +53,11 @@ def build_exchange_registry() -> ExchangeRegistry:
     registry.register(
         ExchangeName.BYBIT,
         lambda: BybitV5Adapter(
-            ExchangeCredentials(
+            credentials_override.get(ExchangeName.BYBIT, ExchangeCredentials(
                 api_key=os.getenv("BYBIT_API_KEY", "").strip(),
                 api_secret=os.getenv("BYBIT_API_SECRET", "").strip(),
                 testnet=os.getenv("BYBIT_TESTNET", "true").strip().lower() in {"1", "true", "yes", "on"},
-            ),
+            )),
             recv_window=int(os.getenv("BYBIT_RECV_WINDOW", "5000")),
             timeout_seconds=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")),
         ),
@@ -64,11 +65,11 @@ def build_exchange_registry() -> ExchangeRegistry:
     registry.register(
         ExchangeName.BINGX,
         lambda: BingXSwapAdapter(
-            ExchangeCredentials(
+            credentials_override.get(ExchangeName.BINGX, ExchangeCredentials(
                 api_key=os.getenv("BINGX_API_KEY", "").strip(),
                 api_secret=os.getenv("BINGX_API_SECRET", "").strip(),
                 testnet=os.getenv("BINGX_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"},
-            ),
+            )),
             recv_window=int(os.getenv("BINGX_RECV_WINDOW", "5000")),
             timeout_seconds=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")),
             connect_timeout_seconds=float(os.getenv("EXCHANGE_CONNECT_TIMEOUT", "5")),
@@ -81,12 +82,12 @@ def build_exchange_registry() -> ExchangeRegistry:
     registry.register(
         ExchangeName.OKX,
         lambda: OkxV5Adapter(
-            ExchangeCredentials(
+            credentials_override.get(ExchangeName.OKX, ExchangeCredentials(
                 api_key=os.getenv("OKX_API_KEY", "").strip(),
                 api_secret=os.getenv("OKX_API_SECRET", "").strip(),
                 testnet=os.getenv("OKX_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"},
-            ),
-            passphrase=os.getenv("OKX_API_PASSPHRASE", "").strip(),
+            )),
+            passphrase=okx_passphrase if okx_passphrase is not None else os.getenv("OKX_API_PASSPHRASE", "").strip(),
             timeout_seconds=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")),
             connect_timeout_seconds=float(os.getenv("EXCHANGE_CONNECT_TIMEOUT", "5")),
             read_timeout_seconds=float(os.getenv("EXCHANGE_READ_TIMEOUT", "12")),
