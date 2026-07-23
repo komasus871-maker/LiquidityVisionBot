@@ -1,0 +1,18 @@
+# Changelog
+
+## 9.2.0 — Copy Execution Ledger & Portfolio Guardrails
+
+- Rebuilt paper copy execution around an idempotent lifecycle ledger.
+- Enforced daily realized-loss limits, portfolio heat, maximum simultaneous positions, duplicate-symbol protection, and post-trade cooldowns.
+- Enforced minimum signal confidence, maximum activation slippage, and maximum notional exposure per position.
+- Added equity-aware sizing: new trades use paper balance plus realized PnL rather than a static balance.
+- Added correct partial-fill accounting for TP1 and TP2, including realized R and realized PnL deltas.
+- Added event-level PnL ledger entries for opens, partial fills, closes, rejections, and panic closes.
+- Added execution statistics for equity, daily PnL, total PnL, win rate, average R, and rejection counts.
+- Added `/copy_guard` for confidence, notional, cooldown, and slippage guardrails.
+- Added forward-compatible database migrations for all new profile, position, and event fields.
+- Added v9.2 regression coverage and a full ACTIVE → TP1 → TP2 → TP3 database smoke test.
+
+## 9.1.0 — Runtime Integrity & Resilient Analysis Core
+
+- Stabilized runtime imports and analysis dependencies.

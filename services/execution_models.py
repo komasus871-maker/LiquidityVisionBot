@@ -26,6 +26,18 @@ class RiskProfile:
     daily_loss_pct: float = 2.0
     max_slippage_pct: float = 0.25
     paper_balance: float = 10_000.0
+    min_confidence: float = 55.0
+    max_notional_pct: float = 35.0
+    symbol_cooldown_min: int = 30
+
+
+@dataclass(frozen=True)
+class PortfolioState:
+    open_positions: int = 0
+    current_heat_r: float = 0.0
+    daily_realized_pnl: float = 0.0
+    symbol_is_open: bool = False
+    symbol_in_cooldown: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,3 +54,4 @@ class ExecutionDecision:
     code: str
     reason: str
     size: PositionSize | None = None
+    expected_slippage_pct: float = 0.0

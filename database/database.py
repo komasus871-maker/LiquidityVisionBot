@@ -285,7 +285,9 @@ def create_tables() -> None:
                 mode TEXT NOT NULL DEFAULT 'PAPER', exchange TEXT, risk_pct DOUBLE PRECISION DEFAULT 0.5,
                 max_positions INTEGER DEFAULT 3, max_heat_r DOUBLE PRECISION DEFAULT 2.5,
                 daily_loss_pct DOUBLE PRECISION DEFAULT 2.0, max_slippage_pct DOUBLE PRECISION DEFAULT 0.25,
-                paper_balance DOUBLE PRECISION DEFAULT 10000, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                paper_balance DOUBLE PRECISION DEFAULT 10000, min_confidence DOUBLE PRECISION DEFAULT 55,
+                max_notional_pct DOUBLE PRECISION DEFAULT 35, symbol_cooldown_min INTEGER DEFAULT 30,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -296,14 +298,16 @@ def create_tables() -> None:
                 tp1 DOUBLE PRECISION, tp2 DOUBLE PRECISION, tp3 DOUBLE PRECISION, quantity DOUBLE PRECISION,
                 notional DOUBLE PRECISION, risk_amount DOUBLE PRECISION, initial_risk_r DOUBLE PRECISION DEFAULT 1.0,
                 remaining_fraction DOUBLE PRECISION DEFAULT 1.0, realized_r DOUBLE PRECISION DEFAULT 0,
-                rejection_code TEXT, rejection_reason TEXT, close_reason TEXT, opened_at TEXT, closed_at TEXT,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(telegram_id,signal_id)
+                rejection_code TEXT, rejection_reason TEXT, close_reason TEXT, realized_pnl DOUBLE PRECISION DEFAULT 0,
+                last_signal_status TEXT, opened_at TEXT, closed_at TEXT, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, UNIQUE(telegram_id,signal_id)
             )
         """)
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS execution_events(
                 id {id_col}, telegram_id BIGINT NOT NULL, signal_id BIGINT, event_type TEXT NOT NULL,
-                price DOUBLE PRECISION, details_json TEXT NOT NULL, created_at TEXT NOT NULL
+                price DOUBLE PRECISION, realized_pnl_delta DOUBLE PRECISION DEFAULT 0,
+                details_json TEXT NOT NULL, created_at TEXT NOT NULL
             )
         """)
         conn.execute("""
@@ -346,6 +350,18 @@ def create_tables() -> None:
             "consecutive_errors": "INTEGER DEFAULT 0", "promoted_signal_id": "BIGINT",
         }.items():
             _add_column(conn, "watch_states", name, definition)
+        for name, definition in {
+            "min_confidence": "DOUBLE PRECISION DEFAULT 55",
+            "max_notional_pct": "DOUBLE PRECISION DEFAULT 35",
+            "symbol_cooldown_min": "INTEGER DEFAULT 30",
+        }.items():
+            _add_column(conn, "copy_profiles", name, definition)
+        for name, definition in {
+            "realized_pnl": "DOUBLE PRECISION DEFAULT 0",
+            "last_signal_status": "TEXT",
+        }.items():
+            _add_column(conn, "paper_positions", name, definition)
+        _add_column(conn, "execution_events", "realized_pnl_delta", "DOUBLE PRECISION DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
         duplicate_groups = conn.execute("""

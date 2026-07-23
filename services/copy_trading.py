@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from database.database import connect
-from services.execution_models import RiskProfile
+from services.execution_models import PortfolioState, RiskProfile
 from services.execution_validator import ExecutionValidator
 
 
@@ -13,8 +13,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _day_start() -> str:
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
 class CopyTradingService:
-    """Multi-user paper-copy service. LIVE mode remains hard-disabled in v9.0."""
+    """Idempotent, multi-user paper execution service with a production-grade risk ledger."""
+
+    TERMINAL_SIGNAL_STATUSES = {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "CLOSED"}
+    OPEN_SIGNAL_STATUSES = {"ACTIVE", "TP1", "TP2"}
 
     def __init__(self) -> None:
         self.validator = ExecutionValidator()
@@ -23,16 +31,24 @@ class CopyTradingService:
         now = _now()
         with connect() as conn:
             conn.execute(
-                """INSERT INTO copy_profiles(telegram_id,enabled,mode,risk_pct,max_positions,max_heat_r,daily_loss_pct,max_slippage_pct,paper_balance,created_at,updated_at)
-                   VALUES(?,0,'PAPER',0.5,3,2.5,2.0,0.25,10000,?,?) ON CONFLICT(telegram_id) DO NOTHING""",
+                """INSERT INTO copy_profiles(
+                       telegram_id,enabled,mode,risk_pct,max_positions,max_heat_r,daily_loss_pct,
+                       max_slippage_pct,paper_balance,min_confidence,max_notional_pct,symbol_cooldown_min,
+                       created_at,updated_at
+                   ) VALUES(?,0,'PAPER',0.5,3,2.5,2.0,0.25,10000,55,35,30,?,?)
+                   ON CONFLICT(telegram_id) DO NOTHING""",
                 (telegram_id, now, now),
             )
             row = conn.execute("SELECT * FROM copy_profiles WHERE telegram_id=?", (telegram_id,)).fetchone()
         return dict(row)
 
     def update_profile(self, telegram_id: int, **fields: Any) -> dict[str, Any]:
-        allowed = {"enabled", "risk_pct", "max_positions", "max_heat_r", "daily_loss_pct", "max_slippage_pct", "paper_balance"}
-        fields = {k: v for k, v in fields.items() if k in allowed}
+        allowed = {
+            "enabled", "risk_pct", "max_positions", "max_heat_r", "daily_loss_pct",
+            "max_slippage_pct", "paper_balance", "min_confidence", "max_notional_pct",
+            "symbol_cooldown_min",
+        }
+        fields = {key: value for key, value in fields.items() if key in allowed}
         self.ensure_profile(telegram_id)
         if fields:
             fields["updated_at"] = _now()
@@ -45,7 +61,10 @@ class CopyTradingService:
         now = _now()
         with connect() as conn:
             conn.execute("UPDATE copy_profiles SET enabled=0,updated_at=? WHERE telegram_id=?", (now, telegram_id))
-            rows = conn.execute("SELECT * FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')", (telegram_id,)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')",
+                (telegram_id,),
+            ).fetchall()
             for row in rows:
                 position = dict(row)
                 exit_price = float(position.get("last_price") or position["entry_price"])
@@ -53,7 +72,7 @@ class CopyTradingService:
         return len(rows)
 
     def profile_stats(self, telegram_id: int) -> dict[str, Any]:
-        self.ensure_profile(telegram_id)
+        profile = self.ensure_profile(telegram_id)
         with connect() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) total,
@@ -61,21 +80,37 @@ class CopyTradingService:
                    SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) closed_count,
                    SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END) rejected_count,
                    COALESCE(SUM(CASE WHEN status='CLOSED' THEN realized_r ELSE 0 END),0) realized_r,
-                   COALESCE(AVG(CASE WHEN status='CLOSED' THEN realized_r END),0) avg_r
+                   COALESCE(SUM(realized_pnl),0) realized_pnl,
+                   COALESCE(AVG(CASE WHEN status='CLOSED' THEN realized_r END),0) avg_r,
+                   COALESCE(SUM(CASE WHEN status='CLOSED' AND realized_r>0 THEN 1 ELSE 0 END),0) wins,
+                   COALESCE(SUM(CASE WHEN status='CLOSED' AND realized_r<0 THEN 1 ELSE 0 END),0) losses
                    FROM paper_positions WHERE telegram_id=?""",
                 (telegram_id,),
             ).fetchone()
-        return dict(row)
+            daily = conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl_delta),0) pnl
+                   FROM execution_events
+                   WHERE telegram_id=? AND created_at>=? AND event_type IN ('PARTIAL_FILLED','CLOSED')""",
+                (telegram_id, _day_start()),
+            ).fetchone()
+        result = dict(row)
+        result["daily_pnl"] = float(daily[0] or 0.0)
+        result["equity"] = float(profile["paper_balance"]) + float(result.get("realized_pnl") or 0.0)
+        closed = int(result.get("closed_count") or 0)
+        result["win_rate"] = (float(result.get("wins") or 0) / closed * 100.0) if closed else 0.0
+        return result
 
     def sync_signal(self, signal: dict[str, Any]) -> dict[str, int]:
-        opened = updated = closed = rejected = 0
-        status = str(signal.get("status"))
+        opened = updated = closed = rejected = skipped = 0
+        status = str(signal.get("status") or "").upper()
         with connect() as conn:
-            profiles = [dict(r) for r in conn.execute("SELECT * FROM copy_profiles WHERE enabled=1 AND mode='PAPER'").fetchall()]
+            profiles = [dict(row) for row in conn.execute(
+                "SELECT * FROM copy_profiles WHERE enabled=1 AND mode='PAPER'"
+            ).fetchall()]
         for profile in profiles:
             telegram_id = int(profile["telegram_id"])
             existing = self._get_position(telegram_id, int(signal["id"]))
-            if status in {"ACTIVE", "TP1", "TP2"} and existing is None:
+            if status in self.OPEN_SIGNAL_STATUSES and existing is None:
                 result = self._open(telegram_id, profile, signal)
                 opened += int(result == "OPEN")
                 rejected += int(result == "REJECTED")
@@ -83,85 +118,223 @@ class CopyTradingService:
                 outcome = self._sync_existing(existing, signal)
                 updated += int(outcome == "UPDATED")
                 closed += int(outcome == "CLOSED")
-        return {"opened": opened, "updated": updated, "closed": closed, "rejected": rejected}
+                skipped += int(outcome == "SKIPPED")
+            else:
+                skipped += 1
+        return {"opened": opened, "updated": updated, "closed": closed, "rejected": rejected, "skipped": skipped}
 
     def sync_all(self) -> dict[str, int]:
-        totals = {"opened": 0, "updated": 0, "closed": 0, "rejected": 0}
+        totals = {"opened": 0, "updated": 0, "closed": 0, "rejected": 0, "skipped": 0}
         with connect() as conn:
-            signals = [dict(r) for r in conn.execute("SELECT * FROM signals WHERE status IN ('ACTIVE','TP1','TP2','TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED') ORDER BY id DESC LIMIT 500").fetchall()]
+            signals = [dict(row) for row in conn.execute(
+                """SELECT * FROM signals
+                   WHERE status IN ('ACTIVE','TP1','TP2','TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED')
+                   ORDER BY id DESC LIMIT 500"""
+            ).fetchall()]
         for signal in signals:
             result = self.sync_signal(signal)
             for key in totals:
                 totals[key] += result[key]
         return totals
 
+    def recent_events(self, telegram_id: int, limit: int = 15) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 100))
+        with connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM execution_events WHERE telegram_id=? ORDER BY id DESC LIMIT {safe_limit}",
+                (telegram_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def _get_position(self, telegram_id: int, signal_id: int) -> dict[str, Any] | None:
         with connect() as conn:
-            row = conn.execute("SELECT * FROM paper_positions WHERE telegram_id=? AND signal_id=?", (telegram_id, signal_id)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM paper_positions WHERE telegram_id=? AND signal_id=?",
+                (telegram_id, signal_id),
+            ).fetchone()
         return dict(row) if row else None
 
     @staticmethod
     def _risk_profile(profile: dict[str, Any]) -> RiskProfile:
         return RiskProfile(
-            risk_pct=float(profile["risk_pct"]), max_positions=int(profile["max_positions"]),
-            max_heat_r=float(profile["max_heat_r"]), daily_loss_pct=float(profile["daily_loss_pct"]),
-            max_slippage_pct=float(profile["max_slippage_pct"]), paper_balance=float(profile["paper_balance"]),
+            risk_pct=float(profile["risk_pct"]),
+            max_positions=int(profile["max_positions"]),
+            max_heat_r=float(profile["max_heat_r"]),
+            daily_loss_pct=float(profile["daily_loss_pct"]),
+            max_slippage_pct=float(profile["max_slippage_pct"]),
+            paper_balance=float(profile["paper_balance"]),
+            min_confidence=float(profile.get("min_confidence") or 55.0),
+            max_notional_pct=float(profile.get("max_notional_pct") or 35.0),
+            symbol_cooldown_min=int(profile.get("symbol_cooldown_min") or 30),
+        )
+
+    def _portfolio_state(self, telegram_id: int, symbol: str, cooldown_min: int) -> PortfolioState:
+        cooldown_since = (datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_min))).isoformat()
+        with connect() as conn:
+            open_row = conn.execute(
+                """SELECT COUNT(*) c, COALESCE(SUM(initial_risk_r * remaining_fraction),0) heat
+                   FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')""",
+                (telegram_id,),
+            ).fetchone()
+            symbol_open = conn.execute(
+                """SELECT COUNT(*) c FROM paper_positions
+                   WHERE telegram_id=? AND symbol=? AND status IN ('OPEN','PARTIAL')""",
+                (telegram_id, symbol),
+            ).fetchone()
+            cooldown = conn.execute(
+                """SELECT COUNT(*) c FROM paper_positions
+                   WHERE telegram_id=? AND symbol=? AND status='CLOSED' AND closed_at>=?""",
+                (telegram_id, symbol, cooldown_since),
+            ).fetchone()
+            daily = conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl_delta),0) pnl FROM execution_events
+                   WHERE telegram_id=? AND created_at>=? AND event_type IN ('PARTIAL_FILLED','CLOSED')""",
+                (telegram_id, _day_start()),
+            ).fetchone()
+        return PortfolioState(
+            open_positions=int(open_row[0] or 0),
+            current_heat_r=float(open_row[1] or 0.0),
+            daily_realized_pnl=float(daily[0] or 0.0),
+            symbol_is_open=bool(symbol_open[0]),
+            symbol_in_cooldown=bool(cooldown[0]),
         )
 
     def _open(self, telegram_id: int, profile: dict[str, Any], signal: dict[str, Any]) -> str:
-        with connect() as conn:
-            open_count = int(conn.execute("SELECT COUNT(*) c FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')", (telegram_id,)).fetchone()[0])
-            heat = float(conn.execute("SELECT COALESCE(SUM(initial_risk_r),0) h FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')", (telegram_id,)).fetchone()[0])
-        decision = self.validator.validate(signal=signal, profile=self._risk_profile(profile), balance=float(profile["paper_balance"]), open_positions=open_count, current_heat_r=heat)
+        risk_profile = self._risk_profile(profile)
+        state = self._portfolio_state(telegram_id, str(signal["symbol"]), risk_profile.symbol_cooldown_min)
+        stats = self.profile_stats(telegram_id)
+        equity = max(0.0, float(stats["equity"]))
+        decision = self.validator.validate(
+            signal=signal,
+            profile=risk_profile,
+            balance=equity,
+            portfolio=state,
+        )
         now = _now()
         if not decision.allowed or decision.size is None:
             with connect() as conn:
                 conn.execute(
-                    """INSERT INTO paper_positions(telegram_id,signal_id,symbol,timeframe,side,status,rejection_code,rejection_reason,created_at,updated_at)
-                       VALUES(?,?,?,?,?,'REJECTED',?,?,?,?) ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
-                    (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"], decision.code, decision.reason, now, now),
+                    """INSERT INTO paper_positions(
+                           telegram_id,signal_id,symbol,timeframe,side,status,rejection_code,rejection_reason,
+                           last_signal_status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,'REJECTED',?,?,?,?,?)
+                       ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
+                    (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
+                     decision.code, decision.reason, signal.get("status"), now, now),
                 )
-                self._event_conn(conn, telegram_id, signal["id"], "REJECTED", None, {"code": decision.code, "reason": decision.reason})
+                self._event_conn(conn, telegram_id, signal["id"], "REJECTED", None, 0.0, {
+                    "code": decision.code, "reason": decision.reason,
+                    "daily_pnl": state.daily_realized_pnl, "heat_r": state.current_heat_r,
+                })
             return "REJECTED"
+
         fill = float(signal.get("current_price") or signal["entry"])
         size = decision.size
         with connect() as conn:
             conn.execute(
-                """INSERT INTO paper_positions(telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,stop_price,tp1,tp2,tp3,quantity,notional,risk_amount,initial_risk_r,remaining_fraction,opened_at,created_at,updated_at)
-                   VALUES(?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,1.0,1.0,?,?,?) ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
-                (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"], fill, fill,
-                 signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"], size.quantity, size.notional,
-                 size.risk_amount, now, now, now),
+                """INSERT INTO paper_positions(
+                       telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,stop_price,
+                       tp1,tp2,tp3,quantity,notional,risk_amount,initial_risk_r,remaining_fraction,
+                       realized_r,realized_pnl,last_signal_status,opened_at,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,1.0,1.0,0,0,?,?,?,?)
+                   ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
+                (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
+                 fill, fill, signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"],
+                 size.quantity, size.notional, size.risk_amount, signal.get("status"), now, now, now),
             )
-            self._event_conn(conn, telegram_id, signal["id"], "OPENED", fill, {"quantity": size.quantity, "notional": size.notional, "risk_amount": size.risk_amount})
+            self._event_conn(conn, telegram_id, signal["id"], "OPENED", fill, 0.0, {
+                "quantity": size.quantity, "notional": size.notional, "risk_amount": size.risk_amount,
+                "slippage_pct": decision.expected_slippage_pct, "equity_before": equity,
+            })
         return "OPEN"
 
     def _sync_existing(self, position: dict[str, Any], signal: dict[str, Any]) -> str:
-        now = _now(); price = float(signal.get("exit_price") or signal.get("current_price") or position["last_price"] or position["entry_price"])
-        terminal = str(signal.get("status")) in {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED"} or signal.get("closed_at")
+        now = _now()
+        signal_status = str(signal.get("status") or "").upper()
+        if signal_status == str(position.get("last_signal_status") or "").upper() and not signal.get("closed_at"):
+            return "SKIPPED"
+        price = float(signal.get("exit_price") or signal.get("current_price") or position["last_price"] or position["entry_price"])
+        terminal = signal_status in self.TERMINAL_SIGNAL_STATUSES or bool(signal.get("closed_at"))
         if terminal:
             with connect() as conn:
-                self._close_position_conn(conn, position, price, str(signal.get("result") or signal.get("status")), now)
+                self._close_position_conn(conn, position, price, str(signal.get("result") or signal_status), now)
             return "CLOSED"
-        remaining = 1.0
-        if str(signal.get("status")) == "TP1": remaining = 0.5
-        elif str(signal.get("status")) == "TP2": remaining = 0.25
+
+        target_remaining = 1.0
+        if signal_status == "TP1":
+            target_remaining = 0.5
+        elif signal_status == "TP2":
+            target_remaining = 0.25
+        current_remaining = float(position.get("remaining_fraction") or 0.0)
+        if target_remaining >= current_remaining:
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE paper_positions SET last_price=?,last_signal_status=?,updated_at=? WHERE id=?",
+                    (price, signal_status, now, position["id"]),
+                )
+            return "UPDATED"
+
+        closed_fraction = current_remaining - target_remaining
+        trade_r = self._r_multiple(position, price)
+        realized_r_delta = trade_r * closed_fraction
+        realized_pnl_delta = realized_r_delta * float(position.get("risk_amount") or 0.0)
         with connect() as conn:
-            conn.execute("UPDATE paper_positions SET status=?,last_price=?,remaining_fraction=?,updated_at=? WHERE id=?", ("PARTIAL" if remaining < 1 else "OPEN", price, remaining, now, position["id"]))
+            conn.execute(
+                """UPDATE paper_positions SET status='PARTIAL',last_price=?,remaining_fraction=?,
+                   realized_r=COALESCE(realized_r,0)+?,realized_pnl=COALESCE(realized_pnl,0)+?,
+                   last_signal_status=?,updated_at=? WHERE id=?""",
+                (price, target_remaining, realized_r_delta, realized_pnl_delta, signal_status, now, position["id"]),
+            )
+            self._event_conn(conn, int(position["telegram_id"]), int(position["signal_id"]),
+                             "PARTIAL_FILLED", price, realized_pnl_delta, {
+                                 "signal_status": signal_status, "closed_fraction": closed_fraction,
+                                 "remaining_fraction": target_remaining, "realized_r_delta": realized_r_delta,
+                             })
         return "UPDATED"
 
     @staticmethod
     def _r_multiple(position: dict[str, Any], price: float) -> float:
-        entry = float(position["entry_price"]); stop = float(position["stop_price"]); side = str(position["side"])
+        entry = float(position["entry_price"])
+        stop = float(position["stop_price"])
+        side = str(position["side"]).upper()
         risk = abs(entry - stop)
-        if risk <= 0: return 0.0
+        if risk <= 0:
+            return 0.0
         return ((price - entry) if side == "LONG" else (entry - price)) / risk
 
     def _close_position_conn(self, conn, position: dict[str, Any], price: float, reason: str, now: str) -> None:
-        realized_r = self._r_multiple(position, price)
-        conn.execute("UPDATE paper_positions SET status='CLOSED',last_price=?,exit_price=?,realized_r=?,close_reason=?,closed_at=?,updated_at=? WHERE id=?", (price, price, realized_r, reason, now, now, position["id"]))
-        self._event_conn(conn, int(position["telegram_id"]), int(position["signal_id"]), "CLOSED", price, {"reason": reason, "realized_r": realized_r})
+        remaining = float(position.get("remaining_fraction") or 0.0)
+        trade_r = self._r_multiple(position, price)
+        realized_r_delta = trade_r * remaining
+        realized_pnl_delta = realized_r_delta * float(position.get("risk_amount") or 0.0)
+        total_r = float(position.get("realized_r") or 0.0) + realized_r_delta
+        total_pnl = float(position.get("realized_pnl") or 0.0) + realized_pnl_delta
+        conn.execute(
+            """UPDATE paper_positions SET status='CLOSED',last_price=?,exit_price=?,remaining_fraction=0,
+               realized_r=?,realized_pnl=?,close_reason=?,last_signal_status=?,closed_at=?,updated_at=? WHERE id=?""",
+            (price, price, total_r, total_pnl, reason, reason, now, now, position["id"]),
+        )
+        self._event_conn(conn, int(position["telegram_id"]), int(position["signal_id"]),
+                         "CLOSED", price, realized_pnl_delta, {
+                             "reason": reason, "remaining_fraction": remaining,
+                             "realized_r_delta": realized_r_delta, "total_realized_r": total_r,
+                             "total_realized_pnl": total_pnl,
+                         })
 
     @staticmethod
-    def _event_conn(conn, telegram_id: int, signal_id: int, event_type: str, price: float | None, details: dict[str, Any]) -> None:
-        conn.execute("INSERT INTO execution_events(telegram_id,signal_id,event_type,price,details_json,created_at) VALUES(?,?,?,?,?,?)", (telegram_id, signal_id, event_type, price, json.dumps(details, ensure_ascii=False), _now()))
+    def _event_conn(
+        conn,
+        telegram_id: int,
+        signal_id: int,
+        event_type: str,
+        price: float | None,
+        realized_pnl_delta: float,
+        details: dict[str, Any],
+    ) -> None:
+        conn.execute(
+            """INSERT INTO execution_events(
+                   telegram_id,signal_id,event_type,price,realized_pnl_delta,details_json,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (telegram_id, signal_id, event_type, price, realized_pnl_delta,
+             json.dumps(details, ensure_ascii=False), _now()),
+        )

@@ -1,9 +1,9 @@
-# Liquidity Vision Intelligence v9.1.0
+# Liquidity Vision Intelligence v9.2.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
-## Release notes — v9.1.0
+## Release notes — v9.2.0
 
 - Added dependency-resilient EMA, RSI, and MACD implementations.
 - Restored the missing legacy Brain contract through the current Decision Brain.
@@ -39,7 +39,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.1.0
+APP_VERSION=9.2.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

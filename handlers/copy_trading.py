@@ -22,13 +22,20 @@ Max positions: <b>{int(profile['max_positions'])}</b>
 Max portfolio heat: <b>{float(profile['max_heat_r']):.2f}R</b>
 Daily loss limit: <b>{float(profile['daily_loss_pct']):.2f}%</b>
 Max slippage: <b>{float(profile['max_slippage_pct']):.2f}%</b>
+Min confidence: <b>{float(profile.get('min_confidence') or 55):.0f}%</b>
+Max notional: <b>{float(profile.get('max_notional_pct') or 35):.0f}% of equity</b>
+Symbol cooldown: <b>{int(profile.get('symbol_cooldown_min') or 30)} min</b>
 
 📊 <b>Paper execution</b>
 Open: {int(stats.get('open_count') or 0)}
 Closed: {int(stats.get('closed_count') or 0)}
 Rejected: {int(stats.get('rejected_count') or 0)}
+Equity: <b>${float(stats.get('equity') or profile['paper_balance']):,.2f}</b>
+Today: <b>${float(stats.get('daily_pnl') or 0):+,.2f}</b>
+Total PnL: <b>${float(stats.get('realized_pnl') or 0):+,.2f}</b>
 Total realized: {float(stats.get('realized_r') or 0):+.2f}R
 Average: {float(stats.get('avg_r') or 0):+.2f}R
+Win rate: {float(stats.get('win_rate') or 0):.1f}%
 
 <b>Commands</b>
 <code>/copy_enable</code> — start paper copying
@@ -36,10 +43,11 @@ Average: {float(stats.get('avg_r') or 0):+.2f}R
 <code>/copy_risk 0.5</code> — risk per trade
 <code>/copy_balance 10000</code> — paper balance
 <code>/copy_limits 3 2.5 2</code> — positions, heat R, daily loss %
+<code>/copy_guard 55 35 30 0.25</code> — confidence, notional %, cooldown min, slippage %
 <code>/copy_stats</code> — execution statistics
 <code>/panic</code> — close paper positions and disable execution
 
-🔒 LIVE execution is hard-disabled in v9.1.0."""
+🔒 LIVE execution remains fail-closed. v9.2.0 uses a full paper execution ledger."""
 
 
 @router.message(Command("copy"))
@@ -110,3 +118,24 @@ async def copy_stats(message: Message):
 async def panic(message: Message):
     count = service.panic(message.from_user.id)
     await message.answer(f"🛑 <b>PANIC completed.</b>\nCopy execution disabled. Paper positions closed: <b>{count}</b>.", parse_mode="HTML")
+
+
+@router.message(Command("copy_guard"))
+async def copy_guard(message: Message):
+    try:
+        parts = (message.text or "").split()
+        confidence, notional, cooldown, slippage = float(parts[1]), float(parts[2]), int(parts[3]), float(parts[4])
+        if not (0 <= confidence <= 100 and 1 <= notional <= 100 and 0 <= cooldown <= 1440 and 0 <= slippage <= 5):
+            raise ValueError
+    except (IndexError, ValueError):
+        await message.answer(
+            "Usage: <code>/copy_guard 55 35 30 0.25</code>\n"
+            "(minimum confidence %, max notional %, symbol cooldown minutes, max slippage %)",
+            parse_mode="HTML",
+        )
+        return
+    service.update_profile(
+        message.from_user.id, min_confidence=confidence, max_notional_pct=notional,
+        symbol_cooldown_min=cooldown, max_slippage_pct=slippage,
+    )
+    await message.answer("✅ Execution guardrails updated.", parse_mode="HTML")
