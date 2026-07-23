@@ -1,15 +1,15 @@
-# Liquidity Vision Intelligence v9.8.5
+# Liquidity Vision Intelligence v9.8.7
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
-## v9.8.5 — BingX Read-Only Reachability
+## v9.8.7 — Authenticated Safety Core
 
-- Adds bounded automatic retry for OKX timeouts, temporary transport failures, rate limits, non-JSON responses, and HTTP 5xx responses.
-- Separates connect and read deadlines for Render-friendly network behavior.
-- Reuses the adapter HTTP session and caches public symbol rules for a configurable TTL.
-- Authentication, configuration, and permanent API errors remain fail-fast and are never retried.
-- LIVE order submission remains unavailable by contract.
+- Captures authenticated balances, positions, and open orders through one fail-closed `ExchangeManager` snapshot.
+- Adds `/exchange_account`, `/exchange_safety`, and `/exchange_preflight`.
+- Validates proposed order intent against demo/live mode, symbol whitelist, notional, leverage, open-position limits, duplicate orders, and exchange tick/step rules.
+- Keeps LIVE execution globally locked and preserves the no-write adapter contract.
+- Combines the planned authenticated-read milestone and execution-safety milestone without skipping validation.
 
 ## v9.8.3 — Exchange Reachability: OKX Read-Only
 
@@ -69,7 +69,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.8.5
+APP_VERSION=9.8.7
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

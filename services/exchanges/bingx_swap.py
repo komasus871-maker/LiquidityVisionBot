@@ -100,7 +100,7 @@ class BingXSwapAdapter(ExchangeAdapter):
 
     async def _request_once(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False) -> Any:
         payload = {key: value for key, value in (params or {}).items() if value is not None}
-        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.5"}
+        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.8.7"}
         if signed:
             if not self.configured:
                 raise ExchangeConfigurationError("BINGX_API_KEY and BINGX_API_SECRET are required")

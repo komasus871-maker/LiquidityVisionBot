@@ -28,8 +28,8 @@ def test_release_and_registry_transport_settings(monkeypatch):
     monkeypatch.setenv("EXCHANGE_READ_TIMEOUT", "9")
     monkeypatch.setenv("EXCHANGE_MAX_ATTEMPTS", "4")
     adapter = build_exchange_registry().create("okx")
-    assert APP_VERSION == "9.8.5"
-    assert RELEASE_NAME == "BingX Read-Only Reachability"
+    assert APP_VERSION == "9.8.7"
+    assert RELEASE_NAME == "Authenticated Safety Core"
     assert adapter.connect_timeout_seconds == 2.5
     assert adapter.read_timeout_seconds == 9
     assert adapter.max_attempts == 4

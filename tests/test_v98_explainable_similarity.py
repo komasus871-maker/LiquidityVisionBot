@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.8.5"
-    assert RELEASE_NAME == "BingX Read-Only Reachability"
+    assert APP_VERSION == "9.8.7"
+    assert RELEASE_NAME == "Authenticated Safety Core"
 
 
 def test_similarity_details_explain_groups_and_features():

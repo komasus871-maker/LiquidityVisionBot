@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.8.7 — Authenticated Safety Core
+
+- Added `ExchangeManager` for fail-closed authenticated account snapshots across balances, positions, and open orders.
+- Added `/exchange_account` with explicit demo/live account reporting and no write access.
+- Added a pure execution preflight validator with notional, leverage, whitelist, tick/step, minimum-size, portfolio-capacity, and duplicate-order checks.
+- Added `/exchange_safety` and `/exchange_preflight` diagnostics.
+- Added an explicit global LIVE lock; order submission remains structurally unavailable in every adapter.
+- Added v9.8.7 regression coverage and release documentation.
+
 ## 9.8.5 — BingX Read-Only Reachability
 
 - Added a read-only BingX USDT-M perpetual adapter for health, contract rules, balances, positions, and open orders.

@@ -30,8 +30,8 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.8.5"
-    assert "BingX Read-Only Reachability" in RELEASE_NAME
+    assert APP_VERSION == "9.8.7"
+    assert "Authenticated Safety Core" in RELEASE_NAME
 
 
 @pytest.mark.asyncio
