@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+from uuid import uuid4
+
+from database.database import connect
+from services.execution_models import CopyExecutionPlan
+
+
+class OrderStatus(str, Enum):
+    SUBMITTED = "SUBMITTED"
+    ACCEPTED = "ACCEPTED"
+    OPEN = "OPEN"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    FAILED = "FAILED"
+
+
+TERMINAL_ORDER_STATUSES = {
+    OrderStatus.FILLED,
+    OrderStatus.CANCELLED,
+    OrderStatus.REJECTED,
+    OrderStatus.EXPIRED,
+    OrderStatus.FAILED,
+}
+
+ALLOWED_ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
+    OrderStatus.SUBMITTED: frozenset({OrderStatus.ACCEPTED, OrderStatus.REJECTED, OrderStatus.FAILED, OrderStatus.CANCELLED}),
+    OrderStatus.ACCEPTED: frozenset({OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.EXPIRED, OrderStatus.FAILED}),
+    OrderStatus.OPEN: frozenset({OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.EXPIRED, OrderStatus.FAILED}),
+    OrderStatus.PARTIALLY_FILLED: frozenset({OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.EXPIRED, OrderStatus.FAILED}),
+    OrderStatus.FILLED: frozenset(),
+    OrderStatus.CANCELLED: frozenset(),
+    OrderStatus.REJECTED: frozenset(),
+    OrderStatus.EXPIRED: frozenset(),
+    OrderStatus.FAILED: frozenset(),
+}
+
+
+class InvalidOrderTransition(ValueError):
+    def __init__(self, current: OrderStatus, target: OrderStatus) -> None:
+        self.current = current
+        self.target = target
+        super().__init__(f"Invalid paper order transition: {current.value} -> {target.value}")
+
+
+def can_transition_order(current: OrderStatus, target: OrderStatus) -> bool:
+    return current is target or target in ALLOWED_ORDER_TRANSITIONS[current]
+
+
+@dataclass(frozen=True)
+class FillResult:
+    order: dict[str, Any]
+    fill: dict[str, Any] | None
+    position: dict[str, Any] | None
+    created: bool
+
+
+class PaperExecutionLifecycle:
+    """Persistent execution → order → fill → position lifecycle.
+
+    The service is deliberately independent from exchange adapters. It is safe to
+    call repeatedly: unique execution/idempotency keys and fill keys prevent
+    duplicate economic effects after retries or worker restarts.
+    """
+
+    DEFAULT_COMMISSION_RATE = 0.0005
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def submit(self, plan: CopyExecutionPlan, *, execution_ref: str | None = None) -> tuple[dict[str, Any], bool]:
+        now = self._now()
+        requested_qty = float(plan.quantity or 0.0)
+        with connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO paper_execution_orders(
+                       order_key,idempotency_key,plan_id,telegram_id,signal_id,execution_ref,
+                       symbol,timeframe,side,order_type,status,requested_quantity,filled_quantity,
+                       average_fill_price,limit_price,notional,leverage,last_error,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,0,NULL,?,?,?,NULL,?,?)
+                   ON CONFLICT(order_key) DO NOTHING""",
+                (plan.idempotency_key, plan.idempotency_key, plan.plan_id, plan.telegram_id,
+                 plan.signal_id, execution_ref, plan.symbol, plan.timeframe, plan.side,
+                 plan.order_type, OrderStatus.SUBMITTED.value, requested_qty,
+                 plan.entry_price, plan.notional, plan.leverage, now, now),
+            )
+            created = cur.rowcount == 1
+            row = conn.execute(
+                "SELECT * FROM paper_execution_orders WHERE order_key=?", (plan.idempotency_key,)
+            ).fetchone()
+            if created:
+                self._event(conn, int(dict(row)["id"]), None, OrderStatus.SUBMITTED, "engine", "ORDER_SUBMITTED")
+        return dict(row), created
+
+    def reject(self, plan: CopyExecutionPlan, *, reason_code: str, reason: str) -> dict[str, Any]:
+        row, _ = self.submit(plan)
+        current = OrderStatus(str(row["status"]))
+        if current is OrderStatus.REJECTED:
+            return row
+        return self.transition(int(row["id"]), OrderStatus.REJECTED, actor="planner", reason_code=reason_code, reason=reason)
+
+    def transition(
+        self, order_id: int, target: OrderStatus | str, *, actor: str = "engine",
+        reason_code: str | None = None, reason: str | None = None,
+        execution_ref: str | None = None,
+    ) -> dict[str, Any]:
+        target_status = target if isinstance(target, OrderStatus) else OrderStatus(str(target))
+        now = self._now()
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown paper order: {order_id}")
+            item = dict(row)
+            current = OrderStatus(str(item["status"]))
+            if not can_transition_order(current, target_status):
+                raise InvalidOrderTransition(current, target_status)
+            if current is target_status:
+                return item
+            cur = conn.execute(
+                """UPDATE paper_execution_orders SET status=?,execution_ref=COALESCE(?,execution_ref),
+                   last_error=?,updated_at=? WHERE id=? AND status=?""",
+                (target_status.value, execution_ref, reason if target_status in {OrderStatus.FAILED, OrderStatus.REJECTED} else item.get("last_error"),
+                 now, order_id, current.value),
+            )
+            if cur.rowcount != 1:
+                raise InvalidOrderTransition(current, target_status)
+            self._event(conn, order_id, current, target_status, actor, reason_code or target_status.value, reason)
+            updated = conn.execute("SELECT * FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone()
+        return dict(updated)
+
+    def execute_market(
+        self, plan: CopyExecutionPlan, *, fill_price: float, execution_ref: str,
+        commission_rate: float = DEFAULT_COMMISSION_RATE,
+        slippage_pct: float | None = None,
+    ) -> FillResult:
+        order, created = self.submit(plan, execution_ref=execution_ref)
+        order_id = int(order["id"])
+        status = OrderStatus(str(order["status"]))
+        if status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
+            fill = self._latest_fill(order_id)
+            position = self.position_for_order(order_id)
+            return FillResult(order=order, fill=fill, position=position, created=False)
+        if status is OrderStatus.SUBMITTED:
+            order = self.transition(order_id, OrderStatus.ACCEPTED, actor="paper_adapter", reason_code="PAPER_ACCEPTED", execution_ref=execution_ref)
+        quantity = float(plan.quantity or 0.0)
+        if quantity <= 0:
+            failed = self.transition(order_id, OrderStatus.FAILED, actor="paper_adapter", reason_code="INVALID_QUANTITY", reason="Quantity must be positive")
+            return FillResult(order=failed, fill=None, position=None, created=created)
+        return self.record_fill(
+            order_id, quantity=quantity, price=float(fill_price),
+            commission_rate=float(commission_rate), slippage_pct=float(slippage_pct if slippage_pct is not None else plan.expected_slippage_pct),
+            fill_key=f"{plan.idempotency_key}:full", actor="paper_adapter",
+        )
+
+    def record_fill(
+        self, order_id: int, *, quantity: float, price: float,
+        commission_rate: float = DEFAULT_COMMISSION_RATE, slippage_pct: float = 0.0,
+        fill_key: str | None = None, actor: str = "paper_adapter",
+    ) -> FillResult:
+        if quantity <= 0 or price <= 0:
+            raise ValueError("Fill quantity and price must be positive")
+        fill_key = fill_key or f"fill:{order_id}:{uuid4().hex}"
+        now = self._now()
+        with connect() as conn:
+            order_row = conn.execute("SELECT * FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone()
+            if order_row is None:
+                raise KeyError(f"Unknown paper order: {order_id}")
+            order = dict(order_row)
+            current = OrderStatus(str(order["status"]))
+            if current in TERMINAL_ORDER_STATUSES and current is not OrderStatus.FILLED:
+                raise InvalidOrderTransition(current, OrderStatus.PARTIALLY_FILLED)
+            existing = conn.execute("SELECT * FROM paper_execution_fills WHERE fill_key=?", (fill_key,)).fetchone()
+            if existing is not None:
+                return FillResult(order=order, fill=dict(existing), position=self._position_for_order_conn(conn, order_id), created=False)
+
+            requested = float(order.get("requested_quantity") or 0.0)
+            previous_qty = float(order.get("filled_quantity") or 0.0)
+            remaining = max(0.0, requested - previous_qty)
+            applied_qty = min(float(quantity), remaining)
+            if applied_qty <= 0:
+                return FillResult(order=order, fill=self._latest_fill_conn(conn, order_id), position=self._position_for_order_conn(conn, order_id), created=False)
+            previous_avg = float(order.get("average_fill_price") or 0.0)
+            new_qty = previous_qty + applied_qty
+            average_price = ((previous_avg * previous_qty) + (price * applied_qty)) / new_qty
+            notional = applied_qty * price
+            commission = notional * max(0.0, commission_rate)
+            cur = conn.execute(
+                """INSERT INTO paper_execution_fills(
+                       fill_key,order_id,idempotency_key,telegram_id,signal_id,execution_ref,
+                       quantity,price,notional,commission,commission_rate,slippage_pct,liquidity_type,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(fill_key) DO NOTHING""",
+                (fill_key, order_id, order["idempotency_key"], order["telegram_id"], order["signal_id"],
+                 order.get("execution_ref"), applied_qty, price, notional, commission,
+                 commission_rate, slippage_pct, "TAKER", now),
+            )
+            if cur.rowcount != 1:
+                existing = conn.execute("SELECT * FROM paper_execution_fills WHERE fill_key=?", (fill_key,)).fetchone()
+                return FillResult(order=order, fill=dict(existing), position=self._position_for_order_conn(conn, order_id), created=False)
+            fill = dict(conn.execute("SELECT * FROM paper_execution_fills WHERE fill_key=?", (fill_key,)).fetchone())
+            target = OrderStatus.FILLED if requested <= 0 or new_qty >= requested - 1e-12 else OrderStatus.PARTIALLY_FILLED
+            if not can_transition_order(current, target):
+                raise InvalidOrderTransition(current, target)
+            conn.execute(
+                """UPDATE paper_execution_orders SET status=?,filled_quantity=?,average_fill_price=?,
+                   updated_at=? WHERE id=?""",
+                (target.value, new_qty, average_price, now, order_id),
+            )
+            self._event(conn, order_id, current, target, actor, "FULL_FILL" if target is OrderStatus.FILLED else "PARTIAL_FILL",
+                        f"Filled {applied_qty:g} at {price:g}")
+            position = self._upsert_position(conn, order, fill, new_qty, average_price, commission, now)
+            updated = dict(conn.execute("SELECT * FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone())
+        return FillResult(order=updated, fill=fill, position=position, created=True)
+
+    def recent_orders(self, telegram_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        safe = max(1, min(int(limit), 100))
+        with connect() as conn:
+            rows = conn.execute(f"SELECT * FROM paper_execution_orders WHERE telegram_id=? ORDER BY id DESC LIMIT {safe}", (telegram_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_fills(self, telegram_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        safe = max(1, min(int(limit), 100))
+        with connect() as conn:
+            rows = conn.execute(
+                f"""SELECT f.*,o.symbol,o.side,o.timeframe,o.status AS order_status
+                    FROM paper_execution_fills f JOIN paper_execution_orders o ON o.id=f.order_id
+                    WHERE f.telegram_id=? ORDER BY f.id DESC LIMIT {safe}""", (telegram_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_positions(self, telegram_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        safe = max(1, min(int(limit), 100))
+        with connect() as conn:
+            rows = conn.execute(f"SELECT * FROM paper_execution_positions WHERE telegram_id=? ORDER BY id DESC LIMIT {safe}", (telegram_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_order_for_user(self, telegram_id: int, reference: str) -> dict[str, Any] | None:
+        raw = str(reference).strip()
+        with connect() as conn:
+            if raw.isdigit():
+                row = conn.execute("SELECT * FROM paper_execution_orders WHERE telegram_id=? AND (id=? OR signal_id=?) ORDER BY id DESC LIMIT 1", (telegram_id, int(raw), int(raw))).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM paper_execution_orders WHERE telegram_id=? AND (order_key=? OR idempotency_key=? OR plan_id=? OR execution_ref=?) ORDER BY id DESC LIMIT 1", (telegram_id, raw, raw, raw, raw)).fetchone()
+        return dict(row) if row else None
+
+    def order_events(self, telegram_id: int, order_id: int) -> list[dict[str, Any]]:
+        with connect() as conn:
+            rows = conn.execute("SELECT * FROM paper_order_events WHERE telegram_id=? AND order_id=? ORDER BY id ASC", (telegram_id, order_id)).fetchall()
+        return [dict(row) for row in rows]
+
+    def position_for_order(self, order_id: int) -> dict[str, Any] | None:
+        with connect() as conn:
+            return self._position_for_order_conn(conn, order_id)
+
+    def _upsert_position(self, conn, order: dict[str, Any], fill: dict[str, Any], cumulative_qty: float,
+                         average_price: float, commission: float, now: str) -> dict[str, Any]:
+        conn.execute(
+            """INSERT INTO paper_execution_positions(
+                   position_key,order_id,idempotency_key,telegram_id,signal_id,symbol,timeframe,side,status,
+                   quantity,average_entry,last_price,realized_pnl,unrealized_pnl,total_commission,opened_at,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?, 'OPEN',?,?,?,0,0,?,?,?,?)
+               ON CONFLICT(position_key) DO UPDATE SET quantity=?,average_entry=?,last_price=?,
+                   total_commission=paper_execution_positions.total_commission+?,updated_at=?""",
+            (order["idempotency_key"], order["id"], order["idempotency_key"], order["telegram_id"], order["signal_id"],
+             order["symbol"], order["timeframe"], order["side"], cumulative_qty, average_price, fill["price"],
+             commission, now, now, now,
+             cumulative_qty, average_price, fill["price"], commission, now),
+        )
+        return self._position_for_order_conn(conn, int(order["id"])) or {}
+
+    @staticmethod
+    def _position_for_order_conn(conn, order_id: int) -> dict[str, Any] | None:
+        row = conn.execute("SELECT * FROM paper_execution_positions WHERE order_id=?", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def _latest_fill_conn(conn, order_id: int) -> dict[str, Any] | None:
+        row = conn.execute("SELECT * FROM paper_execution_fills WHERE order_id=? ORDER BY id DESC LIMIT 1", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+    def _latest_fill(self, order_id: int) -> dict[str, Any] | None:
+        with connect() as conn:
+            return self._latest_fill_conn(conn, order_id)
+
+    @staticmethod
+    def _event(conn, order_id: int, from_status: OrderStatus | None, to_status: OrderStatus,
+               actor: str, reason_code: str, reason: str | None = None) -> None:
+        order = dict(conn.execute("SELECT telegram_id,idempotency_key FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone())
+        conn.execute(
+            """INSERT INTO paper_order_events(order_id,idempotency_key,telegram_id,from_status,to_status,actor,reason_code,reason,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (order_id, order["idempotency_key"], order["telegram_id"],
+             from_status.value if from_status else None, to_status.value, actor, reason_code, reason,
+             datetime.now(timezone.utc).isoformat()),
+        )

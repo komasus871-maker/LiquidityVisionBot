@@ -1,3 +1,24 @@
+# v9.9.6 — Recovery & Reliability Engine
+
+- Durable worker claims with identity, token, timestamps, and expiring leases.
+- Persistent RETRY_WAIT and DEAD_LETTER execution states.
+- Exponential retry backoff for transient adapter failures.
+- Automatic recovery of stale EXECUTING claims after worker restarts.
+- Maximum-attempt protection and dead-letter isolation.
+- Copy worker heartbeat and recovery counters in runtime diagnostics.
+- Admin visibility for claimed, retrying, and dead-letter executions.
+
+# Changelog
+
+## v9.9.5g — Unified Paper Execution Lifecycle
+
+- Added persistent paper orders, fills, positions, and order transition events.
+- Added guarded order state transitions and terminal-state protection.
+- Added idempotent full and partial fill recording with average price, commission, and slippage.
+- Integrated both CopyExecutionEngine and the production copy-trading path.
+- Upgraded `/orders`, `/execution`, and `/fills`; added `/positions`.
+- Added lifecycle, persistence, partial-fill, and replay tests.
+
 # v9.9.5f — Execution Observability & Transition Audit
 
 - Added persistent actor-aware execution transition history.

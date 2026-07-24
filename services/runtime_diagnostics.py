@@ -72,6 +72,9 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "active_trades": _scalar(conn, "SELECT COUNT(*) FROM signals WHERE status IN ('ACTIVE','TP1','TP2')"),
             "closed_signals": _scalar(conn, "SELECT COUNT(*) FROM signals WHERE status IN ('TP3','STOP','BREAKEVEN','MANUAL_STOP','CLOSED','INVALIDATED','EXPIRED')"),
             "watch_errors": _scalar(conn, "SELECT COUNT(*) FROM watch_states WHERE consecutive_errors > 0"),
+            "execution_retry_wait": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='RETRY_WAIT'"),
+            "execution_dead_letter": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='DEAD_LETTER'"),
+            "execution_claimed": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='EXECUTING'"),
         }
         duplicate_open_plans = _scalar(conn, """
             SELECT COUNT(*) FROM (

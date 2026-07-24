@@ -9,6 +9,7 @@ from services.execution_models import PortfolioState, PositionSizingMode, RiskPr
 from services.execution_validator import ExecutionValidator
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.copy_execution_journal import CopyExecutionJournal, JournalStatus
+from services.paper_execution_lifecycle import PaperExecutionLifecycle
 from services.execution_queue import ExecutionQueueService
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
@@ -33,6 +34,7 @@ class CopyTradingService:
         self.validator = ExecutionValidator()
         self.planner = CopyExecutionPlanner(self.validator)
         self.execution_journal = CopyExecutionJournal()
+        self.paper_lifecycle = PaperExecutionLifecycle()
         self.execution_queue = ExecutionQueueService(journal=self.execution_journal)
         self.training = CopyTrainingService()
         self.similarity = CopySimilarityService()
@@ -301,6 +303,8 @@ class CopyTradingService:
             training_policy=training_policy,
         )
         journal_row, _ = self.execution_journal.reserve(plan)
+        if not plan.approved:
+            self.paper_lifecycle.reject(plan, reason_code=plan.code, reason=plan.reason)
         now = _now()
         genome_json, genome_fingerprint = self.similarity.snapshot(signal)
         if not plan.approved or plan.quantity is None or plan.notional is None or plan.risk_amount is None:
@@ -346,7 +350,12 @@ class CopyTradingService:
                 "training_expectancy_r": training_policy.expectancy_r,
                 "training_risk_multiplier": plan.risk_multiplier,
             })
-        self.execution_journal.transition(plan.idempotency_key, JournalStatus.EXECUTED, execution_ref=f"paper:{telegram_id}:{signal['id']}")
+        execution_ref = f"paper:{telegram_id}:{signal['id']}"
+        self.paper_lifecycle.execute_market(
+            plan, fill_price=fill, execution_ref=execution_ref,
+            slippage_pct=plan.expected_slippage_pct,
+        )
+        self.execution_journal.transition(plan.idempotency_key, JournalStatus.EXECUTED, execution_ref=execution_ref)
         return "OPEN"
 
     def _sync_rejected(self, position: dict[str, Any], signal: dict[str, Any]) -> str:

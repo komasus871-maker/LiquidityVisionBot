@@ -36,12 +36,14 @@ class ExecutionQueueService:
         return QueueEnqueueResult(row=row, created=created)
 
     def process_next(self) -> CopyExecutionResult | None:
+        self.journal.recover_expired_claims(limit=25)
         rows = self.journal.pending(limit=1)
         if not rows:
             return None
         return self.engine.execute(self.plan_from_row(rows[0]))
 
     def drain(self, limit: int = 25) -> list[CopyExecutionResult]:
+        self.journal.recover_expired_claims(limit=max(25, limit))
         results: list[CopyExecutionResult] = []
         for row in self.journal.pending(limit=limit):
             results.append(self.engine.execute(self.plan_from_row(row)))

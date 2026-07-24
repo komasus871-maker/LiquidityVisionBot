@@ -337,6 +337,45 @@ def create_tables() -> None:
                 metadata_json TEXT NOT NULL DEFAULT '{{}}', created_at TEXT NOT NULL
             )
         """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_execution_orders(
+                id {id_col}, order_key TEXT NOT NULL UNIQUE, idempotency_key TEXT NOT NULL UNIQUE,
+                plan_id TEXT NOT NULL, telegram_id BIGINT NOT NULL, signal_id BIGINT NOT NULL,
+                execution_ref TEXT, symbol TEXT NOT NULL, timeframe TEXT NOT NULL, side TEXT NOT NULL,
+                order_type TEXT NOT NULL, status TEXT NOT NULL, requested_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+                filled_quantity DOUBLE PRECISION NOT NULL DEFAULT 0, average_fill_price DOUBLE PRECISION,
+                limit_price DOUBLE PRECISION, notional DOUBLE PRECISION, leverage INTEGER NOT NULL DEFAULT 1,
+                last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_execution_fills(
+                id {id_col}, fill_key TEXT NOT NULL UNIQUE, order_id BIGINT NOT NULL,
+                idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL, signal_id BIGINT NOT NULL,
+                execution_ref TEXT, quantity DOUBLE PRECISION NOT NULL, price DOUBLE PRECISION NOT NULL,
+                notional DOUBLE PRECISION NOT NULL, commission DOUBLE PRECISION NOT NULL DEFAULT 0,
+                commission_rate DOUBLE PRECISION NOT NULL DEFAULT 0, slippage_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+                liquidity_type TEXT NOT NULL DEFAULT 'TAKER', created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_execution_positions(
+                id {id_col}, position_key TEXT NOT NULL UNIQUE, order_id BIGINT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL, signal_id BIGINT NOT NULL,
+                symbol TEXT NOT NULL, timeframe TEXT NOT NULL, side TEXT NOT NULL, status TEXT NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL DEFAULT 0, average_entry DOUBLE PRECISION NOT NULL DEFAULT 0,
+                last_price DOUBLE PRECISION, realized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+                unrealized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0, total_commission DOUBLE PRECISION NOT NULL DEFAULT 0,
+                opened_at TEXT, closed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_order_events(
+                id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
+                from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
+                reason TEXT, created_at TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations(
                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
@@ -399,6 +438,17 @@ def create_tables() -> None:
         }.items():
             _add_column(conn, "paper_positions", name, definition)
         _add_column(conn, "execution_events", "realized_pnl_delta", "DOUBLE PRECISION DEFAULT 0")
+        for name, definition in {
+            "claimed_by": "TEXT",
+            "claim_token": "TEXT",
+            "claimed_at": "TEXT",
+            "lease_expires_at": "TEXT",
+            "next_attempt_at": "TEXT",
+            "max_attempts": "INTEGER DEFAULT 5",
+            "last_retry_at": "TEXT",
+            "dead_letter_at": "TEXT",
+        }.items():
+            _add_column(conn, "copy_execution_journal", name, definition)
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
         duplicate_groups = conn.execute("""

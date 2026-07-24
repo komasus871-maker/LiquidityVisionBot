@@ -82,6 +82,7 @@ async def admin_status(message: Message) -> None:
             f"Observations: {counts['observations']} · Open plans: {counts['open_signals']}",
             f"Global active trades: {counts['active_trades']} · Global closed records: {counts['closed_signals']}",
             f"Watch rows with errors: {counts['watch_errors']}",
+            f"Execution claimed/retry/dead: {counts.get('execution_claimed', 0)}/{counts.get('execution_retry_wait', 0)}/{counts.get('execution_dead_letter', 0)}",
             "",
             "🧩 <b>Lifecycle integrity</b>",
             f"Duplicate open plans: {integrity['duplicate_open_plans']}",

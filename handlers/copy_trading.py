@@ -65,6 +65,9 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_stats</code> — execution statistics
 <code>/copy_plan</code> — latest execution plan
 <code>/copy_queue</code> — persistent execution queue
+<code>/orders</code> — unified paper orders
+<code>/fills</code> — real paper fills
+<code>/positions</code> — unified paper positions
 <code>/copy_training</code> — adaptive learning report
 <code>/copy_rejections</code> — execution rejection intelligence
 <code>/copy_guardrails</code> — rejected-signal outcome report
@@ -501,10 +504,12 @@ async def copy_plan(message: Message):
         parse_mode="HTML",
     )
 
-# v9.9.5f — Execution Observability & Transition Audit
+# v9.9.5g — Unified Paper Execution Lifecycle
 from services.execution_inspection import ExecutionInspectionService
+from services.paper_execution_lifecycle import PaperExecutionLifecycle
 
 execution_inspection_service = ExecutionInspectionService()
+paper_lifecycle_service = PaperExecutionLifecycle()
 
 
 def _compact_ref(value: object, length: int = 18) -> str:
@@ -514,12 +519,27 @@ def _compact_ref(value: object, length: int = 18) -> str:
 
 def _execution_status_icon(status: str) -> str:
     return {
-        "PLANNED": "📝", "REJECTED": "⛔", "EXECUTING": "⚙️",
-        "EXECUTED": "✅", "FAILED": "❌", "CANCELLED": "🚫",
+        "PLANNED": "📝", "REJECTED": "⛔", "EXECUTING": "⚙️", "EXECUTED": "✅",
+        "SUBMITTED": "📨", "ACCEPTED": "🤝", "OPEN": "🟢", "PARTIALLY_FILLED": "🟡",
+        "FILLED": "✅", "FAILED": "❌", "CANCELLED": "🚫", "EXPIRED": "⌛",
     }.get(status, "•")
 
 
-def _render_execution_item(item) -> str:
+def _render_order(row: dict) -> str:
+    status = str(row.get("status") or "UNKNOWN")
+    requested = float(row.get("requested_quantity") or 0.0)
+    filled = float(row.get("filled_quantity") or 0.0)
+    average = row.get("average_fill_price")
+    return (
+        f"{_execution_status_icon(status)} <b>Order #{int(row['id'])} · {escape(str(row.get('symbol') or 'UNKNOWN'))} "
+        f"{escape(str(row.get('side') or '—'))}</b>\n"
+        f"Status: <code>{escape(status)}</code> · Filled: <b>{filled:g}/{requested:g}</b>\n"
+        f"Average: <b>{'—' if average is None else f'{float(average):g}'}</b> · Type: <b>{escape(str(row.get('order_type') or '—'))}</b>\n"
+        f"Signal: <code>#{int(row.get('signal_id') or 0)}</code> · Ref: <code>{escape(_compact_ref(row.get('execution_ref') or row.get('idempotency_key')))}</code>"
+    )
+
+
+def _render_legacy_execution_item(item) -> str:
     row, plan = item.journal, item.plan
     status = str(row.get("status") or "UNKNOWN")
     quantity = plan.get("quantity")
@@ -527,11 +547,10 @@ def _render_execution_item(item) -> str:
     qty_text = "—" if quantity is None else f"{float(quantity):.8f}".rstrip("0").rstrip(".")
     notional_text = "—" if notional is None else f"${float(notional):,.2f}"
     return (
-        f"{_execution_status_icon(status)} <b>#{int(row['id'])} · {escape(str(plan.get('symbol') or 'UNKNOWN'))} "
+        f"{_execution_status_icon(status)} <b>Execution #{int(row['id'])} · {escape(str(plan.get('symbol') or 'UNKNOWN'))} "
         f"{escape(str(plan.get('side') or '—'))}</b>\n"
         f"Status: <code>{escape(status)}</code> · Qty: <b>{qty_text}</b> · Notional: <b>{notional_text}</b>\n"
-        f"Signal: <code>#{int(row.get('signal_id') or 0)}</code> · Attempts: <b>{int(row.get('attempt_count') or 0)}</b>\n"
-        f"Ref: <code>{escape(_compact_ref(row.get('execution_ref') or row.get('idempotency_key')))}</code>"
+        f"Signal: <code>#{int(row.get('signal_id') or 0)}</code> · Ref: <code>{escape(_compact_ref(row.get('execution_ref') or row.get('idempotency_key')))}</code>"
     )
 
 
@@ -541,8 +560,7 @@ def _render_execution_detail(item) -> str:
     timeline = list(reversed(item.timeline))
     timeline_text = "\n".join(
         f"• <code>{escape(str(event.get('to_status') or 'UNKNOWN'))}</code> · "
-        f"{escape(str(event.get('actor') or 'system'))} · "
-        f"{escape(str(event.get('reason_code') or '—'))}"
+        f"{escape(str(event.get('actor') or 'system'))} · {escape(str(event.get('reason_code') or '—'))}"
         for event in timeline[-12:]
     ) or "• Historical transitions were not recorded for this older execution."
     tps = plan.get("take_profits") or []
@@ -566,60 +584,127 @@ Reason: {escape(str(row.get('last_error') or row.get('reason') or '—'))}
 Execution ref: <code>{escape(str(row.get('execution_ref') or '—'))}</code>
 Idempotency: <code>{escape(str(row.get('idempotency_key') or '—'))}</code>
 
-🧭 <b>Timeline</b>
+🧭 <b>Execution timeline</b>
 {timeline_text}"""
+
+
+def _render_order_detail(order: dict, events: list[dict], fills: list[dict], position: dict | None) -> str:
+    event_text = "\n".join(
+        f"• <code>{escape(str(e.get('to_status') or 'UNKNOWN'))}</code> · {escape(str(e.get('actor') or 'system'))} · {escape(str(e.get('reason_code') or '—'))}"
+        for e in events[-12:]
+    ) or "• No order transitions recorded."
+    fill_text = "\n".join(
+        f"• {float(f.get('quantity') or 0):g} @ <b>{float(f.get('price') or 0):g}</b> · fee ${float(f.get('commission') or 0):.4f}"
+        for f in fills[-8:]
+    ) or "• No fills recorded."
+    position_text = "No position created."
+    if position:
+        position_text = (
+            f"{escape(str(position.get('status') or 'UNKNOWN'))} · Qty <b>{float(position.get('quantity') or 0):g}</b> · "
+            f"Avg <b>{float(position.get('average_entry') or 0):g}</b> · Fees <b>${float(position.get('total_commission') or 0):.4f}</b>"
+        )
+    return f"""📦 <b>Paper Order #{int(order['id'])}</b>
+
+Symbol: <b>{escape(str(order.get('symbol') or 'UNKNOWN'))}</b>
+Side: <b>{escape(str(order.get('side') or '—'))}</b>
+Timeframe: <b>{escape(str(order.get('timeframe') or '—'))}</b>
+Status: {_execution_status_icon(str(order.get('status')))} <code>{escape(str(order.get('status') or 'UNKNOWN'))}</code>
+Type: <b>{escape(str(order.get('order_type') or '—'))}</b>
+Requested: <b>{float(order.get('requested_quantity') or 0):g}</b>
+Filled: <b>{float(order.get('filled_quantity') or 0):g}</b>
+Average fill: <b>{'—' if order.get('average_fill_price') is None else f"{float(order['average_fill_price']):g}"}</b>
+Execution ref: <code>{escape(str(order.get('execution_ref') or '—'))}</code>
+
+🧭 <b>Order timeline</b>
+{event_text}
+
+🧾 <b>Fills</b>
+{fill_text}
+
+📈 <b>Position</b>
+{position_text}"""
 
 
 @router.message(Command("orders"))
 async def execution_orders(message: Message):
+    orders = paper_lifecycle_service.recent_orders(message.from_user.id, limit=10)
+    if orders:
+        await message.answer(
+            "📦 <b>Latest Paper Orders</b>\n\n" + "\n\n".join(_render_order(row) for row in orders)
+            + "\n\nUse <code>/execution ORDER_ID</code> for the full lifecycle.", parse_mode="HTML",
+        )
+        return
     items = execution_inspection_service.recent(message.from_user.id, limit=10)
     if not items:
-        await message.answer("⚙️ <b>Execution Orders</b>\n\nNo execution plans have been recorded yet.", parse_mode="HTML")
+        await message.answer("📦 <b>Paper Orders</b>\n\nNo execution plans have been recorded yet.", parse_mode="HTML")
         return
     await message.answer(
-        "⚙️ <b>Latest Execution Orders</b>\n\n" + "\n\n".join(_render_execution_item(item) for item in items)
-        + "\n\nUse <code>/execution ID</code> for the full lifecycle.",
-        parse_mode="HTML",
+        "⚙️ <b>Historical Execution Records</b>\n\n" + "\n\n".join(_render_legacy_execution_item(item) for item in items)
+        + "\n\nNew accepted/rejected signals will also create unified paper-order records.", parse_mode="HTML",
     )
 
 
 @router.message(Command("execution"))
 async def execution_detail(message: Message):
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) == 1:
-        items = execution_inspection_service.recent(message.from_user.id, limit=1)
-        if not items:
-            await message.answer("No execution has been recorded yet.")
+    reference = parts[1].strip() if len(parts) > 1 else ""
+    if reference:
+        order = paper_lifecycle_service.get_order_for_user(message.from_user.id, reference)
+        if order:
+            events = paper_lifecycle_service.order_events(message.from_user.id, int(order["id"]))
+            fills = [f for f in paper_lifecycle_service.recent_fills(message.from_user.id, limit=100) if int(f["order_id"]) == int(order["id"])]
+            position = paper_lifecycle_service.position_for_order(int(order["id"]))
+            await message.answer(_render_order_detail(order, events, fills, position), parse_mode="HTML")
             return
-        item = items[0]
+        item = execution_inspection_service.get(message.from_user.id, reference)
     else:
-        item = execution_inspection_service.get(message.from_user.id, parts[1].strip())
-        if item is None:
-            await message.answer(
-                "Execution not found. Use an order ID, signal ID, plan ID, idempotency key, or execution reference."
-            )
+        orders = paper_lifecycle_service.recent_orders(message.from_user.id, limit=1)
+        if orders:
+            order = orders[0]
+            events = paper_lifecycle_service.order_events(message.from_user.id, int(order["id"]))
+            fills = [f for f in paper_lifecycle_service.recent_fills(message.from_user.id, limit=100) if int(f["order_id"]) == int(order["id"])]
+            position = paper_lifecycle_service.position_for_order(int(order["id"]))
+            await message.answer(_render_order_detail(order, events, fills, position), parse_mode="HTML")
             return
+        items = execution_inspection_service.recent(message.from_user.id, limit=1)
+        item = items[0] if items else None
+    if item is None:
+        await message.answer("Execution not found. Use an order ID, signal ID, plan ID, idempotency key, or execution reference.")
+        return
     await message.answer(_render_execution_detail(item), parse_mode="HTML")
 
 
 @router.message(Command("fills"))
 async def execution_fills(message: Message):
-    events = execution_inspection_service.fills(message.from_user.id, limit=15)
-    if not events:
+    fills = paper_lifecycle_service.recent_fills(message.from_user.id, limit=15)
+    if not fills:
         await message.answer(
-            "🧾 <b>Execution Fills</b>\n\nNo completed paper executions have been recorded in the transition audit yet.\n"
-            "Older executions remain visible through <code>/orders</code>.",
-            parse_mode="HTML",
+            "🧾 <b>Paper Fills</b>\n\nNo unified fills have been recorded yet. "
+            "They will appear after the next approved paper execution.", parse_mode="HTML",
         )
         return
-    lines = []
-    for event in events:
-        lines.append(
-            f"✅ Signal <code>#{int(event.get('signal_id') or 0)}</code> · "
-            f"{escape(str(event.get('actor') or 'engine'))}\n"
-            f"Ref: <code>{escape(_compact_ref(event.get('execution_ref') or event.get('idempotency_key'), 24))}</code>"
-        )
-    await message.answer(
-        "🧾 <b>Latest Completed Paper Executions</b>\n\n" + "\n\n".join(lines),
-        parse_mode="HTML",
-    )
+    lines = [
+        f"✅ <b>{escape(str(f.get('symbol') or 'UNKNOWN'))} {escape(str(f.get('side') or '—'))}</b> · "
+        f"{float(f.get('quantity') or 0):g} @ <b>{float(f.get('price') or 0):g}</b>\n"
+        f"Notional: <b>${float(f.get('notional') or 0):,.2f}</b> · Fee: <b>${float(f.get('commission') or 0):.4f}</b> · "
+        f"Slippage: <b>{float(f.get('slippage_pct') or 0):.3f}%</b>"
+        for f in fills
+    ]
+    await message.answer("🧾 <b>Latest Paper Fills</b>\n\n" + "\n\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("positions"))
+async def execution_positions(message: Message):
+    positions = paper_lifecycle_service.recent_positions(message.from_user.id, limit=15)
+    if not positions:
+        await message.answer("📈 <b>Unified Paper Positions</b>\n\nNo positions have been created by the new lifecycle yet.", parse_mode="HTML")
+        return
+    lines = [
+        f"{'🟢' if str(p.get('status')) == 'OPEN' else '⚪'} <b>#{int(p['id'])} · {escape(str(p.get('symbol') or 'UNKNOWN'))} {escape(str(p.get('side') or '—'))}</b>\n"
+        f"Status: <code>{escape(str(p.get('status') or 'UNKNOWN'))}</code> · Qty: <b>{float(p.get('quantity') or 0):g}</b> · "
+        f"Avg: <b>{float(p.get('average_entry') or 0):g}</b>\n"
+        f"Realized: <b>${float(p.get('realized_pnl') or 0):+.2f}</b> · Unrealized: <b>${float(p.get('unrealized_pnl') or 0):+.2f}</b> · "
+        f"Fees: <b>${float(p.get('total_commission') or 0):.4f}</b>"
+        for p in positions
+    ]
+    await message.answer("📈 <b>Unified Paper Positions</b>\n\n" + "\n\n".join(lines), parse_mode="HTML")

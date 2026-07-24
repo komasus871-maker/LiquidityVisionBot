@@ -15,7 +15,9 @@ class JournalStatus(str, Enum):
     REJECTED = "REJECTED"
     EXECUTING = "EXECUTING"
     EXECUTED = "EXECUTED"
+    RETRY_WAIT = "RETRY_WAIT"
     FAILED = "FAILED"
+    DEAD_LETTER = "DEAD_LETTER"
     CANCELLED = "CANCELLED"
 
 
@@ -36,12 +38,20 @@ ALLOWED_JOURNAL_TRANSITIONS: dict[JournalStatus, frozenset[JournalStatus]] = {
     }),
     JournalStatus.EXECUTING: frozenset({
         JournalStatus.EXECUTED,
+        JournalStatus.RETRY_WAIT,
         JournalStatus.FAILED,
+        JournalStatus.DEAD_LETTER,
+        JournalStatus.CANCELLED,
+    }),
+    JournalStatus.RETRY_WAIT: frozenset({
+        JournalStatus.EXECUTING,
+        JournalStatus.DEAD_LETTER,
         JournalStatus.CANCELLED,
     }),
     JournalStatus.REJECTED: frozenset(),
     JournalStatus.EXECUTED: frozenset(),
     JournalStatus.FAILED: frozenset(),
+    JournalStatus.DEAD_LETTER: frozenset(),
     JournalStatus.CANCELLED: frozenset(),
 }
 
@@ -89,14 +99,21 @@ class CopyExecutionJournal:
                 )
         return dict(row), created
 
-    def claim(self, idempotency_key: str) -> tuple[dict[str, Any], bool]:
-        """Atomically claim a PLANNED execution for exactly one worker."""
-        now = datetime.now(timezone.utc).isoformat()
+    def claim(self, idempotency_key: str, *, worker_id: str = "copy-worker", lease_seconds: int = 180) -> tuple[dict[str, Any], bool]:
+        """Atomically claim due work and attach an expiring worker lease."""
+        from uuid import uuid4
+        from datetime import timedelta
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires = (now_dt + timedelta(seconds=max(30, lease_seconds))).isoformat()
+        token = uuid4().hex
         with connect() as conn:
             cur = conn.execute(
                 """UPDATE copy_execution_journal SET status='EXECUTING',attempt_count=attempt_count+1,
-                   updated_at=? WHERE idempotency_key=? AND status='PLANNED'""",
-                (now, idempotency_key),
+                   claimed_by=?,claim_token=?,claimed_at=?,lease_expires_at=?,updated_at=?
+                   WHERE idempotency_key=? AND (status='PLANNED' OR
+                   (status='RETRY_WAIT' AND (next_attempt_at IS NULL OR next_attempt_at<=?)))""",
+                (worker_id, token, now, expires, now, idempotency_key, now),
             )
             claimed = cur.rowcount == 1
             row = conn.execute(
@@ -106,13 +123,63 @@ class CopyExecutionJournal:
                 raise KeyError(f"Unknown idempotency key: {idempotency_key}")
             if claimed:
                 item = dict(row)
+                previous = JournalStatus.RETRY_WAIT.value if item.get("last_retry_at") else JournalStatus.PLANNED.value
                 self._record_event(
                     conn, idempotency_key, int(item["telegram_id"]), int(item["signal_id"]),
-                    JournalStatus.PLANNED.value, JournalStatus.EXECUTING.value, actor="worker",
-                    reason_code="CLAIMED", reason="Execution claimed by worker",
-                    metadata={"attempt_count": int(item.get("attempt_count") or 0)},
+                    previous, JournalStatus.EXECUTING.value, actor="worker",
+                    reason_code="CLAIMED", reason="Execution claimed with lease",
+                    metadata={"attempt_count": int(item.get("attempt_count") or 0), "lease_seconds": lease_seconds, "worker_id": worker_id},
                 )
         return dict(row), claimed
+
+    def schedule_retry(self, idempotency_key: str, *, error: str, code: str, next_attempt_at: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        row = self.transition(
+            idempotency_key, JournalStatus.RETRY_WAIT, error=error, actor="recovery",
+            reason_code=code, reason="Transient failure scheduled for retry",
+            metadata={"next_attempt_at": next_attempt_at},
+        )
+        with connect() as conn:
+            conn.execute(
+                """UPDATE copy_execution_journal SET next_attempt_at=?,last_retry_at=?,
+                   claimed_by=NULL,claim_token=NULL,claimed_at=NULL,lease_expires_at=NULL,updated_at=?
+                   WHERE idempotency_key=?""",
+                (next_attempt_at, now, now, idempotency_key),
+            )
+            updated = conn.execute("SELECT * FROM copy_execution_journal WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+        return dict(updated)
+
+    def dead_letter(self, idempotency_key: str, *, error: str, code: str = "MAX_ATTEMPTS") -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        row = self.transition(idempotency_key, JournalStatus.DEAD_LETTER, error=error, actor="recovery", reason_code=code, reason=error)
+        with connect() as conn:
+            conn.execute(
+                """UPDATE copy_execution_journal SET dead_letter_at=?,claimed_by=NULL,claim_token=NULL,
+                   claimed_at=NULL,lease_expires_at=NULL,updated_at=? WHERE idempotency_key=?""",
+                (now, now, idempotency_key),
+            )
+            updated = conn.execute("SELECT * FROM copy_execution_journal WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+        return dict(updated)
+
+    def recover_expired_claims(self, *, limit: int = 100) -> dict[str, int]:
+        """Move expired EXECUTING leases back to retry wait or dead letter."""
+        now = datetime.now(timezone.utc).isoformat()
+        recovered = dead = 0
+        with connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM copy_execution_journal WHERE status='EXECUTING'
+                    AND lease_expires_at IS NOT NULL AND lease_expires_at<? ORDER BY id LIMIT {max(1,min(limit,500))}""",
+                (now,),
+            ).fetchall()
+        for raw in rows:
+            item = dict(raw)
+            if int(item.get("attempt_count") or 0) >= int(item.get("max_attempts") or 5):
+                self.dead_letter(item["idempotency_key"], error="Worker lease expired after maximum attempts", code="LEASE_EXPIRED")
+                dead += 1
+            else:
+                self.schedule_retry(item["idempotency_key"], error="Worker lease expired", code="LEASE_EXPIRED", next_attempt_at=now)
+                recovered += 1
+        return {"recovered": recovered, "dead_lettered": dead}
 
     def transition(self, idempotency_key: str, status: JournalStatus | str, *, error: str | None = None,
                    execution_ref: str | None = None, increment_attempt: bool = False,
@@ -177,9 +244,13 @@ class CopyExecutionJournal:
 
     def pending(self, limit: int = 25) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 250))
+        now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
             rows = conn.execute(
-                f"SELECT * FROM copy_execution_journal WHERE status='PLANNED' ORDER BY id ASC LIMIT {safe_limit}"
+                f"""SELECT * FROM copy_execution_journal
+                    WHERE status='PLANNED' OR (status='RETRY_WAIT' AND (next_attempt_at IS NULL OR next_attempt_at<=?))
+                    ORDER BY id ASC LIMIT {safe_limit}""",
+                (now,),
             ).fetchall()
         return [dict(row) for row in rows]
 
