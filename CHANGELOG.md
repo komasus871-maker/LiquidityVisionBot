@@ -1,3 +1,10 @@
+# v9.9.6.6 — Legacy Portfolio Reconciliation
+
+- Added conservative, idempotent reconciliation of terminal legacy paper positions.
+- Removed stale terminal legacy rows from open-position count and portfolio heat without fabricating fills.
+- Added legacy/unified mismatch diagnostics to copy statistics and positions UI.
+- Added targeted tests for stale `MAX_HEAT`, idempotency, and fail-closed active legacy state.
+
 # v9.9.6.3 — Unified Execution Foundation Builds 1–3
 
 - Added immutable `ExecutionContext` pipeline carrier.

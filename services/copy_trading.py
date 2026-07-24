@@ -13,6 +13,7 @@ from services.paper_execution_lifecycle import PaperExecutionLifecycle
 from services.execution_queue import ExecutionQueueService
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
+from services.portfolio_reconciliation import PortfolioReconciliationService
 
 
 def _now() -> str:
@@ -38,6 +39,7 @@ class CopyTradingService:
         self.execution_queue = ExecutionQueueService(journal=self.execution_journal)
         self.training = CopyTrainingService()
         self.similarity = CopySimilarityService()
+        self.reconciliation = PortfolioReconciliationService()
 
     def ensure_profile(self, telegram_id: int) -> dict[str, Any]:
         now = _now()
@@ -117,6 +119,7 @@ class CopyTradingService:
         return len(rows)
 
     def profile_stats(self, telegram_id: int) -> dict[str, Any]:
+        reconciliation = self.reconciliation.reconcile(telegram_id)
         profile = self.ensure_profile(telegram_id)
         with connect() as conn:
             row = conn.execute(
@@ -146,6 +149,7 @@ class CopyTradingService:
         top_rejection = self.rejection_summary(telegram_id, limit=1)
         result["top_rejection_code"] = top_rejection[0]["code"] if top_rejection else None
         result["top_rejection_count"] = top_rejection[0]["count"] if top_rejection else 0
+        result.update({f"reconciliation_{k}": v for k, v in reconciliation.as_dict().items() if k != "telegram_id"})
         return result
 
     def rejection_summary(self, telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
@@ -241,6 +245,7 @@ class CopyTradingService:
         )
 
     def _portfolio_state(self, telegram_id: int, symbol: str, cooldown_min: int) -> PortfolioState:
+        self.reconciliation.reconcile(telegram_id)
         cooldown_since = (datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_min))).isoformat()
         with connect() as conn:
             open_row = conn.execute(

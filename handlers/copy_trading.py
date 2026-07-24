@@ -42,6 +42,8 @@ Symbol cooldown: <b>{int(profile.get('symbol_cooldown_min') or 30)} min</b>
 
 📊 <b>Paper execution</b>
 Open: {int(stats.get('open_count') or 0)}
+Unified open: {int(stats.get('reconciliation_unified_open') or 0)}
+Portfolio state: <b>{stats.get('reconciliation_status') or 'UNKNOWN'}</b>
 Closed: {int(stats.get('closed_count') or 0)}
 Rejected: {int(stats.get('rejected_count') or 0)}
 Top rejection: <b>{stats.get("top_rejection_code") or "—"}</b> ({int(stats.get("top_rejection_count") or 0)})
@@ -697,7 +699,13 @@ async def execution_fills(message: Message):
 async def execution_positions(message: Message):
     positions = paper_lifecycle_service.recent_positions(message.from_user.id, limit=15)
     if not positions:
-        await message.answer("📈 <b>Unified Paper Positions</b>\n\nNo positions have been created by the new lifecycle yet.", parse_mode="HTML")
+        report = service.reconciliation.reconcile(message.from_user.id)
+        await message.answer(
+            "📈 <b>Unified Paper Positions</b>\n\nNo positions have been created by the new lifecycle yet.\n\n"
+            f"Legacy open: <b>{report.legacy_open_after}</b>\nUnified open: <b>{report.unified_open}</b>\n"
+            f"Reconciliation: <b>{report.status}</b>\nStale legacy rows closed: <b>{report.stale_legacy_closed}</b>",
+            parse_mode="HTML",
+        )
         return
     lines = [
         f"{'🟢' if str(p.get('status')) == 'OPEN' else '⚪'} <b>#{int(p['id'])} · {escape(str(p.get('symbol') or 'UNKNOWN'))} {escape(str(p.get('side') or '—'))}</b>\n"
