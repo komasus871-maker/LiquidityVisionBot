@@ -47,16 +47,21 @@ Confirmed legacy active: {int(stats.get('legacy_confirmed_open') or stats.get('r
 Unified open: {int(stats.get('unified_open_positions') or stats.get('reconciliation_unified_open_count') or 0)}
 Hybrid open: {int(stats.get('hybrid_open_positions') or 0)}
 Position source: <b>{stats.get('position_state_source') or 'LEGACY'}</b>
+Lifecycle authority: <b>{stats.get('reconciliation_lifecycle_authority') or 'UNIFIED_WITH_LEGACY_PROJECTION'}</b>
 Unified symbols: {', '.join(stats.get('unified_symbols') or ()) or '—'}
 Unified gross exposure: ${float(stats.get('unified_gross_notional') or 0):,.2f}
 Unified net exposure: ${float(stats.get('unified_net_notional') or 0):+,.2f}
 Unified unrealized PnL: ${float(stats.get('unified_unrealized_pnl') or 0):+,.2f}
 Unified commissions: ${float(stats.get('unified_commission') or 0):,.2f}
-<i>Unified exposure/PnL: diagnostics only</i>
+Unified confirmed heat: {float(stats.get('unified_confirmed_heat_r') or 0):.2f}R
+Unified unresolved risk: {int(stats.get('unified_unresolved_risk_positions') or 0)}
+Hybrid confirmed heat: {float(stats.get('hybrid_confirmed_heat_r') or stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
+<i>Unified exposure/PnL: diagnostics only; confirmed unified risk participates in heat.</i>
 Unresolved legacy: {int(stats.get('reconciliation_unresolved_legacy_count') or 0)} ({float(stats.get('reconciliation_unresolved_heat_r') or 0):.2f}R)
 Confirmed heat: {float(stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
 Heat source: <b>{stats.get('reconciliation_heat_source') or 'UNKNOWN'}</b>
 Stale rows closed: {int(stats.get('reconciliation_stale_legacy_closed_count') or 0)}
+Lifecycle mismatches: {int(stats.get('reconciliation_lifecycle_mismatch_count') or 0)}
 Portfolio state: <b>{stats.get('reconciliation_status') or 'UNKNOWN'}</b>
 Mismatch: <b>{'YES' if stats.get('reconciliation_mismatch_detected') else 'NO'}</b>
 Closed: {int(stats.get('closed_count') or 0)}

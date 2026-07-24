@@ -1,4 +1,14 @@
+## v9.9.7 — Unified Lifecycle Authority
+
 ## v9.9.5a — Paper Execution Engine Foundation
+
+New paper executions now use `paper_execution_positions` as their durable
+lifecycle authority. Automatic opens run through `CopyExecutionEngine`; signal
+TP and terminal transitions are applied exactly once through a persistent
+position-lifecycle event ledger. `paper_positions` remains populated as a
+temporary compatibility projection for rollback and legacy analytics.
+
+See `V9_9_7_UNIFIED_LIFECYCLE_AUTHORITY.md`.
 
 Approved deterministic copy plans can now pass through an idempotent `CopyExecutionEngine`. The engine reserves the plan in the persistent execution journal, atomically claims it, invokes the paper adapter, and records `EXECUTED` or `FAILED` as a terminal result. Duplicate calls return the existing journal outcome without executing twice. LIVE adapters remain blocked fail-closed.
 
@@ -86,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.8.7
+APP_VERSION=9.9.7
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

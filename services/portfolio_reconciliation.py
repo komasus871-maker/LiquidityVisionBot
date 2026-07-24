@@ -20,6 +20,7 @@ class ReconciliationReport:
     status: str
     mismatch_detected: bool
     reconciled_at: str
+    lifecycle_mismatch_count: int = 0
 
     # Compatibility aliases retained for v9.9.6.6 callers and tests.
     @property
@@ -58,6 +59,10 @@ class ReconciliationReport:
             return "UNIFIED_COUNT_ONLY"
         return "EMPTY"
 
+    @property
+    def lifecycle_authority(self) -> str:
+        return "UNIFIED_WITH_LEGACY_PROJECTION"
+
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.update(
@@ -68,6 +73,7 @@ class ReconciliationReport:
             mismatch=self.mismatch,
             portfolio_state_resolved=self.portfolio_state_resolved,
             heat_source=self.heat_source,
+            lifecycle_authority=self.lifecycle_authority,
         )
         return data
 
@@ -86,12 +92,16 @@ class PortfolioReconciliationService:
     def reconcile(self, telegram_id: int) -> ReconciliationReport:
         now = datetime.now(timezone.utc).isoformat()
         stale_closed = 0
+        lifecycle_mismatches = 0
         with connect() as conn:
             rows = conn.execute(
                 """SELECT p.id, p.initial_risk_r, p.remaining_fraction,
-                          UPPER(COALESCE(s.status,'')) AS signal_status
+                          UPPER(COALESCE(s.status,'')) AS signal_status,
+                          u.id AS unified_position_id, UPPER(COALESCE(u.status,'')) AS unified_status
                    FROM paper_positions p
                    LEFT JOIN signals s ON s.id=p.signal_id
+                   LEFT JOIN paper_execution_positions u
+                     ON u.telegram_id=p.telegram_id AND u.signal_id=p.signal_id
                    WHERE p.telegram_id=? AND p.status IN ('OPEN','PARTIAL')""",
                 (telegram_id,),
             ).fetchall()
@@ -100,6 +110,11 @@ class PortfolioReconciliationService:
                 item = dict(row)
                 signal_status = str(item.get("signal_status") or "").upper()
                 if signal_status not in self.TERMINAL_SIGNAL_STATUSES:
+                    continue
+                if item.get("unified_position_id") is not None and str(
+                    item.get("unified_status") or ""
+                ) not in {"CLOSED", "CANCELLED", "FAILED"}:
+                    lifecycle_mismatches += 1
                     continue
                 cursor = conn.execute(
                     """UPDATE paper_positions
@@ -164,4 +179,5 @@ class PortfolioReconciliationService:
             status=status,
             mismatch_detected=mismatch,
             reconciled_at=now,
+            lifecycle_mismatch_count=lifecycle_mismatches,
         )

@@ -317,7 +317,7 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS execution_events(
                 id {id_col}, telegram_id BIGINT NOT NULL, signal_id BIGINT, event_type TEXT NOT NULL,
                 price DOUBLE PRECISION, realized_pnl_delta DOUBLE PRECISION DEFAULT 0,
-                details_json TEXT NOT NULL, created_at TEXT NOT NULL
+                details_json TEXT NOT NULL, source_event_key TEXT, created_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -345,6 +345,7 @@ def create_tables() -> None:
                 order_type TEXT NOT NULL, status TEXT NOT NULL, requested_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
                 filled_quantity DOUBLE PRECISION NOT NULL DEFAULT 0, average_fill_price DOUBLE PRECISION,
                 limit_price DOUBLE PRECISION, notional DOUBLE PRECISION, leverage INTEGER NOT NULL DEFAULT 1,
+                stop_loss DOUBLE PRECISION, risk_amount DOUBLE PRECISION,
                 last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             )
         """)
@@ -366,7 +367,25 @@ def create_tables() -> None:
                 quantity DOUBLE PRECISION NOT NULL DEFAULT 0, average_entry DOUBLE PRECISION NOT NULL DEFAULT 0,
                 last_price DOUBLE PRECISION, realized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
                 unrealized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0, total_commission DOUBLE PRECISION NOT NULL DEFAULT 0,
+                initial_quantity DOUBLE PRECISION, stop_loss DOUBLE PRECISION,
+                initial_risk_amount DOUBLE PRECISION,
+                remaining_fraction DOUBLE PRECISION NOT NULL DEFAULT 1,
+                realized_r DOUBLE PRECISION NOT NULL DEFAULT 0,
+                close_reason TEXT, last_signal_status TEXT,
                 opened_at TEXT, closed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_position_lifecycle_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, position_id BIGINT NOT NULL,
+                idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL, signal_id BIGINT NOT NULL,
+                event_type TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL,
+                signal_status TEXT, price DOUBLE PRECISION,
+                quantity_before DOUBLE PRECISION NOT NULL DEFAULT 0,
+                quantity_after DOUBLE PRECISION NOT NULL DEFAULT 0,
+                realized_pnl_delta DOUBLE PRECISION NOT NULL DEFAULT 0,
+                realized_r_delta DOUBLE PRECISION NOT NULL DEFAULT 0,
+                reason TEXT, created_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -438,6 +457,7 @@ def create_tables() -> None:
         }.items():
             _add_column(conn, "paper_positions", name, definition)
         _add_column(conn, "execution_events", "realized_pnl_delta", "DOUBLE PRECISION DEFAULT 0")
+        _add_column(conn, "execution_events", "source_event_key", "TEXT")
         for name, definition in {
             "claimed_by": "TEXT",
             "claim_token": "TEXT",
@@ -449,6 +469,21 @@ def create_tables() -> None:
             "dead_letter_at": "TEXT",
         }.items():
             _add_column(conn, "copy_execution_journal", name, definition)
+        for name, definition in {
+            "stop_loss": "DOUBLE PRECISION",
+            "risk_amount": "DOUBLE PRECISION",
+        }.items():
+            _add_column(conn, "paper_execution_orders", name, definition)
+        for name, definition in {
+            "initial_quantity": "DOUBLE PRECISION",
+            "stop_loss": "DOUBLE PRECISION",
+            "initial_risk_amount": "DOUBLE PRECISION",
+            "remaining_fraction": "DOUBLE PRECISION NOT NULL DEFAULT 1",
+            "realized_r": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "close_reason": "TEXT",
+            "last_signal_status": "TEXT",
+        }.items():
+            _add_column(conn, "paper_execution_positions", name, definition)
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
         duplicate_groups = conn.execute("""
@@ -492,6 +527,9 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_signal ON paper_positions(signal_id)",
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_genome ON paper_positions(genome_fingerprint)",
             "CREATE INDEX IF NOT EXISTS idx_execution_events_owner ON execution_events(telegram_id,created_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_events_source_event ON execution_events(source_event_key)",
+            "CREATE INDEX IF NOT EXISTS idx_unified_positions_owner_signal ON paper_execution_positions(telegram_id,signal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_position_lifecycle_position ON paper_position_lifecycle_events(position_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

@@ -1,3 +1,26 @@
+## 9.9.7 — Unified Lifecycle Authority
+
+- Made `paper_execution_positions` authoritative for new paper position lifecycle mutations.
+- Routed automatic copy opens through `CopyExecutionEngine` instead of duplicating journal, claim, order and fill orchestration.
+- Added idempotent signal lifecycle commands for mark, partial close, terminal close and panic close.
+- Added a durable position-lifecycle event ledger with exactly-once event keys.
+- Changed legacy `paper_positions` updates into a rollback-compatible projection of unified positions.
+- Prevented reconciliation from independently closing a legacy projection while its unified position remains open.
+- Added lifecycle integrity diagnostics for duplicate, invalid-open and closed-with-quantity states.
+- Preserved legacy-only lifecycle fallback for pre-unified historical positions.
+- Made compatibility event projection crash-replayable and idempotent with durable source keys.
+- Enforced quantity/fraction parity for partial fills and rejected out-of-order lifecycle regressions.
+- Made manual unified closes lifecycle-event backed and panic retries repair stale projections.
+
+## 9.9.6.9 — Unified Risk-Aware Portfolio
+
+- Persisted the planned stop, initial quantity, and initial risk on unified paper executions.
+- Added remaining-risk heat for unified-only positions, including partial closes.
+- Kept exact `signal_id` legacy/unified matches deduplicated for both position count and heat.
+- Kept pre-release unified positions without durable risk metadata diagnostics-only for backward compatibility.
+- Added unified and hybrid risk diagnostics without making unified PnL authoritative for sizing or equity.
+- Preserved paper-only execution, idempotency, and the no-synthetic-lifecycle-data contract.
+
 ## 9.9.6.8 — Hybrid Position Awareness
 
 - Added an aggregated read model for real open unified execution positions.

@@ -70,6 +70,8 @@ class PortfolioState:
     unified_unrealized_pnl: float = 0.0
     unified_realized_pnl: float = 0.0
     unified_commission: float = 0.0
+    unified_confirmed_heat_r: float = 0.0
+    unified_unresolved_risk_positions: int = 0
 
 
 @dataclass(frozen=True)

@@ -74,6 +74,16 @@ class FillResult:
     created: bool
 
 
+@dataclass(frozen=True)
+class PositionLifecycleResult:
+    position: dict[str, Any]
+    applied: bool
+    event_type: str
+    realized_pnl_delta: float = 0.0
+    realized_r_delta: float = 0.0
+    event_key: str | None = None
+
+
 class PaperExecutionLifecycle:
     """Persistent execution → order → fill → position lifecycle.
 
@@ -83,6 +93,10 @@ class PaperExecutionLifecycle:
     """
 
     DEFAULT_COMMISSION_RATE = 0.0005
+    TERMINAL_SIGNAL_STATUSES = {
+        "TP3", "STOP", "BREAKEVEN", "MANUAL_STOP", "INVALIDATED",
+        "EXPIRED", "CLOSED", "PANIC",
+    }
 
     @staticmethod
     def _now() -> str:
@@ -116,13 +130,15 @@ class PaperExecutionLifecycle:
                 """INSERT INTO paper_execution_orders(
                        order_key,idempotency_key,plan_id,telegram_id,signal_id,execution_ref,
                        symbol,timeframe,side,order_type,status,requested_quantity,filled_quantity,
-                       average_fill_price,limit_price,notional,leverage,last_error,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,0,NULL,?,?,?,NULL,?,?)
+                       average_fill_price,limit_price,notional,leverage,stop_loss,risk_amount,
+                       last_error,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,0,NULL,?,?,?,?,?,NULL,?,?)
                    ON CONFLICT(order_key) DO NOTHING""",
                 (plan.idempotency_key, plan.idempotency_key, plan.plan_id, plan.telegram_id,
                  plan.signal_id, execution_ref, plan.symbol, plan.timeframe, plan.side,
                  plan.order_type, OrderStatus.SUBMITTED.value, requested_qty,
-                 plan.entry_price, plan.notional, plan.leverage, now, now),
+                 plan.entry_price, plan.notional, plan.leverage, plan.stop_loss,
+                 plan.risk_amount, now, now),
             )
             created = cur.rowcount == 1
             row = conn.execute(
@@ -272,16 +288,25 @@ class PaperExecutionLifecycle:
             updated = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
         return dict(updated)
 
-    def close_position(self, position_id: int, *, quantity: float, exit_price: float,
-                       commission_rate: float = DEFAULT_COMMISSION_RATE) -> dict[str, Any]:
+    def close_position(
+        self, position_id: int, *, quantity: float, exit_price: float,
+        commission_rate: float = DEFAULT_COMMISSION_RATE,
+        event_key: str | None = None, reason: str = "MANUAL_CLOSE",
+    ) -> dict[str, Any]:
         if quantity <= 0 or exit_price <= 0:
             raise ValueError("close quantity and exit_price must be positive")
+        event_key = event_key or f"manual-close:{position_id}:{float(quantity):.12g}:{float(exit_price):.12g}"
         now = self._now()
         with connect() as conn:
             row = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
             if row is None:
                 raise KeyError(f"Unknown paper position: {position_id}")
             item = dict(row)
+            existing = conn.execute(
+                "SELECT id FROM paper_position_lifecycle_events WHERE event_key=?", (event_key,)
+            ).fetchone()
+            if existing is not None:
+                return item
             current_qty = float(item.get("quantity") or 0.0)
             if item["status"] == PositionStatus.CLOSED.value or current_qty <= 0:
                 return item
@@ -293,14 +318,163 @@ class PaperExecutionLifecycle:
             remaining = max(0.0, current_qty - applied)
             status = PositionStatus.CLOSED.value if remaining <= 1e-12 else PositionStatus.PARTIALLY_CLOSED.value
             realized_total = float(item.get("realized_pnl") or 0.0) + realized_delta
+            initial_risk = float(item.get("initial_risk_amount") or 0.0)
+            realized_r_delta = realized_delta / initial_risk if initial_risk > 0 else 0.0
+            realized_r_total = float(item.get("realized_r") or 0.0) + realized_r_delta
             commission_total = float(item.get("total_commission") or 0.0) + close_commission
             unrealized = 0.0 if status == PositionStatus.CLOSED.value else (float(exit_price)-entry)*remaining*direction
             conn.execute("""UPDATE paper_execution_positions SET status=?,quantity=?,last_price=?,realized_pnl=?,
-                         unrealized_pnl=?,total_commission=?,closed_at=?,updated_at=? WHERE id=?""",
+                         unrealized_pnl=?,total_commission=?,remaining_fraction=?,realized_r=?,
+                         close_reason=?,closed_at=?,updated_at=? WHERE id=?""",
                          (status, remaining, float(exit_price), realized_total, unrealized, commission_total,
+                          remaining / float(item.get("initial_quantity") or current_qty), realized_r_total,
+                          reason if status == PositionStatus.CLOSED.value else item.get("close_reason"),
                           now if status == PositionStatus.CLOSED.value else None, now, position_id))
+            conn.execute(
+                """INSERT INTO paper_position_lifecycle_events(
+                       event_key,position_id,idempotency_key,telegram_id,signal_id,event_type,
+                       from_status,to_status,signal_status,price,quantity_before,quantity_after,
+                       realized_pnl_delta,realized_r_delta,reason,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event_key, position_id, item["idempotency_key"], item["telegram_id"],
+                    item["signal_id"],
+                    "CLOSED" if status == PositionStatus.CLOSED.value else "PARTIAL_CLOSED",
+                    item["status"], status, None, float(exit_price), current_qty, remaining,
+                    realized_delta, realized_r_delta, reason, now,
+                ),
+            )
             updated = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
         return dict(updated)
+
+    def apply_signal_transition(
+        self,
+        position_id: int,
+        *,
+        signal_status: str,
+        price: float,
+        event_key: str,
+        reason: str | None = None,
+        commission_rate: float = 0.0,
+    ) -> PositionLifecycleResult:
+        """Apply one signal lifecycle command exactly once to a unified position."""
+        if price <= 0:
+            raise ValueError("lifecycle price must be positive")
+        normalized = str(signal_status or "").upper()
+        now = self._now()
+        with connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM paper_position_lifecycle_events WHERE event_key=?",
+                (event_key,),
+            ).fetchone()
+            row = conn.execute(
+                "SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown paper position: {position_id}")
+            item = dict(row)
+            if existing is not None:
+                persisted = dict(existing)
+                return PositionLifecycleResult(
+                    position=item,
+                    applied=False,
+                    event_type=str(persisted["event_type"]),
+                    realized_pnl_delta=float(persisted.get("realized_pnl_delta") or 0.0),
+                    realized_r_delta=float(persisted.get("realized_r_delta") or 0.0),
+                    event_key=str(persisted["event_key"]),
+                )
+
+            current_status = str(item["status"])
+            current_qty = float(item.get("quantity") or 0.0)
+            initial_qty = float(item.get("initial_quantity") or current_qty)
+            if current_status in {
+                PositionStatus.CLOSED.value,
+                PositionStatus.CANCELLED.value,
+                PositionStatus.FAILED.value,
+            } or current_qty <= 0:
+                return PositionLifecycleResult(item, False, "TERMINAL_NOOP", event_key=event_key)
+
+            lifecycle_rank = {
+                "WATCHING": 0, "TRIGGERED": 0, "ACTIVE": 0,
+                "TP1": 1, "TP2": 2,
+                **{status: 3 for status in self.TERMINAL_SIGNAL_STATUSES},
+            }
+            previous_signal_status = str(item.get("last_signal_status") or "").upper()
+            if (
+                previous_signal_status
+                and lifecycle_rank.get(normalized, 0) < lifecycle_rank.get(previous_signal_status, 0)
+            ):
+                return PositionLifecycleResult(item, False, "STALE_NOOP", event_key=event_key)
+
+            if normalized == "TP1":
+                target_fraction = 0.5
+            elif normalized == "TP2":
+                target_fraction = 0.25
+            elif normalized in self.TERMINAL_SIGNAL_STATUSES:
+                target_fraction = 0.0
+            else:
+                target_fraction = current_qty / initial_qty if initial_qty > 0 else 1.0
+
+            target_qty = min(current_qty, max(0.0, initial_qty * target_fraction))
+            closed_qty = max(0.0, current_qty - target_qty)
+            direction = 1.0 if str(item.get("side") or "").upper() == "LONG" else -1.0
+            entry = float(item.get("average_entry") or 0.0)
+            realized_delta = (float(price) - entry) * closed_qty * direction
+            close_commission = closed_qty * float(price) * max(0.0, float(commission_rate))
+            initial_risk = float(item.get("initial_risk_amount") or 0.0)
+            realized_r_delta = realized_delta / initial_risk if initial_risk > 0 else 0.0
+            realized_total = float(item.get("realized_pnl") or 0.0) + realized_delta
+            realized_r_total = float(item.get("realized_r") or 0.0) + realized_r_delta
+            commission_total = float(item.get("total_commission") or 0.0) + close_commission
+            remaining_fraction = target_qty / initial_qty if initial_qty > 0 else 0.0
+            terminal = target_qty <= 1e-12
+            next_status = (
+                PositionStatus.CLOSED.value if terminal
+                else PositionStatus.PARTIALLY_CLOSED.value
+                if closed_qty > 0
+                else current_status
+            )
+            unrealized = (
+                0.0 if terminal
+                else (float(price) - entry) * target_qty * direction
+            )
+            event_type = (
+                "CLOSED" if terminal
+                else "PARTIAL_CLOSED" if closed_qty > 0
+                else "MARKED"
+            )
+            conn.execute(
+                """UPDATE paper_execution_positions
+                   SET status=?,quantity=?,last_price=?,realized_pnl=?,realized_r=?,
+                       unrealized_pnl=?,total_commission=?,remaining_fraction=?,
+                       close_reason=?,last_signal_status=?,closed_at=?,updated_at=?
+                   WHERE id=?""",
+                (
+                    next_status, target_qty, float(price), realized_total, realized_r_total,
+                    unrealized, commission_total, remaining_fraction,
+                    (reason or normalized) if terminal else item.get("close_reason"),
+                    normalized, now if terminal else None, now, position_id,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO paper_position_lifecycle_events(
+                       event_key,position_id,idempotency_key,telegram_id,signal_id,event_type,
+                       from_status,to_status,signal_status,price,quantity_before,quantity_after,
+                       realized_pnl_delta,realized_r_delta,reason,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event_key, position_id, item["idempotency_key"], item["telegram_id"],
+                    item["signal_id"], event_type, current_status, next_status, normalized,
+                    float(price), current_qty, target_qty, realized_delta, realized_r_delta,
+                    reason or normalized, now,
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)
+            ).fetchone()
+        return PositionLifecycleResult(
+            dict(updated), True, event_type, realized_delta, realized_r_delta, event_key
+        )
 
     def recent_orders(self, telegram_id: int, limit: int = 20) -> list[dict[str, Any]]:
         safe = max(1, min(int(limit), 100))
@@ -342,19 +516,33 @@ class PaperExecutionLifecycle:
         with connect() as conn:
             return self._position_for_order_conn(conn, order_id)
 
+    def lifecycle_events(self, position_id: int) -> list[dict[str, Any]]:
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM paper_position_lifecycle_events
+                   WHERE position_id=? ORDER BY id ASC""",
+                (position_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def _upsert_position(self, conn, order: dict[str, Any], fill: dict[str, Any], cumulative_qty: float,
                          average_price: float, commission: float, now: str) -> dict[str, Any]:
+        initial_quantity = float(order.get("requested_quantity") or cumulative_qty)
+        remaining_fraction = cumulative_qty / initial_quantity if initial_quantity > 0 else 0.0
         conn.execute(
             """INSERT INTO paper_execution_positions(
                    position_key,order_id,idempotency_key,telegram_id,signal_id,symbol,timeframe,side,status,
-                   quantity,average_entry,last_price,realized_pnl,unrealized_pnl,total_commission,opened_at,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?, 'OPEN',?,?,?,0,0,?,?,?,?)
+                   quantity,average_entry,last_price,realized_pnl,unrealized_pnl,total_commission,
+                   initial_quantity,stop_loss,initial_risk_amount,remaining_fraction,opened_at,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?, 'OPEN',?,?,?,0,0,?,?,?,?,?,?,?,?)
                ON CONFLICT(position_key) DO UPDATE SET quantity=?,average_entry=?,last_price=?,
-                   total_commission=paper_execution_positions.total_commission+?,updated_at=?""",
+                   remaining_fraction=?,total_commission=paper_execution_positions.total_commission+?,
+                   updated_at=?""",
             (order["idempotency_key"], order["id"], order["idempotency_key"], order["telegram_id"], order["signal_id"],
              order["symbol"], order["timeframe"], order["side"], cumulative_qty, average_price, fill["price"],
-             commission, now, now, now,
-             cumulative_qty, average_price, fill["price"], commission, now),
+             commission, initial_quantity, order.get("stop_loss"), order.get("risk_amount"),
+             remaining_fraction, now, now, now,
+             cumulative_qty, average_price, fill["price"], remaining_fraction, commission, now),
         )
         return self._position_for_order_conn(conn, int(order["id"])) or {}
 

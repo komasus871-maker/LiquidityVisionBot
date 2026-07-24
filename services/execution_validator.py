@@ -39,7 +39,8 @@ class ExecutionValidator:
                 False,
                 "PORTFOLIO_STATE_UNRESOLVED",
                 "Portfolio state is unresolved: "
-                f"{state.unresolved_legacy_positions} legacy position(s), "
+                f"{state.unresolved_legacy_positions} legacy position(s) or unified position(s) "
+                "with unresolved risk, "
                 f"{state.unresolved_heat_r:.2f}R unresolved heat, "
                 f"reconciliation={state.reconciliation_status}",
             )

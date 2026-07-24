@@ -9,6 +9,7 @@ from typing import Any
 from database.database import connect, database_backend, get_runtime_states, persistent_database, ping_database
 
 from version import APP_VERSION
+from services.execution_repositories import ExecutionRepository
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -101,6 +102,14 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         "duplicate_open_plans": duplicate_open_plans,
         "active_without_activation_or_stop": impossible_active,
     }
+    lifecycle_integrity = ExecutionRepository().lifecycle_integrity()
+    integrity.update(lifecycle_integrity)
+    integrity["ok"] = (
+        bool(integrity["ok"])
+        and lifecycle_integrity["duplicate_open_positions"] == 0
+        and lifecycle_integrity["closed_with_quantity"] == 0
+        and lifecycle_integrity["quantity_fraction_mismatch"] == 0
+    )
     status = "ok"
     if not db.get("ok") or not integrity["ok"]:
         status = "degraded"

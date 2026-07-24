@@ -29,8 +29,14 @@ class CopyExecutionWorker:
                 totals = self.service.sync_all()
                 recovery = self.service.execution_queue.journal.recover_expired_claims(limit=100)
                 queue_results = self.service.execution_queue.drain(limit=25)
+                projected = sum(
+                    1 for item in queue_results
+                    if item.status.value == "EXECUTED"
+                    and self.service.project_execution(item.idempotency_key)
+                )
                 totals["queue_processed"] = len(queue_results)
                 totals["queue_executed"] = sum(1 for item in queue_results if item.status.value == "EXECUTED")
+                totals["legacy_projections"] = projected
                 totals["queue_retry_wait"] = sum(1 for item in queue_results if item.status.value == "RETRY_WAIT")
                 totals["queue_failed"] = sum(1 for item in queue_results if item.status.value in {"FAILED", "REJECTED", "DEAD_LETTER"})
                 totals["leases_recovered"] = recovery["recovered"]

@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.6.8"
-RELEASE_NAME = "Hybrid Position Awareness"
+APP_VERSION = "9.9.7"
+RELEASE_NAME = "Unified Lifecycle Authority"

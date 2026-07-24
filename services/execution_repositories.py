@@ -19,6 +19,10 @@ class UnifiedOpenPositionState:
     total_commission: float = 0.0
     long_count: int = 0
     short_count: int = 0
+    confirmed_heat_r: float = 0.0
+    unresolved_risk_count: int = 0
+    unresolved_risk_signal_ids: frozenset[int] = frozenset()
+    heat_r_by_signal: tuple[tuple[int, float], ...] = ()
 
 class ExecutionRepository:
     """Read-model repository for orders, fills and positions."""
@@ -40,6 +44,55 @@ class ExecutionRepository:
             row = conn.execute("SELECT * FROM paper_execution_positions WHERE idempotency_key=?", (key,)).fetchone()
         return dict(row) if row else None
 
+    def position_for_signal(self, telegram_id: int, signal_id: int) -> dict[str, Any] | None:
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM paper_execution_positions
+                   WHERE telegram_id=? AND signal_id=? ORDER BY id DESC LIMIT 1""",
+                (telegram_id, signal_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def lifecycle_events(self, position_id: int) -> list[dict[str, Any]]:
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM paper_position_lifecycle_events
+                   WHERE position_id=? ORDER BY id ASC""",
+                (position_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def lifecycle_integrity(self) -> dict[str, int]:
+        with connect() as conn:
+            duplicate_rows = conn.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT telegram_id,signal_id,COUNT(*) AS count
+                       FROM paper_execution_positions
+                       WHERE status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')
+                       GROUP BY telegram_id,signal_id HAVING COUNT(*)>1
+                   ) duplicates"""
+            ).fetchone()
+            invalid_open = conn.execute(
+                """SELECT COUNT(*) FROM paper_execution_positions
+                   WHERE status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')
+                     AND (quantity<=0 OR initial_quantity IS NULL OR initial_quantity<=0)"""
+            ).fetchone()
+            closed_with_quantity = conn.execute(
+                """SELECT COUNT(*) FROM paper_execution_positions
+                   WHERE status='CLOSED' AND quantity>0"""
+            ).fetchone()
+            fraction_mismatch = conn.execute(
+                """SELECT COUNT(*) FROM paper_execution_positions
+                   WHERE initial_quantity>0
+                     AND ABS(remaining_fraction-(quantity/initial_quantity))>0.000000001"""
+            ).fetchone()
+        return {
+            "duplicate_open_positions": int(duplicate_rows[0] or 0),
+            "positions_missing_lifecycle_metadata": int(invalid_open[0] or 0),
+            "closed_with_quantity": int(closed_with_quantity[0] or 0),
+            "quantity_fraction_mismatch": int(fraction_mismatch[0] or 0),
+        }
+
     def open_positions(self, telegram_id: int) -> list[dict[str, Any]]:
         with connect() as conn:
             rows = conn.execute(
@@ -55,7 +108,10 @@ class ExecutionRepository:
         signal_ids: set[int] = set()
         idempotency_keys: set[str] = set()
         gross = net = unrealized = realized = commission = 0.0
-        longs = shorts = 0
+        longs = shorts = unresolved_risk_count = 0
+        confirmed_heat = 0.0
+        unresolved_signal_ids: set[int] = set()
+        heat_by_signal: dict[int, float] = {}
         for row in rows:
             symbol = str(row.get("symbol") or "").strip().upper()
             if symbol:
@@ -76,6 +132,17 @@ class ExecutionRepository:
             unrealized += float(row.get("unrealized_pnl") or 0.0)
             realized += float(row.get("realized_pnl") or 0.0)
             commission += float(row.get("total_commission") or 0.0)
+            initial_quantity = float(row.get("initial_quantity") or 0.0)
+            initial_risk_amount = float(row.get("initial_risk_amount") or 0.0)
+            if initial_quantity > 0 and row.get("stop_loss") is not None and initial_risk_amount > 0:
+                position_heat = max(0.0, min(1.0, quantity / initial_quantity))
+                confirmed_heat += position_heat
+                if signal_id is not None:
+                    heat_by_signal[int(signal_id)] = heat_by_signal.get(int(signal_id), 0.0) + position_heat
+            else:
+                unresolved_risk_count += 1
+                if signal_id is not None:
+                    unresolved_signal_ids.add(int(signal_id))
             longs += int(side == "LONG")
             shorts += int(side == "SHORT")
         return UnifiedOpenPositionState(
@@ -90,6 +157,10 @@ class ExecutionRepository:
             total_commission=round(commission, 8),
             long_count=longs,
             short_count=shorts,
+            confirmed_heat_r=round(confirmed_heat, 8),
+            unresolved_risk_count=unresolved_risk_count,
+            unresolved_risk_signal_ids=frozenset(unresolved_signal_ids),
+            heat_r_by_signal=tuple(sorted(heat_by_signal.items())),
         )
 
 

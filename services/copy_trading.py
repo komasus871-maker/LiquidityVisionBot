@@ -108,17 +108,42 @@ class CopyTradingService:
 
     def panic(self, telegram_id: int) -> int:
         now = _now()
+        closed_unified = 0
+        for position in self.execution_repository.open_positions(telegram_id):
+            price = float(position.get("last_price") or position.get("average_entry") or 0.0)
+            if price <= 0:
+                continue
+            result = self.paper_lifecycle.apply_signal_transition(
+                int(position["id"]),
+                signal_status="PANIC",
+                price=price,
+                event_key=f"panic:{position['id']}",
+                reason="PANIC_CLOSE",
+            )
+            if result.applied:
+                closed_unified += 1
+                self._project_unified_position(result.position, event=result)
         with connect() as conn:
             conn.execute("UPDATE copy_profiles SET enabled=0,updated_at=? WHERE telegram_id=?", (now, telegram_id))
             rows = conn.execute(
                 "SELECT * FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')",
                 (telegram_id,),
             ).fetchall()
-            for row in rows:
-                position = dict(row)
+        legacy_only: list[dict[str, Any]] = []
+        for row in rows:
+            position = dict(row)
+            unified = self.execution_repository.position_for_signal(
+                telegram_id, int(position["signal_id"])
+            )
+            if unified:
+                self._project_unified_position(unified)
+                continue
+            legacy_only.append(position)
+        with connect() as conn:
+            for position in legacy_only:
                 exit_price = float(position.get("last_price") or position["entry_price"])
                 self._close_position_conn(conn, position, exit_price, "PANIC_CLOSE", now)
-        return len(rows)
+        return closed_unified + len(legacy_only)
 
     def profile_stats(self, telegram_id: int) -> dict[str, Any]:
         reconciliation = self.reconciliation.reconcile(telegram_id)
@@ -152,7 +177,15 @@ class CopyTradingService:
         result["top_rejection_code"] = top_rejection[0]["code"] if top_rejection else None
         result["top_rejection_count"] = top_rejection[0]["count"] if top_rejection else 0
         result.update({f"reconciliation_{k}": v for k, v in reconciliation.as_dict().items() if k != "telegram_id"})
-        unified, _legacy_signal_ids, hybrid_count = self._position_identity_state(telegram_id)
+        unified, legacy_signal_ids, hybrid_count = self._position_identity_state(telegram_id)
+        unified_heat_by_signal = dict(unified.heat_r_by_signal)
+        duplicate_unified_heat = sum(
+            unified_heat_by_signal.get(signal_id, 0.0) for signal_id in legacy_signal_ids
+        )
+        unified_confirmed_heat = max(0.0, unified.confirmed_heat_r - duplicate_unified_heat)
+        unresolved_unified_signals = unified.unresolved_risk_signal_ids.difference(legacy_signal_ids)
+        unresolved_unified_count = len(unresolved_unified_signals)
+        portfolio_resolved = reconciliation.portfolio_state_resolved
         result.update(
             legacy_confirmed_open=reconciliation.confirmed_active_legacy_count,
             unified_open_positions=unified.open_count,
@@ -164,6 +197,12 @@ class CopyTradingService:
             unified_unrealized_pnl=unified.unrealized_pnl,
             unified_realized_pnl=unified.realized_pnl,
             unified_commission=unified.total_commission,
+            unified_confirmed_heat_r=unified_confirmed_heat,
+            unified_unresolved_risk_positions=unresolved_unified_count,
+            hybrid_confirmed_heat_r=(
+                reconciliation.confirmed_active_heat_r + unified_confirmed_heat
+            ),
+            hybrid_portfolio_state_resolved=portfolio_resolved,
         )
         return result
 
@@ -193,18 +232,34 @@ class CopyTradingService:
         for profile in profiles:
             telegram_id = int(profile["telegram_id"])
             existing = self._get_position(telegram_id, int(signal["id"]))
+            unified = self.execution_repository.position_for_signal(
+                telegram_id, int(signal["id"])
+            )
             if status in self.OPEN_SIGNAL_STATUSES and existing is None:
-                result = self._open(telegram_id, profile, signal)
+                if unified and str(unified.get("status")) not in {"CLOSED", "CANCELLED", "FAILED"}:
+                    result = self._sync_unified_existing(unified, signal)
+                else:
+                    result = self._open(telegram_id, profile, signal)
                 opened += int(result == "OPEN")
                 rejected += int(result == "REJECTED")
+                updated += int(result == "UPDATED")
             elif existing and existing["status"] in {"OPEN", "PARTIAL"}:
-                outcome = self._sync_existing(existing, signal)
+                outcome = (
+                    self._sync_unified_existing(unified, signal)
+                    if unified and str(unified.get("status")) not in {"CLOSED", "CANCELLED", "FAILED"}
+                    else self._sync_existing(existing, signal)
+                )
                 updated += int(outcome == "UPDATED")
                 closed += int(outcome == "CLOSED")
                 skipped += int(outcome == "SKIPPED")
             elif existing and existing["status"] == "REJECTED":
                 outcome = self._sync_rejected(existing, signal)
                 updated += int(outcome == "UPDATED")
+                skipped += int(outcome == "SKIPPED")
+            elif unified and str(unified.get("status")) not in {"CLOSED", "CANCELLED", "FAILED"}:
+                outcome = self._sync_unified_existing(unified, signal)
+                updated += int(outcome == "UPDATED")
+                closed += int(outcome == "CLOSED")
                 skipped += int(outcome == "SKIPPED")
             else:
                 skipped += 1
@@ -277,7 +332,17 @@ class CopyTradingService:
 
     def _portfolio_state(self, telegram_id: int, symbol: str, cooldown_min: int) -> PortfolioState:
         reconciliation = self.reconciliation.reconcile(telegram_id)
-        unified, _legacy_signal_ids, hybrid_count = self._position_identity_state(telegram_id)
+        unified, legacy_signal_ids, hybrid_count = self._position_identity_state(telegram_id)
+        heat_by_signal = dict(unified.heat_r_by_signal)
+        unified_confirmed_heat = max(
+            0.0,
+            unified.confirmed_heat_r
+            - sum(heat_by_signal.get(signal_id, 0.0) for signal_id in legacy_signal_ids),
+        )
+        unresolved_unified_count = len(
+            unified.unresolved_risk_signal_ids.difference(legacy_signal_ids)
+        )
+        portfolio_resolved = reconciliation.portfolio_state_resolved
         normalized_symbol = str(symbol or "").strip().upper()
         cooldown_since = (datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_min))).isoformat()
         with connect() as conn:
@@ -302,14 +367,22 @@ class CopyTradingService:
         unified_symbol_open = normalized_symbol in set(unified.symbols)
         return PortfolioState(
             open_positions=hybrid_count,
-            current_heat_r=reconciliation.confirmed_active_heat_r,
+            current_heat_r=reconciliation.confirmed_active_heat_r + unified_confirmed_heat,
             daily_realized_pnl=float(daily[0] or 0.0),
             symbol_is_open=bool(symbol_open[0]) or unified_symbol_open,
             symbol_in_cooldown=bool(cooldown[0]),
-            portfolio_state_resolved=reconciliation.portfolio_state_resolved,
-            unresolved_legacy_positions=reconciliation.unresolved_legacy_count,
+            portfolio_state_resolved=portfolio_resolved,
+            unresolved_legacy_positions=(
+                reconciliation.unresolved_legacy_count + unresolved_unified_count
+            ),
             unresolved_heat_r=reconciliation.unresolved_heat_r,
-            heat_source=reconciliation.heat_source,
+            heat_source=(
+                "HYBRID_CONFIRMED"
+                if reconciliation.confirmed_active_legacy_count and unified_confirmed_heat
+                else "UNIFIED_CONFIRMED"
+                if unified_confirmed_heat
+                else reconciliation.heat_source
+            ),
             reconciliation_status=reconciliation.status,
             legacy_open_positions=reconciliation.confirmed_active_legacy_count,
             unified_open_positions=unified.open_count,
@@ -321,6 +394,8 @@ class CopyTradingService:
             unified_unrealized_pnl=unified.unrealized_pnl,
             unified_realized_pnl=unified.realized_pnl,
             unified_commission=unified.total_commission,
+            unified_confirmed_heat_r=unified_confirmed_heat,
+            unified_unresolved_risk_positions=unresolved_unified_count,
         )
 
     def plan_execution(
@@ -340,6 +415,20 @@ class CopyTradingService:
         self.execution_queue.enqueue(plan)
         return plan
 
+    def project_execution(self, idempotency_key: str) -> bool:
+        """Materialize the rollback-compatible legacy projection after queue execution."""
+        position = self.execution_repository.position_by_idempotency(idempotency_key)
+        if not position:
+            return False
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM signals WHERE id=?", (position["signal_id"],)
+            ).fetchone()
+        self._project_unified_position(
+            position, signal=dict(row) if row is not None else None
+        )
+        return True
+
     def _open(self, telegram_id: int, profile: dict[str, Any], signal: dict[str, Any]) -> str:
         risk_profile = self._risk_profile(profile)
         state = self._portfolio_state(telegram_id, str(signal["symbol"]), risk_profile.symbol_cooldown_min)
@@ -354,9 +443,7 @@ class CopyTradingService:
             portfolio=state,
             training_policy=training_policy,
         )
-        journal_row, _ = self.execution_journal.reserve(plan)
-        if not plan.approved:
-            self.paper_lifecycle.reject(plan, reason_code=plan.code, reason=plan.reason)
+        result = self.execution_queue.engine.execute(plan)
         now = _now()
         genome_json, genome_fingerprint = self.similarity.snapshot(signal)
         if not plan.approved or plan.quantity is None or plan.notional is None or plan.risk_amount is None:
@@ -380,35 +467,169 @@ class CopyTradingService:
                 })
             return "REJECTED"
 
-        self.execution_journal.claim(plan.idempotency_key)
-        fill = float(signal.get("current_price") or signal["entry"])
+        if str(getattr(result.status, "value", result.status)) != JournalStatus.EXECUTED.value:
+            return "SKIPPED"
+        unified = self.execution_repository.position_by_idempotency(plan.idempotency_key)
+        if not unified:
+            return "SKIPPED"
+        initial_event = self.paper_lifecycle.apply_signal_transition(
+            int(unified["id"]),
+            signal_status=str(signal.get("status") or "ACTIVE"),
+            price=float(signal.get("current_price") or signal.get("entry") or unified["average_entry"]),
+            event_key=f"position:{int(unified['id'])}:signal:{int(unified['signal_id'])}:"
+                      f"{str(signal.get('status') or 'ACTIVE').upper()}",
+            reason="INITIAL_SIGNAL_STATE",
+        )
+        self._project_unified_position(
+            initial_event.position,
+            signal=signal,
+            plan=plan,
+            projection_metadata={
+                "equity_before": equity,
+                "training_expectancy_r": training_policy.expectancy_r,
+            },
+        )
+        return "OPEN"
+
+    def _sync_unified_existing(
+        self, position: dict[str, Any], signal: dict[str, Any]
+    ) -> str:
+        signal_status = str(signal.get("status") or "").upper()
+        price = float(
+            signal.get("exit_price")
+            or signal.get("current_price")
+            or position.get("last_price")
+            or position.get("average_entry")
+            or 0.0
+        )
+        if price <= 0:
+            return "SKIPPED"
+        event_key = (
+            f"position:{int(position['id'])}:"
+            f"signal:{int(position['signal_id'])}:{signal_status}"
+        )
+        result = self.paper_lifecycle.apply_signal_transition(
+            int(position["id"]),
+            signal_status=signal_status,
+            price=price,
+            event_key=event_key,
+            reason=str(signal.get("result") or signal_status),
+        )
+        self._project_unified_position(result.position, signal=signal, event=result)
+        if not result.applied:
+            return "SKIPPED"
+        return "CLOSED" if result.event_type == "CLOSED" else "UPDATED"
+
+    def _project_unified_position(
+        self,
+        position: dict[str, Any],
+        *,
+        signal: dict[str, Any] | None = None,
+        plan=None,
+        event=None,
+        projection_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Backward-compatible legacy projection; unified state is authoritative."""
+        signal = signal or {}
+        if plan is None:
+            journal = self.execution_journal.get(str(position["idempotency_key"]))
+            if journal:
+                try:
+                    payload = json.loads(str(journal.get("plan_json") or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = {}
+            else:
+                payload = {}
+        else:
+            payload = {
+                "stop_loss": plan.stop_loss,
+                "take_profits": list(plan.take_profits),
+                "notional": plan.notional,
+                "risk_amount": plan.risk_amount,
+                "leverage": plan.leverage,
+                "expected_slippage_pct": plan.expected_slippage_pct,
+                "training_sample_size": plan.training_sample_size,
+                "risk_multiplier": plan.risk_multiplier,
+                "plan_id": plan.plan_id,
+            }
+        take_profits = list(payload.get("take_profits") or ())
+        take_profits += [None] * (3 - len(take_profits))
+        unified_status = str(position.get("status") or "")
+        legacy_status = (
+            "CLOSED" if unified_status == "CLOSED"
+            else "PARTIAL" if unified_status == "PARTIALLY_CLOSED"
+            else "OPEN"
+        )
+        now = _now()
+        genome_json, genome_fingerprint = self.similarity.snapshot(signal) if signal else (None, None)
         with connect() as conn:
+            existing_projection = conn.execute(
+                "SELECT id FROM paper_positions WHERE telegram_id=? AND signal_id=?",
+                (position["telegram_id"], position["signal_id"]),
+            ).fetchone()
             conn.execute(
                 """INSERT INTO paper_positions(
-                       telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,stop_price,
-                       tp1,tp2,tp3,quantity,notional,risk_amount,initial_risk_r,remaining_fraction,
-                       realized_r,realized_pnl,last_signal_status,genome_json,genome_fingerprint,opened_at,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,1.0,1.0,0,0,?,?,?,?,?,?)
-                   ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
-                (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
-                 fill, fill, signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"],
-                 plan.quantity, plan.notional, plan.risk_amount, signal.get("status"), genome_json, genome_fingerprint, now, now, now),
+                       telegram_id,signal_id,symbol,timeframe,side,status,entry_price,last_price,
+                       stop_price,tp1,tp2,tp3,quantity,notional,risk_amount,initial_risk_r,
+                       remaining_fraction,realized_r,realized_pnl,last_signal_status,
+                       genome_json,genome_fingerprint,opened_at,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(telegram_id,signal_id) DO UPDATE SET
+                       status=excluded.status,last_price=excluded.last_price,
+                       quantity=excluded.quantity,remaining_fraction=excluded.remaining_fraction,
+                       realized_r=excluded.realized_r,realized_pnl=excluded.realized_pnl,
+                       last_signal_status=excluded.last_signal_status,updated_at=excluded.updated_at""",
+                (
+                    position["telegram_id"], position["signal_id"], position["symbol"],
+                    position["timeframe"], position["side"], legacy_status,
+                    position.get("average_entry"), position.get("last_price"),
+                    payload.get("stop_loss") or position.get("stop_loss"),
+                    take_profits[0], take_profits[1], take_profits[2],
+                    position.get("quantity"), payload.get("notional"),
+                    payload.get("risk_amount") or position.get("initial_risk_amount"),
+                    position.get("remaining_fraction", 1.0), position.get("realized_r", 0.0),
+                    position.get("realized_pnl", 0.0),
+                    signal.get("status") or position.get("last_signal_status"),
+                    genome_json, genome_fingerprint, position.get("opened_at") or now, now, now,
+                ),
             )
-            self._event_conn(conn, telegram_id, signal["id"], "OPENED", fill, 0.0, {
-                "quantity": plan.quantity, "notional": plan.notional, "risk_amount": plan.risk_amount,
-                "slippage_pct": plan.expected_slippage_pct, "equity_before": equity, "plan_id": plan.plan_id,
-                "idempotency_key": plan.idempotency_key, "leverage": plan.leverage,
-                "training_sample_size": plan.training_sample_size,
-                "training_expectancy_r": training_policy.expectancy_r,
-                "training_risk_multiplier": plan.risk_multiplier,
-            })
-        execution_ref = f"paper:{telegram_id}:{signal['id']}"
-        self.paper_lifecycle.execute_market(
-            plan, fill_price=fill, execution_ref=execution_ref,
-            slippage_pct=plan.expected_slippage_pct,
-        )
-        self.execution_journal.transition(plan.idempotency_key, JournalStatus.EXECUTED, execution_ref=execution_ref)
-        return "OPEN"
+            if legacy_status == "CLOSED":
+                conn.execute(
+                    """UPDATE paper_positions SET exit_price=?,close_reason=?,closed_at=?
+                       WHERE telegram_id=? AND signal_id=?""",
+                    (
+                        position.get("last_price"), position.get("close_reason"), position.get("closed_at"),
+                        position["telegram_id"], position["signal_id"],
+                    ),
+                )
+            if event is not None and event.event_type in {"CLOSED", "PARTIAL_CLOSED"}:
+                event_type = "CLOSED" if event.event_type == "CLOSED" else "PARTIAL_FILLED"
+                self._event_conn(
+                    conn, int(position["telegram_id"]), int(position["signal_id"]),
+                    event_type, float(position.get("last_price") or 0.0),
+                    float(event.realized_pnl_delta), {
+                        "authoritative_source": "paper_execution_positions",
+                        "position_id": position["id"],
+                        "realized_r_delta": event.realized_r_delta,
+                    },
+                    source_event_key=event.event_key,
+                )
+            elif existing_projection is None:
+                metadata = dict(projection_metadata or {})
+                metadata.update({
+                    "authoritative_source": "paper_execution_positions",
+                    "position_id": position["id"],
+                    "plan_id": payload.get("plan_id"),
+                    "idempotency_key": position["idempotency_key"],
+                    "leverage": payload.get("leverage"),
+                    "training_sample_size": payload.get("training_sample_size"),
+                    "training_risk_multiplier": payload.get("risk_multiplier"),
+                })
+                self._event_conn(
+                    conn, int(position["telegram_id"]), int(position["signal_id"]),
+                    "OPENED", float(position.get("average_entry") or 0.0), 0.0, metadata,
+                    source_event_key=f"position-open:{position['id']}",
+                )
 
     def _sync_rejected(self, position: dict[str, Any], signal: dict[str, Any]) -> str:
         """Resolve the counterfactual outcome without ever creating exposure or PnL."""
@@ -522,11 +743,14 @@ class CopyTradingService:
         price: float | None,
         realized_pnl_delta: float,
         details: dict[str, Any],
+        source_event_key: str | None = None,
     ) -> None:
         conn.execute(
             """INSERT INTO execution_events(
-                   telegram_id,signal_id,event_type,price,realized_pnl_delta,details_json,created_at
-               ) VALUES(?,?,?,?,?,?,?)""",
+                   telegram_id,signal_id,event_type,price,realized_pnl_delta,details_json,
+                   source_event_key,created_at
+               ) VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(source_event_key) DO NOTHING""",
             (telegram_id, signal_id, event_type, price, realized_pnl_delta,
-             json.dumps(details, ensure_ascii=False), _now()),
+             json.dumps(details, ensure_ascii=False), source_event_key, _now()),
         )
