@@ -11,6 +11,17 @@ from services.execution_context import ExecutionContext
 from services.execution_models import CopyExecutionPlan
 
 
+class PositionStatus(str, Enum):
+    CREATED = "CREATED"
+    OPENING = "OPENING"
+    OPEN = "OPEN"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    PARTIALLY_CLOSED = "PARTIALLY_CLOSED"
+    CLOSED = "CLOSED"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
+
+
 class OrderStatus(str, Enum):
     SUBMITTED = "SUBMITTED"
     ACCEPTED = "ACCEPTED"
@@ -239,6 +250,57 @@ class PaperExecutionLifecycle:
             position = self._upsert_position(conn, order, fill, new_qty, average_price, commission, now)
             updated = dict(conn.execute("SELECT * FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone())
         return FillResult(order=updated, fill=fill, position=position, created=True)
+
+
+    def mark_to_market(self, position_id: int, *, last_price: float) -> dict[str, Any]:
+        if last_price <= 0:
+            raise ValueError("last_price must be positive")
+        now = self._now()
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown paper position: {position_id}")
+            item = dict(row)
+            if item["status"] in {PositionStatus.CLOSED.value, PositionStatus.CANCELLED.value, PositionStatus.FAILED.value}:
+                return item
+            qty = float(item.get("quantity") or 0.0)
+            entry = float(item.get("average_entry") or 0.0)
+            direction = 1.0 if str(item.get("side")).upper() == "LONG" else -1.0
+            unrealized = (float(last_price) - entry) * qty * direction
+            conn.execute("UPDATE paper_execution_positions SET last_price=?,unrealized_pnl=?,updated_at=? WHERE id=?",
+                         (float(last_price), unrealized, now, position_id))
+            updated = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
+        return dict(updated)
+
+    def close_position(self, position_id: int, *, quantity: float, exit_price: float,
+                       commission_rate: float = DEFAULT_COMMISSION_RATE) -> dict[str, Any]:
+        if quantity <= 0 or exit_price <= 0:
+            raise ValueError("close quantity and exit_price must be positive")
+        now = self._now()
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown paper position: {position_id}")
+            item = dict(row)
+            current_qty = float(item.get("quantity") or 0.0)
+            if item["status"] == PositionStatus.CLOSED.value or current_qty <= 0:
+                return item
+            applied = min(float(quantity), current_qty)
+            entry = float(item.get("average_entry") or 0.0)
+            direction = 1.0 if str(item.get("side")).upper() == "LONG" else -1.0
+            realized_delta = (float(exit_price) - entry) * applied * direction
+            close_commission = applied * float(exit_price) * max(0.0, float(commission_rate))
+            remaining = max(0.0, current_qty - applied)
+            status = PositionStatus.CLOSED.value if remaining <= 1e-12 else PositionStatus.PARTIALLY_CLOSED.value
+            realized_total = float(item.get("realized_pnl") or 0.0) + realized_delta
+            commission_total = float(item.get("total_commission") or 0.0) + close_commission
+            unrealized = 0.0 if status == PositionStatus.CLOSED.value else (float(exit_price)-entry)*remaining*direction
+            conn.execute("""UPDATE paper_execution_positions SET status=?,quantity=?,last_price=?,realized_pnl=?,
+                         unrealized_pnl=?,total_commission=?,closed_at=?,updated_at=? WHERE id=?""",
+                         (status, remaining, float(exit_price), realized_total, unrealized, commission_total,
+                          now if status == PositionStatus.CLOSED.value else None, now, position_id))
+            updated = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
+        return dict(updated)
 
     def recent_orders(self, telegram_id: int, limit: int = 20) -> list[dict[str, Any]]:
         safe = max(1, min(int(limit), 100))

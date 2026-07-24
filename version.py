@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.6.3"
-RELEASE_NAME = "Unified Execution Foundation Builds 1-3"
+APP_VERSION = "9.9.6.5"
+RELEASE_NAME = "Position Lifecycle & Mark-to-Market"
