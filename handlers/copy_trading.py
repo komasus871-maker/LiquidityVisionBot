@@ -70,7 +70,7 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/genome [signal_id]</code> — inspect Strategy Genome
 <code>/panic</code> — close paper positions and disable execution
 
-🧱 v9.9.2 adds a validated unified Copy Trading Profile for the future automatic executor.
+🧭 v9.9.3 adds a deterministic Execution Planning Layer for the future automatic executor.
 🔌 Demo execution remains available through the existing exchange flow.
 🔒 LIVE execution remains fail-closed."""
 

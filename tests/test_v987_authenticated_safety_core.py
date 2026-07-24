@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.2"
-    assert RELEASE_NAME == "Copy Trading Profile Foundation"
+    assert APP_VERSION == "9.9.3"
+    assert RELEASE_NAME == "Copy Execution Planning Layer"
 
 
 @pytest.mark.asyncio

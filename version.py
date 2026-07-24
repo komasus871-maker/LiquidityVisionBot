@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.2"
-RELEASE_NAME = "Copy Trading Profile Foundation"
+APP_VERSION = "9.9.3"
+RELEASE_NAME = "Copy Execution Planning Layer"

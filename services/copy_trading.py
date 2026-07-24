@@ -7,6 +7,7 @@ from typing import Any
 from database.database import connect
 from services.execution_models import PortfolioState, PositionSizingMode, RiskProfile
 from services.execution_validator import ExecutionValidator
+from services.copy_execution_planner import CopyExecutionPlanner
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
 
@@ -28,6 +29,7 @@ class CopyTradingService:
 
     def __init__(self) -> None:
         self.validator = ExecutionValidator()
+        self.planner = CopyExecutionPlanner(self.validator)
         self.training = CopyTrainingService()
         self.similarity = CopySimilarityService()
 
@@ -263,13 +265,29 @@ class CopyTradingService:
             symbol_in_cooldown=bool(cooldown[0]),
         )
 
+    def plan_execution(
+        self, telegram_id: int, signal: dict[str, Any], *, require_auto_copy: bool = False,
+        exchange_account_id: int | None = None, market_price: float | None = None,
+    ):
+        profile = self.ensure_profile(telegram_id)
+        risk_profile = self._risk_profile(profile)
+        state = self._portfolio_state(telegram_id, str(signal.get("symbol") or ""), risk_profile.symbol_cooldown_min)
+        equity = max(0.0, float(self.profile_stats(telegram_id)["equity"]))
+        return self.planner.build(
+            telegram_id=telegram_id, signal=signal, profile=risk_profile, balance=equity,
+            portfolio=state, training_policy=self.training.policy_for(telegram_id, signal),
+            market_price=market_price, exchange_account_id=exchange_account_id,
+            require_auto_copy=require_auto_copy,
+        )
+
     def _open(self, telegram_id: int, profile: dict[str, Any], signal: dict[str, Any]) -> str:
         risk_profile = self._risk_profile(profile)
         state = self._portfolio_state(telegram_id, str(signal["symbol"]), risk_profile.symbol_cooldown_min)
         stats = self.profile_stats(telegram_id)
         equity = max(0.0, float(stats["equity"]))
         training_policy = self.training.policy_for(telegram_id, signal)
-        decision = self.validator.validate(
+        plan = self.planner.build(
+            telegram_id=telegram_id,
             signal=signal,
             profile=risk_profile,
             balance=equity,
@@ -278,7 +296,7 @@ class CopyTradingService:
         )
         now = _now()
         genome_json, genome_fingerprint = self.similarity.snapshot(signal)
-        if not decision.allowed or decision.size is None:
+        if not plan.approved or plan.quantity is None or plan.notional is None or plan.risk_amount is None:
             with connect() as conn:
                 conn.execute(
                     """INSERT INTO paper_positions(
@@ -288,19 +306,18 @@ class CopyTradingService:
                        ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
                     (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
                      float(signal.get("entry") or 0.0), float(signal.get("current_price") or signal.get("entry") or 0.0),
-                     float(signal.get("stop") or 0.0), decision.code, decision.reason,
+                     float(signal.get("stop") or 0.0), plan.code, plan.reason,
                      signal.get("status"), genome_json, genome_fingerprint, now, now),
                 )
                 self._event_conn(conn, telegram_id, signal["id"], "REJECTED", None, 0.0, {
-                    "code": decision.code, "reason": decision.reason,
+                    "code": plan.code, "reason": plan.reason, "plan_id": plan.plan_id,
                     "daily_pnl": state.daily_realized_pnl, "heat_r": state.current_heat_r,
-                    "training_sample_size": decision.training_sample_size,
+                    "training_sample_size": plan.training_sample_size,
                     "training_expectancy_r": training_policy.expectancy_r,
                 })
             return "REJECTED"
 
         fill = float(signal.get("current_price") or signal["entry"])
-        size = decision.size
         with connect() as conn:
             conn.execute(
                 """INSERT INTO paper_positions(
@@ -311,14 +328,15 @@ class CopyTradingService:
                    ON CONFLICT(telegram_id,signal_id) DO NOTHING""",
                 (telegram_id, signal["id"], signal["symbol"], signal["timeframe"], signal["side"],
                  fill, fill, signal["stop"], signal["tp1"], signal["tp2"], signal["tp3"],
-                 size.quantity, size.notional, size.risk_amount, signal.get("status"), genome_json, genome_fingerprint, now, now, now),
+                 plan.quantity, plan.notional, plan.risk_amount, signal.get("status"), genome_json, genome_fingerprint, now, now, now),
             )
             self._event_conn(conn, telegram_id, signal["id"], "OPENED", fill, 0.0, {
-                "quantity": size.quantity, "notional": size.notional, "risk_amount": size.risk_amount,
-                "slippage_pct": decision.expected_slippage_pct, "equity_before": equity,
-                "training_sample_size": decision.training_sample_size,
+                "quantity": plan.quantity, "notional": plan.notional, "risk_amount": plan.risk_amount,
+                "slippage_pct": plan.expected_slippage_pct, "equity_before": equity, "plan_id": plan.plan_id,
+                "idempotency_key": plan.idempotency_key, "leverage": plan.leverage,
+                "training_sample_size": plan.training_sample_size,
                 "training_expectancy_r": training_policy.expectancy_r,
-                "training_risk_multiplier": decision.risk_multiplier,
+                "training_risk_multiplier": plan.risk_multiplier,
             })
         return "OPEN"
 

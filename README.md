@@ -1,5 +1,9 @@
 
-## v9.9.2 Copy Trading Profile Foundation
+## v9.9.3 Copy Execution Planning Layer
+
+### v9.9.3 foundation
+
+Signals are now converted into deterministic, side-effect-free execution plans before any executor acts. Each plan contains validated sizing, leverage, SL/TP, risk metadata, a copy-profile snapshot, and an idempotency key. Rejections are formal plans too, with stable codes such as `MAX_POSITIONS` or `AUTO_COPY_DISABLED`. LIVE execution remains off.
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 

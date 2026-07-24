@@ -1,5 +1,13 @@
 # Changelog
 
+## 9.9.3 — Copy Execution Planning Layer
+
+- Added a deterministic, side-effect-free `CopyExecutionPlanner` as the contract between signals and future executors.
+- Plans now carry sizing, leverage, entry, SL/TP, risk, profile snapshot, validation outcome, and stable idempotency metadata.
+- Integrated existing paper-copy opening flow with the planner while preserving current behavior and guardrails.
+- Added fail-closed `AUTO_COPY_DISABLED` support for future automatic execution paths.
+- Added v9.9.3 regression tests and release documentation; no LIVE order execution was enabled.
+
 ## 9.9.2 — Copy Trading Profile Foundation
 
 - Extended the existing per-user `copy_profiles` model with sizing mode, Fixed USDT, leverage, and Auto Copy preference.

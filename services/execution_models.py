@@ -14,6 +14,11 @@ class PositionSizingMode(str, Enum):
     FIXED_USDT = "FIXED_USDT"
 
 
+class ExecutionPlanStatus(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class ExecutionStatus(str, Enum):
     PENDING = "PENDING"
     OPEN = "OPEN"
@@ -66,3 +71,36 @@ class ExecutionDecision:
     expected_slippage_pct: float = 0.0
     risk_multiplier: float = 1.0
     training_sample_size: int = 0
+
+
+@dataclass(frozen=True)
+class CopyExecutionPlan:
+    plan_id: str
+    idempotency_key: str
+    status: ExecutionPlanStatus
+    code: str
+    reason: str
+    telegram_id: int
+    signal_id: int
+    exchange_account_id: int | None
+    symbol: str
+    timeframe: str
+    side: str
+    order_type: str
+    entry_price: float | None
+    quantity: float | None = None
+    notional: float | None = None
+    leverage: int = 1
+    stop_loss: float | None = None
+    take_profits: tuple[float, ...] = ()
+    risk_amount: float | None = None
+    stop_distance_pct: float | None = None
+    sizing_mode: str = PositionSizingMode.RISK_PERCENT.value
+    expected_slippage_pct: float = 0.0
+    risk_multiplier: float = 1.0
+    training_sample_size: int = 0
+    profile_snapshot: dict[str, object] | None = None
+
+    @property
+    def approved(self) -> bool:
+        return self.status is ExecutionPlanStatus.APPROVED

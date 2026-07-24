@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.9.2"
-    assert RELEASE_NAME == "Copy Trading Profile Foundation"
+    assert APP_VERSION == "9.9.3"
+    assert RELEASE_NAME == "Copy Execution Planning Layer"
 
 
 def test_similarity_details_explain_groups_and_features():

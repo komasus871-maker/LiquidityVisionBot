@@ -28,8 +28,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.2"
-    assert RELEASE_NAME == "Copy Trading Profile Foundation"
+    assert APP_VERSION == "9.9.3"
+    assert RELEASE_NAME == "Copy Execution Planning Layer"
 
 
 def test_profile_validation_normalizes_future_execution_settings() -> None:
