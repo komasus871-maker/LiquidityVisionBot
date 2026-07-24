@@ -17,7 +17,15 @@ class CopyExecutionWorker:
         self._stop.set()
 
     async def check_once(self) -> dict[str, int]:
-        return await asyncio.to_thread(self.service.sync_all)
+        def run_cycle() -> dict[str, int]:
+            totals = self.service.sync_all()
+            queue_results = self.service.execution_queue.drain(limit=25)
+            totals["queue_processed"] = len(queue_results)
+            totals["queue_executed"] = sum(1 for item in queue_results if item.status.value == "EXECUTED")
+            totals["queue_failed"] = sum(1 for item in queue_results if item.status.value in {"FAILED", "REJECTED"})
+            return totals
+
+        return await asyncio.to_thread(run_cycle)
 
     async def run_forever(self) -> None:
         while not self._stop.is_set():

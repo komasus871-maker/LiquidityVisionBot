@@ -9,6 +9,7 @@ from services.execution_models import PortfolioState, PositionSizingMode, RiskPr
 from services.execution_validator import ExecutionValidator
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.copy_execution_journal import CopyExecutionJournal, JournalStatus
+from services.execution_queue import ExecutionQueueService
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
 
@@ -32,6 +33,7 @@ class CopyTradingService:
         self.validator = ExecutionValidator()
         self.planner = CopyExecutionPlanner(self.validator)
         self.execution_journal = CopyExecutionJournal()
+        self.execution_queue = ExecutionQueueService(journal=self.execution_journal)
         self.training = CopyTrainingService()
         self.similarity = CopySimilarityService()
 
@@ -281,7 +283,7 @@ class CopyTradingService:
             market_price=market_price, exchange_account_id=exchange_account_id,
             require_auto_copy=require_auto_copy,
         )
-        self.execution_journal.reserve(plan)
+        self.execution_queue.enqueue(plan)
         return plan
 
     def _open(self, telegram_id: int, profile: dict[str, Any], signal: dict[str, Any]) -> str:

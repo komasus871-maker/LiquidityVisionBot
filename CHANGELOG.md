@@ -1,3 +1,21 @@
+# 9.9.5e — Planner → Engine Queue Integration
+
+- Added `ExecutionQueueService` as the durable Planner → Engine hand-off.
+- Reused `PLANNED` execution-journal rows as the persistent FIFO queue instead of creating duplicate storage.
+- Added immutable plan reconstruction, idempotent enqueue, queue drain, and per-user status summaries.
+- Routed `CopyTradingService.plan_execution()` through the queue boundary.
+- Added `/copy_plan` and `/copy_queue` Telegram diagnostics.
+- Preserved PAPER-only execution and future recovery compatibility.
+
+# 9.9.5d — Execution Validation Pipeline
+
+- Added a composable, fail-closed validation boundary between `CopyExecutionPlanner` and `CopyExecutionEngine`.
+- Added plan approval, identity, order-payload and PAPER-safety validators with structured failure results.
+- Integrated validation before journal claim so invalid plans are persisted as `REJECTED` and never reach an adapter.
+- Preserved existing signal, sizing and portfolio validation ownership inside the Planner layer.
+- Added dependency injection for future exchange/risk validators and regression coverage for invalid plans and LIVE blocking.
+- Removed fragile current-version assertions from historical regression tests so later releases do not invalidate earlier subsystem coverage.
+
 # 9.9.5c — Journal State Machine Integration
 
 - Added a centralized, explicit lifecycle transition table for the persistent copy execution journal.

@@ -150,6 +150,27 @@ class CopyExecutionJournal:
             ).fetchone()
         return dict(row) if row else None
 
+    def pending(self, limit: int = 25) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 250))
+        with connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM copy_execution_journal WHERE status='PLANNED' ORDER BY id ASC LIMIT {safe_limit}"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def status_counts(self, telegram_id: int) -> dict[str, int]:
+        counts = {status.value: 0 for status in JournalStatus}
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT status,COUNT(*) AS count FROM copy_execution_journal WHERE telegram_id=? GROUP BY status",
+                (telegram_id,),
+            ).fetchall()
+        for row in rows:
+            item = dict(row)
+            counts[str(item["status"])] = int(item["count"] or 0)
+        counts["TOTAL"] = sum(counts[status.value] for status in JournalStatus)
+        return counts
+
     def recent(self, telegram_id: int, limit: int = 20) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 100))
         with connect() as conn:

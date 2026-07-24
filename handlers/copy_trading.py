@@ -63,6 +63,8 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_limits 3 2.5 2</code> — positions, heat R, daily loss %
 <code>/copy_guard 55 35 30 0.25</code> — confidence, notional %, cooldown min, slippage %
 <code>/copy_stats</code> — execution statistics
+<code>/copy_plan</code> — latest execution plan
+<code>/copy_queue</code> — persistent execution queue
 <code>/copy_training</code> — adaptive learning report
 <code>/copy_rejections</code> — execution rejection intelligence
 <code>/copy_guardrails</code> — rejected-signal outcome report
@@ -442,3 +444,59 @@ async def genome(message: Message):
         + "\n\nThis is the normalized execution-time context used by Similarity Intelligence."
     )
     await message.answer(text, parse_mode="HTML")
+
+@router.message(Command("copy_queue"))
+async def copy_queue(message: Message):
+    counts = service.execution_queue.summary(message.from_user.id)
+    recent = service.execution_queue.recent(message.from_user.id, limit=8)
+    rows = "\n".join(
+        f"• <code>{escape(str(row['status']))}</code> · {escape(str(row.get('symbol') or json_symbol(row)))} · "
+        f"<code>{escape(str(row['idempotency_key']))}</code>"
+        for row in recent
+    ) or "• Queue is empty"
+    await message.answer(
+        "⚙️ <b>Copy Execution Queue</b>\n\n"
+        f"Planned: <b>{counts.get('PLANNED', 0)}</b>\n"
+        f"Executing: <b>{counts.get('EXECUTING', 0)}</b>\n"
+        f"Executed: <b>{counts.get('EXECUTED', 0)}</b>\n"
+        f"Rejected: <b>{counts.get('REJECTED', 0)}</b>\n"
+        f"Failed: <b>{counts.get('FAILED', 0)}</b>\n"
+        f"Total: <b>{counts.get('TOTAL', 0)}</b>\n\n"
+        f"<b>Recent</b>\n{rows}",
+        parse_mode="HTML",
+    )
+
+
+def json_symbol(row: dict) -> str:
+    try:
+        import json
+        return str(json.loads(str(row.get("plan_json") or "{}" )).get("symbol") or "—")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "—"
+
+
+@router.message(Command("copy_plan"))
+async def copy_plan(message: Message):
+    rows = service.execution_queue.recent(message.from_user.id, limit=1)
+    if not rows:
+        await message.answer("📭 No copy execution plans yet.")
+        return
+    row = rows[0]
+    try:
+        import json
+        payload = json.loads(str(row.get("plan_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    await message.answer(
+        "🧾 <b>Latest Copy Plan</b>\n\n"
+        f"Symbol: <b>{escape(str(payload.get('symbol') or '—'))}</b>\n"
+        f"Side: <b>{escape(str(payload.get('side') or '—'))}</b>\n"
+        f"Status: <b>{escape(str(row.get('status') or '—'))}</b>\n"
+        f"Code: <code>{escape(str(row.get('code') or '—'))}</code>\n"
+        f"Reason: {escape(str(row.get('last_error') or row.get('reason') or '—'))}\n"
+        f"Quantity: <b>{escape(str(payload.get('quantity') or '—'))}</b>\n"
+        f"Notional: <b>{escape(str(payload.get('notional') or '—'))}</b>\n"
+        f"Leverage: <b>{escape(str(payload.get('leverage') or 1))}x</b>\n"
+        f"Key: <code>{escape(str(row.get('idempotency_key') or '—'))}</code>",
+        parse_mode="HTML",
+    )
