@@ -320,6 +320,15 @@ def create_tables() -> None:
                 details_json TEXT NOT NULL, created_at TEXT NOT NULL
             )
         """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS copy_execution_journal(
+                id {id_col}, idempotency_key TEXT NOT NULL UNIQUE, plan_id TEXT NOT NULL,
+                telegram_id BIGINT NOT NULL, signal_id BIGINT NOT NULL, exchange_account_id BIGINT,
+                status TEXT NOT NULL, code TEXT NOT NULL, reason TEXT NOT NULL, plan_json TEXT NOT NULL,
+                attempt_count INTEGER DEFAULT 0, execution_ref TEXT, last_error TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations(
                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL

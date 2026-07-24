@@ -1,3 +1,10 @@
+# v9.9.4 — Execution Journal & Idempotency Foundation
+
+- Added persistent copy execution journal with unique idempotency reservations.
+- Added lifecycle states, attempt tracking, execution references and failure storage.
+- Integrated journal reservations and transitions into the existing paper-copy path.
+- LIVE exchange execution remains disabled.
+
 # Changelog
 
 ## 9.9.3 — Copy Execution Planning Layer

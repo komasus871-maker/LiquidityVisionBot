@@ -30,8 +30,8 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.3"
-    assert "Copy Execution Planning Layer" in RELEASE_NAME
+    assert APP_VERSION == "9.9.4"
+    assert "Execution Journal & Idempotency Foundation" in RELEASE_NAME
 
 
 @pytest.mark.asyncio

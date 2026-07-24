@@ -8,6 +8,7 @@ from database.database import connect
 from services.execution_models import PortfolioState, PositionSizingMode, RiskProfile
 from services.execution_validator import ExecutionValidator
 from services.copy_execution_planner import CopyExecutionPlanner
+from services.copy_execution_journal import CopyExecutionJournal, JournalStatus
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
 
@@ -30,6 +31,7 @@ class CopyTradingService:
     def __init__(self) -> None:
         self.validator = ExecutionValidator()
         self.planner = CopyExecutionPlanner(self.validator)
+        self.execution_journal = CopyExecutionJournal()
         self.training = CopyTrainingService()
         self.similarity = CopySimilarityService()
 
@@ -273,12 +275,14 @@ class CopyTradingService:
         risk_profile = self._risk_profile(profile)
         state = self._portfolio_state(telegram_id, str(signal.get("symbol") or ""), risk_profile.symbol_cooldown_min)
         equity = max(0.0, float(self.profile_stats(telegram_id)["equity"]))
-        return self.planner.build(
+        plan = self.planner.build(
             telegram_id=telegram_id, signal=signal, profile=risk_profile, balance=equity,
             portfolio=state, training_policy=self.training.policy_for(telegram_id, signal),
             market_price=market_price, exchange_account_id=exchange_account_id,
             require_auto_copy=require_auto_copy,
         )
+        self.execution_journal.reserve(plan)
+        return plan
 
     def _open(self, telegram_id: int, profile: dict[str, Any], signal: dict[str, Any]) -> str:
         risk_profile = self._risk_profile(profile)
@@ -294,6 +298,7 @@ class CopyTradingService:
             portfolio=state,
             training_policy=training_policy,
         )
+        journal_row, _ = self.execution_journal.reserve(plan)
         now = _now()
         genome_json, genome_fingerprint = self.similarity.snapshot(signal)
         if not plan.approved or plan.quantity is None or plan.notional is None or plan.risk_amount is None:
@@ -317,6 +322,7 @@ class CopyTradingService:
                 })
             return "REJECTED"
 
+        self.execution_journal.claim(plan.idempotency_key)
         fill = float(signal.get("current_price") or signal["entry"])
         with connect() as conn:
             conn.execute(
@@ -338,6 +344,7 @@ class CopyTradingService:
                 "training_expectancy_r": training_policy.expectancy_r,
                 "training_risk_multiplier": plan.risk_multiplier,
             })
+        self.execution_journal.transition(plan.idempotency_key, JournalStatus.EXECUTED, execution_ref=f"paper:{telegram_id}:{signal['id']}")
         return "OPEN"
 
     def _sync_rejected(self, position: dict[str, Any], signal: dict[str, Any]) -> str:

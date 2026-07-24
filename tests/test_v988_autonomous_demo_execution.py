@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.3"
-    assert RELEASE_NAME == "Copy Execution Planning Layer"
+    assert APP_VERSION == "9.9.4"
+    assert RELEASE_NAME == "Execution Journal & Idempotency Foundation"
 
 
 @pytest.mark.asyncio

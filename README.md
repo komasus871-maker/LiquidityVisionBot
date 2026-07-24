@@ -1,5 +1,5 @@
 
-## v9.9.3 Copy Execution Planning Layer
+## v9.9.4 Copy Execution Planning Layer
 
 ### v9.9.3 foundation
 
@@ -169,3 +169,7 @@ pytest -q
 ## v9.8.8 Autonomous Demo Execution
 
 See `V9_8_8_AUTONOMOUS_DEMO_EXECUTION.md`. BingX demo orders can be submitted automatically when `DEMO_EXECUTION_ENABLED=true`; live writes remain blocked.
+
+
+## v9.9.4
+Persistent execution journal and idempotency foundation are documented in `V9_9_4_EXECUTION_JOURNAL_IDEMPOTENCY.md`.

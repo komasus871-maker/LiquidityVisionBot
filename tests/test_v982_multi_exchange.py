@@ -27,8 +27,8 @@ class StubBybit(BybitV5Adapter):
 def test_release_and_registry(monkeypatch):
     monkeypatch.setenv("BYBIT_TESTNET", "true")
     registry = build_exchange_registry()
-    assert APP_VERSION == "9.9.3"
-    assert "Copy Execution Planning Layer" in RELEASE_NAME
+    assert APP_VERSION == "9.9.4"
+    assert "Execution Journal & Idempotency Foundation" in RELEASE_NAME
     assert registry.available() == (ExchangeName.BINANCE, ExchangeName.BINGX, ExchangeName.BYBIT, ExchangeName.OKX)
     assert isinstance(registry.create(ExchangeName.BYBIT), BybitV5Adapter)
 
