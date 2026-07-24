@@ -42,8 +42,14 @@ Symbol cooldown: <b>{int(profile.get('symbol_cooldown_min') or 30)} min</b>
 
 📊 <b>Paper execution</b>
 Open: {int(stats.get('open_count') or 0)}
-Unified open: {int(stats.get('reconciliation_unified_open') or 0)}
+Confirmed legacy active: {int(stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
+Unified open: {int(stats.get('reconciliation_unified_open_count') or 0)}
+Unresolved legacy: {int(stats.get('reconciliation_unresolved_legacy_count') or 0)} ({float(stats.get('reconciliation_unresolved_heat_r') or 0):.2f}R)
+Confirmed heat: {float(stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
+Heat source: <b>{stats.get('reconciliation_heat_source') or 'UNKNOWN'}</b>
+Stale rows closed: {int(stats.get('reconciliation_stale_legacy_closed_count') or 0)}
 Portfolio state: <b>{stats.get('reconciliation_status') or 'UNKNOWN'}</b>
+Mismatch: <b>{'YES' if stats.get('reconciliation_mismatch_detected') else 'NO'}</b>
 Closed: {int(stats.get('closed_count') or 0)}
 Rejected: {int(stats.get('rejected_count') or 0)}
 Top rejection: <b>{stats.get("top_rejection_code") or "—"}</b> ({int(stats.get("top_rejection_count") or 0)})
@@ -702,8 +708,15 @@ async def execution_positions(message: Message):
         report = service.reconciliation.reconcile(message.from_user.id)
         await message.answer(
             "📈 <b>Unified Paper Positions</b>\n\nNo positions have been created by the new lifecycle yet.\n\n"
-            f"Legacy open: <b>{report.legacy_open_after}</b>\nUnified open: <b>{report.unified_open}</b>\n"
-            f"Reconciliation: <b>{report.status}</b>\nStale legacy rows closed: <b>{report.stale_legacy_closed}</b>",
+            f"Legacy open: <b>{report.legacy_open_count}</b>\n"
+            f"Confirmed legacy active: <b>{report.confirmed_active_legacy_count}</b>\n"
+            f"Unified open: <b>{report.unified_open_count}</b>\n"
+            f"Unresolved legacy: <b>{report.unresolved_legacy_count}</b> ({report.unresolved_heat_r:.2f}R)\n"
+            f"Confirmed heat: <b>{report.confirmed_active_heat_r:.2f}R</b>\n"
+            f"Heat source: <b>{report.heat_source}</b>\n"
+            f"Reconciliation: <b>{report.status}</b>\n"
+            f"Mismatch: <b>{'YES' if report.mismatch_detected else 'NO'}</b>\n"
+            f"Stale legacy rows closed: <b>{report.stale_legacy_closed_count}</b>",
             parse_mode="HTML",
         )
         return

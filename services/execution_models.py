@@ -55,6 +55,11 @@ class PortfolioState:
     daily_realized_pnl: float = 0.0
     symbol_is_open: bool = False
     symbol_in_cooldown: bool = False
+    portfolio_state_resolved: bool = True
+    unresolved_legacy_positions: int = 0
+    unresolved_heat_r: float = 0.0
+    heat_source: str = "LEGACY_CONFIRMED"
+    reconciliation_status: str = "UNKNOWN"
 
 
 @dataclass(frozen=True)

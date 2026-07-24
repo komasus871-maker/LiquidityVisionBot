@@ -245,17 +245,15 @@ class CopyTradingService:
         )
 
     def _portfolio_state(self, telegram_id: int, symbol: str, cooldown_min: int) -> PortfolioState:
-        self.reconciliation.reconcile(telegram_id)
+        reconciliation = self.reconciliation.reconcile(telegram_id)
         cooldown_since = (datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_min))).isoformat()
         with connect() as conn:
-            open_row = conn.execute(
-                """SELECT COUNT(*) c, COALESCE(SUM(initial_risk_r * remaining_fraction),0) heat
-                   FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')""",
-                (telegram_id,),
-            ).fetchone()
             symbol_open = conn.execute(
-                """SELECT COUNT(*) c FROM paper_positions
-                   WHERE telegram_id=? AND symbol=? AND status IN ('OPEN','PARTIAL')""",
+                """SELECT COUNT(*) c
+                   FROM paper_positions p
+                   JOIN signals s ON s.id=p.signal_id
+                   WHERE p.telegram_id=? AND p.symbol=? AND p.status IN ('OPEN','PARTIAL')
+                     AND UPPER(COALESCE(s.status,'')) IN ('ACTIVE','TP1','TP2')""",
                 (telegram_id, symbol),
             ).fetchone()
             cooldown = conn.execute(
@@ -269,11 +267,16 @@ class CopyTradingService:
                 (telegram_id, _day_start()),
             ).fetchone()
         return PortfolioState(
-            open_positions=int(open_row[0] or 0),
-            current_heat_r=float(open_row[1] or 0.0),
+            open_positions=reconciliation.confirmed_active_legacy_count,
+            current_heat_r=reconciliation.confirmed_active_heat_r,
             daily_realized_pnl=float(daily[0] or 0.0),
             symbol_is_open=bool(symbol_open[0]),
             symbol_in_cooldown=bool(cooldown[0]),
+            portfolio_state_resolved=reconciliation.portfolio_state_resolved,
+            unresolved_legacy_positions=reconciliation.unresolved_legacy_count,
+            unresolved_heat_r=reconciliation.unresolved_heat_r,
+            heat_source=reconciliation.heat_source,
+            reconciliation_status=reconciliation.status,
         )
 
     def plan_execution(

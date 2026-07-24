@@ -34,6 +34,15 @@ class ExecutionValidator:
             return ExecutionDecision(False, policy.code, policy.reason, training_sample_size=policy.sample_size)
         if str(signal.get("status")) not in {"ACTIVE", "TP1", "TP2"}:
             return ExecutionDecision(False, "SIGNAL_NOT_ACTIVE", "Signal is not executable")
+        if not state.portfolio_state_resolved:
+            return ExecutionDecision(
+                False,
+                "PORTFOLIO_STATE_UNRESOLVED",
+                "Portfolio state is unresolved: "
+                f"{state.unresolved_legacy_positions} legacy position(s), "
+                f"{state.unresolved_heat_r:.2f}R unresolved heat, "
+                f"reconciliation={state.reconciliation_status}",
+            )
         if state.open_positions >= profile.max_positions:
             return ExecutionDecision(False, "MAX_POSITIONS", "Maximum open positions reached")
         if state.current_heat_r + 1.0 > profile.max_heat_r:

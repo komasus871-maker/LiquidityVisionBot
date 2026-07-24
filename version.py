@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.6.6"
-RELEASE_NAME = "Legacy Portfolio Reconciliation"
+APP_VERSION = "9.9.6.7"
+RELEASE_NAME = "Safe Heat Reconciliation"

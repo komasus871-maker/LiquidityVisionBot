@@ -1,3 +1,12 @@
+# v9.9.6.7 — Safe Heat Reconciliation
+
+- Classified legacy open positions as confirmed active, terminal stale, or unresolved.
+- Removed terminal stale rows from confirmed portfolio heat idempotently.
+- Added fail-closed `PORTFOLIO_STATE_UNRESOLVED` rejection for missing or unknown legacy signal state.
+- Preserved `MAX_HEAT` for confirmed active portfolio risk.
+- Added heat-source and reconciliation diagnostics to `/copy_stats` and `/positions`.
+- Added targeted reconciliation, validator, idempotency, empty-state, and formatter tests.
+
 # v9.9.6.6 — Legacy Portfolio Reconciliation
 
 - Added conservative, idempotent reconciliation of terminal legacy paper positions.
