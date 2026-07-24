@@ -1,3 +1,12 @@
+# v9.9.6.3 — Unified Execution Foundation Builds 1–3
+
+- Added immutable `ExecutionContext` pipeline carrier.
+- Added centralized unified pipeline state validation.
+- Added context-aware `ExecutionDispatcher` with legacy adapter compatibility.
+- Integrated the new foundation into `CopyExecutionEngine`.
+- Added context entry points to the paper lifecycle and paper adapter.
+- Kept LIVE execution fail-closed and preserved existing database schemas.
+
 # v9.9.6 — Recovery & Reliability Engine
 
 - Durable worker claims with identity, token, timestamps, and expiring leases.
