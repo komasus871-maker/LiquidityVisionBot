@@ -292,7 +292,8 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS copy_profiles(
                 id {id_col}, telegram_id BIGINT NOT NULL UNIQUE, enabled INTEGER DEFAULT 0,
                 mode TEXT NOT NULL DEFAULT 'PAPER', exchange TEXT, risk_pct DOUBLE PRECISION DEFAULT 0.5,
-                max_positions INTEGER DEFAULT 3, max_heat_r DOUBLE PRECISION DEFAULT 2.5,
+                sizing_mode TEXT NOT NULL DEFAULT 'RISK_PERCENT', fixed_usdt DOUBLE PRECISION DEFAULT 0,
+                leverage INTEGER DEFAULT 1, auto_copy INTEGER DEFAULT 0, max_positions INTEGER DEFAULT 3, max_heat_r DOUBLE PRECISION DEFAULT 2.5,
                 daily_loss_pct DOUBLE PRECISION DEFAULT 2.0, max_slippage_pct DOUBLE PRECISION DEFAULT 0.25,
                 paper_balance DOUBLE PRECISION DEFAULT 10000, min_confidence DOUBLE PRECISION DEFAULT 55,
                 max_notional_pct DOUBLE PRECISION DEFAULT 35, symbol_cooldown_min INTEGER DEFAULT 30,
@@ -363,6 +364,10 @@ def create_tables() -> None:
             "min_confidence": "DOUBLE PRECISION DEFAULT 55",
             "max_notional_pct": "DOUBLE PRECISION DEFAULT 35",
             "symbol_cooldown_min": "INTEGER DEFAULT 30",
+            "sizing_mode": "TEXT NOT NULL DEFAULT 'RISK_PERCENT'",
+            "fixed_usdt": "DOUBLE PRECISION DEFAULT 0",
+            "leverage": "INTEGER DEFAULT 1",
+            "auto_copy": "INTEGER DEFAULT 0",
         }.items():
             _add_column(conn, "copy_profiles", name, definition)
         for name, definition in {

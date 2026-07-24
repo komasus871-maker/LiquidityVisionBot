@@ -100,7 +100,7 @@ class BingXSwapAdapter(ExchangeAdapter):
 
     async def _request_once(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False, method: str = "GET") -> Any:
         payload = {key: value for key, value in (params or {}).items() if value is not None}
-        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.9.1"}
+        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.9.2"}
         request_params: list[tuple[str, Any]] = list(payload.items())
         if signed:
             if not self.configured:

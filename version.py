@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.1"
-RELEASE_NAME = "Multi-User Exchange Accounts"
+APP_VERSION = "9.9.2"
+RELEASE_NAME = "Copy Trading Profile Foundation"

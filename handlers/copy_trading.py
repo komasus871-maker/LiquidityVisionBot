@@ -27,7 +27,11 @@ def _status_text(profile: dict, stats: dict) -> str:
 Status: {enabled}
 Mode: 🧪 <b>PAPER</b>
 Paper balance: <b>${float(profile['paper_balance']):,.2f}</b>
+Sizing: <b>{str(profile.get('sizing_mode') or 'RISK_PERCENT')}</b>
 Risk per trade: <b>{float(profile['risk_pct']):.2f}%</b>
+Fixed size: <b>${float(profile.get('fixed_usdt') or 0):,.2f}</b>
+Leverage: <b>{int(profile.get('leverage') or 1)}x</b>
+Auto Copy: <b>{'ON' if profile.get('auto_copy') else 'OFF'}</b>
 Max positions: <b>{int(profile['max_positions'])}</b>
 Max portfolio heat: <b>{float(profile['max_heat_r']):.2f}R</b>
 Daily loss limit: <b>{float(profile['daily_loss_pct']):.2f}%</b>
@@ -52,6 +56,9 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/copy_enable</code> — start paper copying
 <code>/copy_disable</code> — pause new entries
 <code>/copy_risk 0.5</code> — risk per trade
+<code>/copy_size risk</code> or <code>/copy_size fixed 100</code> — sizing mode
+<code>/copy_leverage 3</code> — execution leverage
+<code>/copy_auto on</code> — arm automatic execution preference
 <code>/copy_balance 10000</code> — paper balance
 <code>/copy_limits 3 2.5 2</code> — positions, heat R, daily loss %
 <code>/copy_guard 55 35 30 0.25</code> — confidence, notional %, cooldown min, slippage %
@@ -63,8 +70,8 @@ Win rate: {float(stats.get('win_rate') or 0):.1f}%
 <code>/genome [signal_id]</code> — inspect Strategy Genome
 <code>/panic</code> — close paper positions and disable execution
 
-🧬 v9.8.1 keeps explainable similarity and adds a read-only Binance exchange foundation.
-🔌 Use /exchanges to inspect connectivity; LIVE order submission is not available.
+🧱 v9.9.2 adds a validated unified Copy Trading Profile for the future automatic executor.
+🔌 Demo execution remains available through the existing exchange flow.
 🔒 LIVE execution remains fail-closed."""
 
 
@@ -97,6 +104,51 @@ async def copy_risk(message: Message):
         return
     service.update_profile(message.from_user.id, risk_pct=value)
     await message.answer(f"✅ Risk per trade set to <b>{value:.2f}%</b>.", parse_mode="HTML")
+
+
+@router.message(Command("copy_size"))
+async def copy_size(message: Message):
+    parts = (message.text or "").split()
+    try:
+        mode = parts[1].lower()
+        if mode == "risk":
+            profile = service.update_profile(message.from_user.id, sizing_mode="RISK_PERCENT")
+            await message.answer(f"✅ Sizing mode set to <b>Risk %</b> ({float(profile['risk_pct']):.2f}%).", parse_mode="HTML")
+            return
+        if mode == "fixed":
+            value = float(parts[2].replace(",", "."))
+            profile = service.update_profile(message.from_user.id, sizing_mode="FIXED_USDT", fixed_usdt=value)
+            await message.answer(f"✅ Sizing mode set to <b>Fixed USDT</b>: <b>${float(profile['fixed_usdt']):,.2f}</b>.", parse_mode="HTML")
+            return
+        raise ValueError
+    except (IndexError, ValueError):
+        await message.answer("Usage: <code>/copy_size risk</code> or <code>/copy_size fixed 100</code>", parse_mode="HTML")
+
+
+@router.message(Command("copy_leverage"))
+async def copy_leverage(message: Message):
+    try:
+        value = int((message.text or "").split(maxsplit=1)[1])
+        profile = service.update_profile(message.from_user.id, leverage=value)
+    except (IndexError, ValueError):
+        await message.answer("Usage: <code>/copy_leverage 3</code>\nAllowed: 1–125x (exchange limits still apply).", parse_mode="HTML")
+        return
+    await message.answer(f"✅ Copy execution leverage set to <b>{int(profile['leverage'])}x</b>.", parse_mode="HTML")
+
+
+@router.message(Command("copy_auto"))
+async def copy_auto(message: Message):
+    try:
+        raw = (message.text or "").split(maxsplit=1)[1].strip().lower()
+        if raw not in {"on", "off"}:
+            raise ValueError
+    except (IndexError, ValueError):
+        await message.answer("Usage: <code>/copy_auto on</code> or <code>/copy_auto off</code>", parse_mode="HTML")
+        return
+    enabled = int(raw == "on")
+    service.update_profile(message.from_user.id, auto_copy=enabled)
+    note = "armed for the future automatic executor" if enabled else "disabled"
+    await message.answer(f"✅ Auto Copy preference is <b>{raw.upper()}</b> ({note}). LIVE execution remains fail-closed.", parse_mode="HTML")
 
 
 @router.message(Command("copy_balance"))

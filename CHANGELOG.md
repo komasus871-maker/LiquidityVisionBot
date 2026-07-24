@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.9.2 — Copy Trading Profile Foundation
+
+- Extended the existing per-user `copy_profiles` model with sizing mode, Fixed USDT, leverage, and Auto Copy preference.
+- Added centralized fail-closed profile validation and safe migration defaults.
+- Integrated Fixed USDT sizing into the existing Risk/Execution Validator instead of creating a parallel executor.
+- Added `/copy_size`, `/copy_leverage`, and `/copy_auto` commands and updated `/copy` status output.
+- Preserved all portfolio heat, daily-loss, confidence, slippage, cooldown, duplicate-symbol, and notional guardrails.
+- Added v9.9.2 regression tests and release documentation. LIVE execution remains fail-closed.
+
 ## 9.9.1 — BingX Hedge Execution Hotfix
 
 - Fixed BingX error 109400 in hedge mode by omitting `reduceOnly` from normal opening orders.

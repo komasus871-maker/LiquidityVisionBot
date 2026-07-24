@@ -9,6 +9,11 @@ class ExecutionMode(str, Enum):
     LIVE = "LIVE"
 
 
+class PositionSizingMode(str, Enum):
+    RISK_PERCENT = "RISK_PERCENT"
+    FIXED_USDT = "FIXED_USDT"
+
+
 class ExecutionStatus(str, Enum):
     PENDING = "PENDING"
     OPEN = "OPEN"
@@ -21,6 +26,10 @@ class ExecutionStatus(str, Enum):
 @dataclass(frozen=True)
 class RiskProfile:
     risk_pct: float = 0.5
+    sizing_mode: PositionSizingMode = PositionSizingMode.RISK_PERCENT
+    fixed_usdt: float = 0.0
+    leverage: int = 1
+    auto_copy: bool = False
     max_positions: int = 3
     max_heat_r: float = 2.5
     daily_loss_pct: float = 2.0

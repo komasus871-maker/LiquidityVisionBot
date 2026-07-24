@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.1"
-    assert RELEASE_NAME == "Multi-User Exchange Accounts"
+    assert APP_VERSION == "9.9.2"
+    assert RELEASE_NAME == "Copy Trading Profile Foundation"
 
 
 @pytest.mark.asyncio

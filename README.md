@@ -1,5 +1,5 @@
 
-## v9.9.0 Multi-User Exchange Accounts
+## v9.9.2 Copy Trading Profile Foundation
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 
@@ -7,6 +7,10 @@ Each Telegram user can connect an isolated BingX/OKX account. Credentials are en
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
+
+### Copy Trading Profile foundation
+
+The existing per-user copy profile now supports Risk % or Fixed USDT sizing, leverage, maximum positions, and an Auto Copy preference. All sizing continues through the shared fail-closed execution validator. Auto Copy is preparatory only; LIVE execution remains disabled.
 
 ## v9.8.8 — Authenticated Safety Core
 

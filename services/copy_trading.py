@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from database.database import connect
-from services.execution_models import PortfolioState, RiskProfile
+from services.execution_models import PortfolioState, PositionSizingMode, RiskProfile
 from services.execution_validator import ExecutionValidator
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
@@ -36,10 +36,10 @@ class CopyTradingService:
         with connect() as conn:
             conn.execute(
                 """INSERT INTO copy_profiles(
-                       telegram_id,enabled,mode,risk_pct,max_positions,max_heat_r,daily_loss_pct,
+                       telegram_id,enabled,mode,risk_pct,sizing_mode,fixed_usdt,leverage,auto_copy,max_positions,max_heat_r,daily_loss_pct,
                        max_slippage_pct,paper_balance,min_confidence,max_notional_pct,symbol_cooldown_min,
                        created_at,updated_at
-                   ) VALUES(?,0,'PAPER',0.5,3,2.5,2.0,0.25,10000,55,35,30,?,?)
+                   ) VALUES(?,0,'PAPER',0.5,'RISK_PERCENT',0,1,0,3,2.5,2.0,0.25,10000,55,35,30,?,?)
                    ON CONFLICT(telegram_id) DO NOTHING""",
                 (telegram_id, now, now),
             )
@@ -48,18 +48,51 @@ class CopyTradingService:
 
     def update_profile(self, telegram_id: int, **fields: Any) -> dict[str, Any]:
         allowed = {
-            "enabled", "risk_pct", "max_positions", "max_heat_r", "daily_loss_pct",
+            "enabled", "risk_pct", "sizing_mode", "fixed_usdt", "leverage", "auto_copy", "max_positions", "max_heat_r", "daily_loss_pct",
             "max_slippage_pct", "paper_balance", "min_confidence", "max_notional_pct",
             "symbol_cooldown_min",
         }
         fields = {key: value for key, value in fields.items() if key in allowed}
         self.ensure_profile(telegram_id)
+        current = self.ensure_profile(telegram_id)
+        candidate = {**current, **fields}
+        normalized = self._validate_profile(candidate)
+        fields = {key: normalized[key] for key in fields}
         if fields:
             fields["updated_at"] = _now()
             assignments = ",".join(f"{key}=?" for key in fields)
             with connect() as conn:
                 conn.execute(f"UPDATE copy_profiles SET {assignments} WHERE telegram_id=?", (*fields.values(), telegram_id))
         return self.ensure_profile(telegram_id)
+
+
+    @staticmethod
+    def _validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(profile)
+        try:
+            mode = PositionSizingMode(str(normalized.get("sizing_mode") or PositionSizingMode.RISK_PERCENT.value).upper())
+            risk_pct = float(normalized.get("risk_pct") or 0)
+            fixed_raw = normalized.get("fixed_usdt")
+            leverage_raw = normalized.get("leverage")
+            positions_raw = normalized.get("max_positions")
+            fixed_usdt = float(0 if fixed_raw is None else fixed_raw)
+            leverage = int(1 if leverage_raw is None else leverage_raw)
+            max_positions = int(0 if positions_raw is None else positions_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid copy profile value: {exc}") from exc
+        if not 0.05 <= risk_pct <= 5.0:
+            raise ValueError("risk_pct must be between 0.05 and 5")
+        if mode is PositionSizingMode.FIXED_USDT and not 5 <= fixed_usdt <= 10_000_000:
+            raise ValueError("fixed_usdt must be between 5 and 10000000 in FIXED_USDT mode")
+        if not 1 <= leverage <= 125:
+            raise ValueError("leverage must be between 1 and 125")
+        if not 1 <= max_positions <= 20:
+            raise ValueError("max_positions must be between 1 and 20")
+        normalized.update(
+            sizing_mode=mode.value, fixed_usdt=fixed_usdt, leverage=leverage,
+            auto_copy=int(bool(normalized.get("auto_copy"))), risk_pct=risk_pct, max_positions=max_positions,
+        )
+        return normalized
 
     def panic(self, telegram_id: int) -> int:
         now = _now()
@@ -185,6 +218,10 @@ class CopyTradingService:
     def _risk_profile(profile: dict[str, Any]) -> RiskProfile:
         return RiskProfile(
             risk_pct=float(profile["risk_pct"]),
+            sizing_mode=PositionSizingMode(str(profile.get("sizing_mode") or "RISK_PERCENT")),
+            fixed_usdt=float(profile.get("fixed_usdt") or 0),
+            leverage=int(profile.get("leverage") or 1),
+            auto_copy=bool(profile.get("auto_copy")),
             max_positions=int(profile["max_positions"]),
             max_heat_r=float(profile["max_heat_r"]),
             daily_loss_pct=float(profile["daily_loss_pct"]),

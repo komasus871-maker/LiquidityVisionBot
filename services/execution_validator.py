@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.data_integrity import DataIntegrityEngine
-from services.execution_models import ExecutionDecision, PortfolioState, RiskProfile
+from services.execution_models import ExecutionDecision, PortfolioState, PositionSize, PositionSizingMode, RiskProfile
 from services.position_sizer import PositionSizer
 from services.copy_training import CopyTrainingPolicy
 
@@ -73,7 +73,18 @@ class ExecutionValidator:
             activation = self.integrity.validate_activation(signal, price)
             if not activation.valid:
                 return ExecutionDecision(False, activation.code, activation.reason)
-            size = self.sizer.calculate(balance=balance, risk_pct=profile.risk_pct, entry=price, stop=float(signal["stop"]))
+            if profile.sizing_mode is PositionSizingMode.FIXED_USDT:
+                notional = float(profile.fixed_usdt)
+                if notional <= 0:
+                    return ExecutionDecision(False, "INVALID_FIXED_SIZE", "Fixed USDT size must be positive")
+                quantity = notional / price
+                stop_distance = abs(price - float(signal["stop"]))
+                size = PositionSize(
+                    quantity=quantity, notional=notional, risk_amount=quantity * stop_distance,
+                    stop_distance_pct=stop_distance / price * 100.0,
+                )
+            else:
+                size = self.sizer.calculate(balance=balance, risk_pct=profile.risk_pct, entry=price, stop=float(signal["stop"]))
             if policy.risk_multiplier != 1.0:
                 size = type(size)(
                     quantity=size.quantity * policy.risk_multiplier,
