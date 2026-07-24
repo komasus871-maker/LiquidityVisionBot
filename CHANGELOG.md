@@ -1,3 +1,11 @@
+# 9.9.5a — Paper Execution Engine Foundation
+
+- Added `CopyExecutionEngine` as the idempotent Planner → Journal → Adapter coordinator.
+- Added an explicit execution-adapter contract and deterministic `PaperExecutionAdapter`.
+- Added atomic journal claiming, terminal execution persistence, duplicate replay protection, and adapter-failure capture.
+- Kept LIVE execution fail-closed by contract.
+- Added focused regression coverage for successful execution, rejection persistence, idempotency, adapter exceptions, and LIVE blocking.
+
 # v9.9.4 — Execution Journal & Idempotency Foundation
 
 - Added persistent copy execution journal with unique idempotency reservations.

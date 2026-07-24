@@ -1,3 +1,7 @@
+## v9.9.5a — Paper Execution Engine Foundation
+
+Approved deterministic copy plans can now pass through an idempotent `CopyExecutionEngine`. The engine reserves the plan in the persistent execution journal, atomically claims it, invokes the paper adapter, and records `EXECUTED` or `FAILED` as a terminal result. Duplicate calls return the existing journal outcome without executing twice. LIVE adapters remain blocked fail-closed.
+
 
 ## v9.9.4 Copy Execution Planning Layer
 

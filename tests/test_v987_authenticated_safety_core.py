@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.4"
-    assert RELEASE_NAME == "Execution Journal & Idempotency Foundation"
+    assert APP_VERSION == "9.9.5a"
+    assert RELEASE_NAME == "Paper Execution Engine Foundation"
 
 
 @pytest.mark.asyncio
