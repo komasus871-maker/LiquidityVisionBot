@@ -1,3 +1,11 @@
+# v9.9.5f — Execution Observability & Transition Audit
+
+- Added persistent actor-aware execution transition history.
+- Added user-scoped `/orders`, `/execution`, and `/fills` Telegram inspection commands.
+- Added execution lookup by order ID, signal ID, plan ID, idempotency key, and execution reference.
+- Added read-only inspection service and lifecycle audit tests.
+- Preserved Planner/Queue/Engine compatibility and fail-closed LIVE behavior.
+
 # 9.9.5e — Planner → Engine Queue Integration
 
 - Added `ExecutionQueueService` as the durable Planner → Engine hand-off.

@@ -81,6 +81,12 @@ class CopyExecutionJournal:
                 "SELECT * FROM copy_execution_journal WHERE idempotency_key=?",
                 (plan.idempotency_key,),
             ).fetchone()
+            if created:
+                self._record_event(
+                    conn, plan.idempotency_key, plan.telegram_id, plan.signal_id,
+                    None, status, actor="planner", reason_code=plan.code, reason=plan.reason,
+                    metadata={"plan_id": plan.plan_id},
+                )
         return dict(row), created
 
     def claim(self, idempotency_key: str) -> tuple[dict[str, Any], bool]:
@@ -98,10 +104,20 @@ class CopyExecutionJournal:
             ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown idempotency key: {idempotency_key}")
+            if claimed:
+                item = dict(row)
+                self._record_event(
+                    conn, idempotency_key, int(item["telegram_id"]), int(item["signal_id"]),
+                    JournalStatus.PLANNED.value, JournalStatus.EXECUTING.value, actor="worker",
+                    reason_code="CLAIMED", reason="Execution claimed by worker",
+                    metadata={"attempt_count": int(item.get("attempt_count") or 0)},
+                )
         return dict(row), claimed
 
     def transition(self, idempotency_key: str, status: JournalStatus | str, *, error: str | None = None,
-                   execution_ref: str | None = None, increment_attempt: bool = False) -> dict[str, Any]:
+                   execution_ref: str | None = None, increment_attempt: bool = False,
+                   actor: str = "engine", reason_code: str | None = None,
+                   reason: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         target = status if isinstance(status, JournalStatus) else JournalStatus(str(status))
         now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
@@ -141,6 +157,15 @@ class CopyExecutionJournal:
             updated = conn.execute(
                 "SELECT * FROM copy_execution_journal WHERE idempotency_key=?", (idempotency_key,)
             ).fetchone()
+            if current is not target:
+                item = dict(updated)
+                self._record_event(
+                    conn, idempotency_key, int(item["telegram_id"]), int(item["signal_id"]),
+                    current.value, target.value, actor=actor,
+                    reason_code=reason_code or target.value,
+                    reason=reason or error or item.get("reason"), execution_ref=execution_ref,
+                    metadata=metadata or {},
+                )
         return dict(updated)
 
     def get(self, idempotency_key: str) -> dict[str, Any] | None:
@@ -179,6 +204,61 @@ class CopyExecutionJournal:
                 (telegram_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+
+    def get_for_user(self, telegram_id: int, reference: str) -> dict[str, Any] | None:
+        reference = str(reference).strip()
+        with connect() as conn:
+            if reference.isdigit():
+                row = conn.execute(
+                    "SELECT * FROM copy_execution_journal WHERE telegram_id=? AND (id=? OR signal_id=?) ORDER BY id DESC LIMIT 1",
+                    (telegram_id, int(reference), int(reference)),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM copy_execution_journal WHERE telegram_id=? AND (idempotency_key=? OR plan_id=? OR execution_ref=?) ORDER BY id DESC LIMIT 1",
+                    (telegram_id, reference, reference, reference),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def transition_events(
+        self, *, telegram_id: int, idempotency_key: str | None = None,
+        limit: int = 50, statuses: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 250))
+        clauses = ["telegram_id=?"]
+        params: list[Any] = [telegram_id]
+        if idempotency_key:
+            clauses.append("idempotency_key=?")
+            params.append(idempotency_key)
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            clauses.append(f"to_status IN ({placeholders})")
+            params.extend(statuses)
+        with connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM execution_transition_events WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT {safe_limit}",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _record_event(
+        conn, idempotency_key: str, telegram_id: int, signal_id: int,
+        from_status: str | None, to_status: str, *, actor: str,
+        reason_code: str | None = None, reason: str | None = None,
+        execution_ref: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> None:
+        conn.execute(
+            """INSERT INTO execution_transition_events(
+                   idempotency_key,telegram_id,signal_id,from_status,to_status,actor,
+                   reason_code,reason,execution_ref,metadata_json,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (idempotency_key, telegram_id, signal_id, from_status, to_status, actor,
+             reason_code, reason, execution_ref,
+             json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+             datetime.now(timezone.utc).isoformat()),
+        )
 
     @staticmethod
     def _plan_payload(plan: CopyExecutionPlan) -> dict[str, Any]:

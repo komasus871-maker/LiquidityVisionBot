@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.5e"
-RELEASE_NAME = "Planner Engine Queue Integration"
+APP_VERSION = "9.9.5f"
+RELEASE_NAME = "Execution Observability & Transition Audit"

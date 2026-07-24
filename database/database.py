@@ -329,6 +329,14 @@ def create_tables() -> None:
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             )
         """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS execution_transition_events(
+                id {id_col}, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
+                signal_id BIGINT NOT NULL, from_status TEXT, to_status TEXT NOT NULL,
+                actor TEXT NOT NULL, reason_code TEXT, reason TEXT, execution_ref TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{{}}', created_at TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations(
                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL

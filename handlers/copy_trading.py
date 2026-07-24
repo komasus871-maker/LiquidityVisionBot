@@ -500,3 +500,126 @@ async def copy_plan(message: Message):
         f"Key: <code>{escape(str(row.get('idempotency_key') or '—'))}</code>",
         parse_mode="HTML",
     )
+
+# v9.9.5f — Execution Observability & Transition Audit
+from services.execution_inspection import ExecutionInspectionService
+
+execution_inspection_service = ExecutionInspectionService()
+
+
+def _compact_ref(value: object, length: int = 18) -> str:
+    raw = str(value or "—")
+    return raw if len(raw) <= length else raw[: length - 1] + "…"
+
+
+def _execution_status_icon(status: str) -> str:
+    return {
+        "PLANNED": "📝", "REJECTED": "⛔", "EXECUTING": "⚙️",
+        "EXECUTED": "✅", "FAILED": "❌", "CANCELLED": "🚫",
+    }.get(status, "•")
+
+
+def _render_execution_item(item) -> str:
+    row, plan = item.journal, item.plan
+    status = str(row.get("status") or "UNKNOWN")
+    quantity = plan.get("quantity")
+    notional = plan.get("notional")
+    qty_text = "—" if quantity is None else f"{float(quantity):.8f}".rstrip("0").rstrip(".")
+    notional_text = "—" if notional is None else f"${float(notional):,.2f}"
+    return (
+        f"{_execution_status_icon(status)} <b>#{int(row['id'])} · {escape(str(plan.get('symbol') or 'UNKNOWN'))} "
+        f"{escape(str(plan.get('side') or '—'))}</b>\n"
+        f"Status: <code>{escape(status)}</code> · Qty: <b>{qty_text}</b> · Notional: <b>{notional_text}</b>\n"
+        f"Signal: <code>#{int(row.get('signal_id') or 0)}</code> · Attempts: <b>{int(row.get('attempt_count') or 0)}</b>\n"
+        f"Ref: <code>{escape(_compact_ref(row.get('execution_ref') or row.get('idempotency_key')))}</code>"
+    )
+
+
+def _render_execution_detail(item) -> str:
+    row, plan = item.journal, item.plan
+    status = str(row.get("status") or "UNKNOWN")
+    timeline = list(reversed(item.timeline))
+    timeline_text = "\n".join(
+        f"• <code>{escape(str(event.get('to_status') or 'UNKNOWN'))}</code> · "
+        f"{escape(str(event.get('actor') or 'system'))} · "
+        f"{escape(str(event.get('reason_code') or '—'))}"
+        for event in timeline[-12:]
+    ) or "• Historical transitions were not recorded for this older execution."
+    tps = plan.get("take_profits") or []
+    tp_text = " / ".join(f"{float(value):g}" for value in tps) if tps else "—"
+    return f"""⚙️ <b>Execution #{int(row['id'])}</b>
+
+Symbol: <b>{escape(str(plan.get('symbol') or 'UNKNOWN'))}</b>
+Side: <b>{escape(str(plan.get('side') or '—'))}</b>
+Timeframe: <b>{escape(str(plan.get('timeframe') or '—'))}</b>
+Status: {_execution_status_icon(status)} <code>{escape(status)}</code>
+Order type: <b>{escape(str(plan.get('order_type') or '—'))}</b>
+Quantity: <b>{'—' if plan.get('quantity') is None else f"{float(plan['quantity']):g}"}</b>
+Notional: <b>{'—' if plan.get('notional') is None else f"${float(plan['notional']):,.2f}"}</b>
+Entry: <b>{'—' if plan.get('entry_price') is None else f"{float(plan['entry_price']):g}"}</b>
+Stop: <b>{'—' if plan.get('stop_loss') is None else f"{float(plan['stop_loss']):g}"}</b>
+Targets: <b>{tp_text}</b>
+Leverage: <b>{int(plan.get('leverage') or 1)}x</b>
+Attempts: <b>{int(row.get('attempt_count') or 0)}</b>
+Code: <code>{escape(str(row.get('code') or '—'))}</code>
+Reason: {escape(str(row.get('last_error') or row.get('reason') or '—'))}
+Execution ref: <code>{escape(str(row.get('execution_ref') or '—'))}</code>
+Idempotency: <code>{escape(str(row.get('idempotency_key') or '—'))}</code>
+
+🧭 <b>Timeline</b>
+{timeline_text}"""
+
+
+@router.message(Command("orders"))
+async def execution_orders(message: Message):
+    items = execution_inspection_service.recent(message.from_user.id, limit=10)
+    if not items:
+        await message.answer("⚙️ <b>Execution Orders</b>\n\nNo execution plans have been recorded yet.", parse_mode="HTML")
+        return
+    await message.answer(
+        "⚙️ <b>Latest Execution Orders</b>\n\n" + "\n\n".join(_render_execution_item(item) for item in items)
+        + "\n\nUse <code>/execution ID</code> for the full lifecycle.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("execution"))
+async def execution_detail(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 1:
+        items = execution_inspection_service.recent(message.from_user.id, limit=1)
+        if not items:
+            await message.answer("No execution has been recorded yet.")
+            return
+        item = items[0]
+    else:
+        item = execution_inspection_service.get(message.from_user.id, parts[1].strip())
+        if item is None:
+            await message.answer(
+                "Execution not found. Use an order ID, signal ID, plan ID, idempotency key, or execution reference."
+            )
+            return
+    await message.answer(_render_execution_detail(item), parse_mode="HTML")
+
+
+@router.message(Command("fills"))
+async def execution_fills(message: Message):
+    events = execution_inspection_service.fills(message.from_user.id, limit=15)
+    if not events:
+        await message.answer(
+            "🧾 <b>Execution Fills</b>\n\nNo completed paper executions have been recorded in the transition audit yet.\n"
+            "Older executions remain visible through <code>/orders</code>.",
+            parse_mode="HTML",
+        )
+        return
+    lines = []
+    for event in events:
+        lines.append(
+            f"✅ Signal <code>#{int(event.get('signal_id') or 0)}</code> · "
+            f"{escape(str(event.get('actor') or 'engine'))}\n"
+            f"Ref: <code>{escape(_compact_ref(event.get('execution_ref') or event.get('idempotency_key'), 24))}</code>"
+        )
+    await message.answer(
+        "🧾 <b>Latest Completed Paper Executions</b>\n\n" + "\n\n".join(lines),
+        parse_mode="HTML",
+    )
