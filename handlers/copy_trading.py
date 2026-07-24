@@ -41,9 +41,18 @@ Max notional: <b>{float(profile.get('max_notional_pct') or 35):.0f}% of equity</
 Symbol cooldown: <b>{int(profile.get('symbol_cooldown_min') or 30)} min</b>
 
 📊 <b>Paper execution</b>
-Open: {int(stats.get('open_count') or 0)}
-Confirmed legacy active: {int(stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
-Unified open: {int(stats.get('reconciliation_unified_open_count') or 0)}
+Open (legacy stats): {int(stats.get('open_count') or 0)}
+Legacy confirmed open: {int(stats.get('legacy_confirmed_open') or stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
+Confirmed legacy active: {int(stats.get('legacy_confirmed_open') or stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
+Unified open: {int(stats.get('unified_open_positions') or stats.get('reconciliation_unified_open_count') or 0)}
+Hybrid open: {int(stats.get('hybrid_open_positions') or 0)}
+Position source: <b>{stats.get('position_state_source') or 'LEGACY'}</b>
+Unified symbols: {', '.join(stats.get('unified_symbols') or ()) or '—'}
+Unified gross exposure: ${float(stats.get('unified_gross_notional') or 0):,.2f}
+Unified net exposure: ${float(stats.get('unified_net_notional') or 0):+,.2f}
+Unified unrealized PnL: ${float(stats.get('unified_unrealized_pnl') or 0):+,.2f}
+Unified commissions: ${float(stats.get('unified_commission') or 0):,.2f}
+<i>Unified exposure/PnL: diagnostics only</i>
 Unresolved legacy: {int(stats.get('reconciliation_unresolved_legacy_count') or 0)} ({float(stats.get('reconciliation_unresolved_heat_r') or 0):.2f}R)
 Confirmed heat: {float(stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
 Heat source: <b>{stats.get('reconciliation_heat_source') or 'UNKNOWN'}</b>

@@ -60,6 +60,16 @@ class PortfolioState:
     unresolved_heat_r: float = 0.0
     heat_source: str = "LEGACY_CONFIRMED"
     reconciliation_status: str = "UNKNOWN"
+    legacy_open_positions: int = 0
+    unified_open_positions: int = 0
+    deduplicated_open_positions: int = 0
+    position_state_source: str = "LEGACY"
+    unified_symbols: tuple[str, ...] = ()
+    unified_gross_notional: float = 0.0
+    unified_net_notional: float = 0.0
+    unified_unrealized_pnl: float = 0.0
+    unified_realized_pnl: float = 0.0
+    unified_commission: float = 0.0
 
 
 @dataclass(frozen=True)

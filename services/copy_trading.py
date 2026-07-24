@@ -14,6 +14,7 @@ from services.execution_queue import ExecutionQueueService
 from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
 from services.portfolio_reconciliation import PortfolioReconciliationService
+from services.execution_repositories import ExecutionRepository, UnifiedOpenPositionState
 
 
 def _now() -> str:
@@ -40,6 +41,7 @@ class CopyTradingService:
         self.training = CopyTrainingService()
         self.similarity = CopySimilarityService()
         self.reconciliation = PortfolioReconciliationService()
+        self.execution_repository = ExecutionRepository()
 
     def ensure_profile(self, telegram_id: int) -> dict[str, Any]:
         now = _now()
@@ -150,6 +152,19 @@ class CopyTradingService:
         result["top_rejection_code"] = top_rejection[0]["code"] if top_rejection else None
         result["top_rejection_count"] = top_rejection[0]["count"] if top_rejection else 0
         result.update({f"reconciliation_{k}": v for k, v in reconciliation.as_dict().items() if k != "telegram_id"})
+        unified, _legacy_signal_ids, hybrid_count = self._position_identity_state(telegram_id)
+        result.update(
+            legacy_confirmed_open=reconciliation.confirmed_active_legacy_count,
+            unified_open_positions=unified.open_count,
+            hybrid_open_positions=hybrid_count,
+            position_state_source="HYBRID_LEGACY_UNIFIED",
+            unified_symbols=unified.symbols,
+            unified_gross_notional=unified.gross_notional,
+            unified_net_notional=unified.net_notional,
+            unified_unrealized_pnl=unified.unrealized_pnl,
+            unified_realized_pnl=unified.realized_pnl,
+            unified_commission=unified.total_commission,
+        )
         return result
 
     def rejection_summary(self, telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
@@ -244,39 +259,68 @@ class CopyTradingService:
             symbol_cooldown_min=int(profile.get("symbol_cooldown_min") or 30),
         )
 
+    def _position_identity_state(self, telegram_id: int) -> tuple[UnifiedOpenPositionState, set[int], int]:
+        unified = self.execution_repository.unified_open_state(telegram_id)
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT p.signal_id
+                   FROM paper_positions p
+                   JOIN signals s ON s.id=p.signal_id
+                   WHERE p.telegram_id=? AND p.status IN ('OPEN','PARTIAL')
+                     AND UPPER(COALESCE(s.status,'')) IN ('ACTIVE','TP1','TP2')""",
+                (telegram_id,),
+            ).fetchall()
+        legacy_signal_ids = {int(row[0]) for row in rows if row[0] is not None}
+        duplicate_count = len(legacy_signal_ids.intersection(unified.signal_ids))
+        hybrid_count = len(rows) + unified.open_count - duplicate_count
+        return unified, legacy_signal_ids, hybrid_count
+
     def _portfolio_state(self, telegram_id: int, symbol: str, cooldown_min: int) -> PortfolioState:
         reconciliation = self.reconciliation.reconcile(telegram_id)
+        unified, _legacy_signal_ids, hybrid_count = self._position_identity_state(telegram_id)
+        normalized_symbol = str(symbol or "").strip().upper()
         cooldown_since = (datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_min))).isoformat()
         with connect() as conn:
             symbol_open = conn.execute(
                 """SELECT COUNT(*) c
                    FROM paper_positions p
                    JOIN signals s ON s.id=p.signal_id
-                   WHERE p.telegram_id=? AND p.symbol=? AND p.status IN ('OPEN','PARTIAL')
+                   WHERE p.telegram_id=? AND UPPER(TRIM(p.symbol))=? AND p.status IN ('OPEN','PARTIAL')
                      AND UPPER(COALESCE(s.status,'')) IN ('ACTIVE','TP1','TP2')""",
-                (telegram_id, symbol),
+                (telegram_id, normalized_symbol),
             ).fetchone()
             cooldown = conn.execute(
                 """SELECT COUNT(*) c FROM paper_positions
-                   WHERE telegram_id=? AND symbol=? AND status='CLOSED' AND closed_at>=?""",
-                (telegram_id, symbol, cooldown_since),
+                   WHERE telegram_id=? AND UPPER(TRIM(symbol))=? AND status='CLOSED' AND closed_at>=?""",
+                (telegram_id, normalized_symbol, cooldown_since),
             ).fetchone()
             daily = conn.execute(
                 """SELECT COALESCE(SUM(realized_pnl_delta),0) pnl FROM execution_events
                    WHERE telegram_id=? AND created_at>=? AND event_type IN ('PARTIAL_FILLED','CLOSED')""",
                 (telegram_id, _day_start()),
             ).fetchone()
+        unified_symbol_open = normalized_symbol in set(unified.symbols)
         return PortfolioState(
-            open_positions=reconciliation.confirmed_active_legacy_count,
+            open_positions=hybrid_count,
             current_heat_r=reconciliation.confirmed_active_heat_r,
             daily_realized_pnl=float(daily[0] or 0.0),
-            symbol_is_open=bool(symbol_open[0]),
+            symbol_is_open=bool(symbol_open[0]) or unified_symbol_open,
             symbol_in_cooldown=bool(cooldown[0]),
             portfolio_state_resolved=reconciliation.portfolio_state_resolved,
             unresolved_legacy_positions=reconciliation.unresolved_legacy_count,
             unresolved_heat_r=reconciliation.unresolved_heat_r,
             heat_source=reconciliation.heat_source,
             reconciliation_status=reconciliation.status,
+            legacy_open_positions=reconciliation.confirmed_active_legacy_count,
+            unified_open_positions=unified.open_count,
+            deduplicated_open_positions=hybrid_count,
+            position_state_source="HYBRID_LEGACY_UNIFIED",
+            unified_symbols=unified.symbols,
+            unified_gross_notional=unified.gross_notional,
+            unified_net_notional=unified.net_notional,
+            unified_unrealized_pnl=unified.unrealized_pnl,
+            unified_realized_pnl=unified.realized_pnl,
+            unified_commission=unified.total_commission,
         )
 
     def plan_execution(

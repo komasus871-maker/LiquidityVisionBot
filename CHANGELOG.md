@@ -1,3 +1,12 @@
+## 9.9.6.8 — Hybrid Position Awareness
+
+- Added an aggregated read model for real open unified execution positions.
+- Runtime portfolio identity now combines confirmed legacy and unified positions with signal-id deduplication.
+- Unified-only open symbols now participate in existing duplicate-symbol and maximum-position guardrails.
+- Portfolio heat, equity, sizing, cooldown, and daily realized PnL retain their existing legacy semantics.
+- Added compact Telegram diagnostics for hybrid counts and unified exposure/PnL read models.
+- No database schema changes and no synthetic orders, fills, prices, or positions.
+
 # v9.9.6.7 — Safe Heat Reconciliation
 
 - Classified legacy open positions as confirmed active, terminal stale, or unresolved.
