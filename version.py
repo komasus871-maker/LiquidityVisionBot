@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.5a"
-RELEASE_NAME = "Paper Execution Engine Foundation"
+APP_VERSION = "9.9.5c"
+RELEASE_NAME = "Journal State Machine Integration"

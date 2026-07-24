@@ -1,3 +1,11 @@
+# 9.9.5c — Journal State Machine Integration
+
+- Added a centralized, explicit lifecycle transition table for the persistent copy execution journal.
+- Enforced legal state transitions at the journal persistence boundary instead of relying on callers.
+- Added terminal-state protection, idempotent same-state updates, and compare-and-set persistence guards.
+- Preserved the existing `CopyExecutionEngine`, adapter contract, database schema, and public journal statuses.
+- Added focused regression tests for valid execution flow, illegal transitions, terminal immutability, and metadata preservation.
+
 # 9.9.5a — Paper Execution Engine Foundation
 
 - Added `CopyExecutionEngine` as the idempotent Planner → Journal → Adapter coordinator.

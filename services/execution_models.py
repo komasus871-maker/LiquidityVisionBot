@@ -20,6 +20,9 @@ class ExecutionPlanStatus(str, Enum):
 
 
 class ExecutionStatus(str, Enum):
+    PLANNED = "PLANNED"
+    VALIDATED = "VALIDATED"
+    QUEUED = "QUEUED"
     PENDING = "PENDING"
     OPEN = "OPEN"
     PARTIAL = "PARTIAL"
@@ -104,3 +107,18 @@ class CopyExecutionPlan:
     @property
     def approved(self) -> bool:
         return self.status is ExecutionPlanStatus.APPROVED
+
+
+ALLOWED_EXECUTION_TRANSITIONS = {
+    ExecutionStatus.PLANNED: {ExecutionStatus.VALIDATED, ExecutionStatus.CANCELLED},
+    ExecutionStatus.VALIDATED: {ExecutionStatus.QUEUED, ExecutionStatus.REJECTED},
+    ExecutionStatus.QUEUED: {ExecutionStatus.PENDING, ExecutionStatus.CANCELLED},
+    ExecutionStatus.PENDING: {ExecutionStatus.OPEN, ExecutionStatus.REJECTED},
+    ExecutionStatus.OPEN: {ExecutionStatus.PARTIAL, ExecutionStatus.CLOSED, ExecutionStatus.CANCELLED},
+    ExecutionStatus.PARTIAL: {ExecutionStatus.CLOSED, ExecutionStatus.CANCELLED},
+}
+
+def can_transition_execution_state(current: ExecutionStatus, target: ExecutionStatus)->bool:
+    if current==target:
+        return True
+    return target in ALLOWED_EXECUTION_TRANSITIONS.get(current,set())

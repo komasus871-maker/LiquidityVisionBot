@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.9.5a"
-    assert RELEASE_NAME == "Paper Execution Engine Foundation"
+    assert APP_VERSION == "9.9.5c"
+    assert RELEASE_NAME == "Journal State Machine Integration"
 
 
 def test_similarity_details_explain_groups_and_features():

@@ -28,8 +28,8 @@ def test_release_and_registry_transport_settings(monkeypatch):
     monkeypatch.setenv("EXCHANGE_READ_TIMEOUT", "9")
     monkeypatch.setenv("EXCHANGE_MAX_ATTEMPTS", "4")
     adapter = build_exchange_registry().create("okx")
-    assert APP_VERSION == "9.9.5a"
-    assert RELEASE_NAME == "Paper Execution Engine Foundation"
+    assert APP_VERSION == "9.9.5c"
+    assert RELEASE_NAME == "Journal State Machine Integration"
     assert adapter.connect_timeout_seconds == 2.5
     assert adapter.read_timeout_seconds == 9
     assert adapter.max_attempts == 4

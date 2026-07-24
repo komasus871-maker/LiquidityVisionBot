@@ -19,6 +19,45 @@ class JournalStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class InvalidJournalTransition(ValueError):
+    """Raised when an execution journal lifecycle transition is not allowed."""
+
+    def __init__(self, current: JournalStatus, target: JournalStatus) -> None:
+        self.current = current
+        self.target = target
+        super().__init__(f"Invalid execution journal transition: {current.value} -> {target.value}")
+
+
+ALLOWED_JOURNAL_TRANSITIONS: dict[JournalStatus, frozenset[JournalStatus]] = {
+    JournalStatus.PLANNED: frozenset({
+        JournalStatus.EXECUTING,
+        JournalStatus.FAILED,
+        JournalStatus.CANCELLED,
+    }),
+    JournalStatus.EXECUTING: frozenset({
+        JournalStatus.EXECUTED,
+        JournalStatus.FAILED,
+        JournalStatus.CANCELLED,
+    }),
+    JournalStatus.REJECTED: frozenset(),
+    JournalStatus.EXECUTED: frozenset(),
+    JournalStatus.FAILED: frozenset(),
+    JournalStatus.CANCELLED: frozenset(),
+}
+
+
+def can_transition_journal_state(current: JournalStatus, target: JournalStatus) -> bool:
+    """Return whether a persisted journal transition is legal.
+
+    Same-state transitions are accepted as idempotent no-ops. Terminal states
+    cannot move to another state.
+    """
+
+    if current is target:
+        return True
+    return target in ALLOWED_JOURNAL_TRANSITIONS[current]
+
+
 class CopyExecutionJournal:
     """Persistent idempotency boundary for future demo/live copy executors."""
 
@@ -63,7 +102,7 @@ class CopyExecutionJournal:
 
     def transition(self, idempotency_key: str, status: JournalStatus | str, *, error: str | None = None,
                    execution_ref: str | None = None, increment_attempt: bool = False) -> dict[str, Any]:
-        target = status.value if isinstance(status, JournalStatus) else JournalStatus(str(status)).value
+        target = status if isinstance(status, JournalStatus) else JournalStatus(str(status))
         now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
             row = conn.execute(
@@ -71,12 +110,34 @@ class CopyExecutionJournal:
             ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown idempotency key: {idempotency_key}")
-            attempts = int(dict(row).get("attempt_count") or 0) + (1 if increment_attempt else 0)
-            conn.execute(
+
+            current_row = dict(row)
+            current = JournalStatus(current_row["status"])
+            if not can_transition_journal_state(current, target):
+                raise InvalidJournalTransition(current, target)
+
+            # An idempotent same-state request must not erase existing failure or
+            # execution metadata when the caller does not provide replacements.
+            if current is target:
+                error = error if error is not None else current_row.get("last_error")
+                execution_ref = (
+                    execution_ref if execution_ref is not None else current_row.get("execution_ref")
+                )
+
+            attempts = int(current_row.get("attempt_count") or 0) + (1 if increment_attempt else 0)
+            cur = conn.execute(
                 """UPDATE copy_execution_journal SET status=?,last_error=?,execution_ref=?,
-                   attempt_count=?,updated_at=? WHERE idempotency_key=?""",
-                (target, error, execution_ref, attempts, now, idempotency_key),
+                   attempt_count=?,updated_at=? WHERE idempotency_key=? AND status=?""",
+                (target.value, error, execution_ref, attempts, now, idempotency_key, current.value),
             )
+            if cur.rowcount != 1:
+                latest = conn.execute(
+                    "SELECT status FROM copy_execution_journal WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone()
+                latest_status = JournalStatus(dict(latest)["status"]) if latest else current
+                raise InvalidJournalTransition(latest_status, target)
+
             updated = conn.execute(
                 "SELECT * FROM copy_execution_journal WHERE idempotency_key=?", (idempotency_key,)
             ).fetchone()

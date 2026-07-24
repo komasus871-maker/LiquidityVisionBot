@@ -2,7 +2,6 @@ from database.database import create_tables
 from services.copy_execution_journal import CopyExecutionJournal, JournalStatus
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.execution_models import RiskProfile
-from version import APP_VERSION, RELEASE_NAME
 
 
 def signal():
@@ -10,9 +9,10 @@ def signal():
             "current_price": 100, "stop": 98, "tp1": 104, "tp2": 106, "tp3": 108, "confidence": 80, "preferred_entry_low": 99, "preferred_entry_high": 101}
 
 
-def test_release_identity():
-    assert APP_VERSION == "9.9.5a"
-    assert RELEASE_NAME == "Paper Execution Engine Foundation"
+def test_journal_status_contract():
+    assert JournalStatus.PLANNED.value == "PLANNED"
+    assert JournalStatus.EXECUTING.value == "EXECUTING"
+    assert JournalStatus.EXECUTED.value == "EXECUTED"
 
 
 def test_reserve_is_idempotent(tmp_path, monkeypatch):

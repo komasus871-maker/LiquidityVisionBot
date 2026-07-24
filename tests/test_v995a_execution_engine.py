@@ -6,7 +6,6 @@ from services.copy_execution_journal import JournalStatus
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.execution_adapter import ExecutionAdapterResult
 from services.execution_models import ExecutionMode, RiskProfile
-from version import APP_VERSION, RELEASE_NAME
 
 
 def _signal(status: str = "ACTIVE") -> dict:
@@ -44,9 +43,10 @@ def _plan(**kwargs):
     )
 
 
-def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.5a"
-    assert RELEASE_NAME == "Paper Execution Engine Foundation"
+def test_execution_engine_keeps_terminal_status_contract() -> None:
+    assert JournalStatus.EXECUTED in CopyExecutionEngine.TERMINAL
+    assert JournalStatus.FAILED in CopyExecutionEngine.TERMINAL
+    assert JournalStatus.CANCELLED in CopyExecutionEngine.TERMINAL
 
 
 def test_engine_executes_approved_plan_once(tmp_path, monkeypatch) -> None:
