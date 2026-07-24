@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from services.execution_context import ExecutionContext
 from services.execution_models import CopyExecutionPlan, ExecutionMode
 
 
@@ -29,6 +30,9 @@ class ExecutionAdapter(Protocol):
 
 class PaperExecutionAdapter:
     mode = ExecutionMode.PAPER
+
+    def execute_context(self, context: ExecutionContext) -> ExecutionAdapterResult:
+        return self.execute(context.plan)
 
     def execute(self, plan: CopyExecutionPlan) -> ExecutionAdapterResult:
         if not plan.approved:

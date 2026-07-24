@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from database.database import connect
+from services.execution_context import ExecutionContext
 from services.execution_models import CopyExecutionPlan
 
 
@@ -75,6 +76,26 @@ class PaperExecutionLifecycle:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def submit_context(self, context: ExecutionContext, *, execution_ref: str | None = None) -> tuple[ExecutionContext, bool]:
+        order, created = self.submit(context.plan, execution_ref=execution_ref)
+        return context.with_order(order), created
+
+    def reject_context(self, context: ExecutionContext, *, reason_code: str, reason: str) -> ExecutionContext:
+        order = self.reject(context.plan, reason_code=reason_code, reason=reason)
+        return context.with_order(order).merge_metadata(pipeline_stage="REJECTED", rejection_code=reason_code)
+
+    def execute_market_context(
+        self, context: ExecutionContext, *, fill_price: float, execution_ref: str,
+        commission_rate: float = DEFAULT_COMMISSION_RATE, slippage_pct: float | None = None,
+    ) -> ExecutionContext:
+        result = self.execute_market(
+            context.plan, fill_price=fill_price, execution_ref=execution_ref,
+            commission_rate=commission_rate, slippage_pct=slippage_pct,
+        )
+        updated = context.with_order(result.order).add_fill(result.fill).with_position(result.position)
+        stage = "POSITIONED" if result.position else ("FILLED" if result.fill else "ORDERED")
+        return updated.merge_metadata(pipeline_stage=stage, lifecycle_created=result.created)
 
     def submit(self, plan: CopyExecutionPlan, *, execution_ref: str | None = None) -> tuple[dict[str, Any], bool]:
         now = self._now()
