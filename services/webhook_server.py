@@ -61,6 +61,7 @@ class WebhookServer:
         self.secret = webhook_secret(bot.token)
         self.runner: web.AppRunner | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
+        self.max_active_updates = max(1, int(os.getenv("WEBHOOK_MAX_ACTIVE_UPDATES", "100")))
         self._recent_ids: set[int] = set()
         self._recent_order: deque[int] = deque(maxlen=1000)
         self.maintenance_callback = maintenance_callback
@@ -105,6 +106,16 @@ class WebhookServer:
         except Exception:
             logging.exception("Invalid Telegram webhook payload")
             return web.Response(status=400, text="bad request")
+
+        # Do not acknowledge work that this process cannot retain. Telegram
+        # will retry a 503, whereas returning 200 here would silently drop the
+        # update during an overload or slow downstream dependency.
+        if len(self._tasks) >= self.max_active_updates:
+            logging.warning(
+                "Webhook update capacity reached: active=%s limit=%s update_id=%s",
+                len(self._tasks), self.max_active_updates, update.update_id,
+            )
+            return web.Response(status=503, text="busy")
 
         if not self._remember_update(update.update_id):
             return web.Response(text="duplicate")

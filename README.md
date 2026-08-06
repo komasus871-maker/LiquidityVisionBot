@@ -199,3 +199,5 @@ Startup incrementally catalogs legacy paper executions in a normalized provenanc
 The durable live-execution foundation adds normalized adapter capabilities, stable exchange identities, persistent attempts/fills, restart recovery and fail-closed readiness controls. Real-money execution remains disabled by default; see `V9_9_10_DURABLE_LIVE_EXECUTION.md` before deployment.
 
 v9.9.11 certifies the existing BingX USDT-M perpetual adapter for real authenticated `LIVE_DRY_RUN` and controlled VST economic certification. Production LIVE remains fail-closed. See `V9_9_11_BINGX_PRODUCTION_ADAPTER.md`.
+
+The final v9.9.11 stabilization invariants, deployment notes, remaining constraints, and staged GPT-trading integration plan are documented in `V9_9_11_PRODUCTION_HARDENING.md`.

@@ -151,8 +151,26 @@ def _columns(conn: DBConnection, table: str) -> set[str]:
 
 
 def _add_column(conn: DBConnection, table: str, name: str, definition: str) -> None:
-    if name not in _columns(conn, table):
+    if name in _columns(conn, table):
+        return
+    if conn.postgres:
+        conn.execute("SAVEPOINT add_column_guard")
+    try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    except Exception as exc:
+        # Rolling deployments can run two schema initializers concurrently.
+        # PostgreSQL aborts the current transaction after duplicate_column, so
+        # use a savepoint to make that benign race recoverable without hiding
+        # any other migration failure. SQLite serializes ALTER TABLE writes.
+        duplicate_column = getattr(exc, "pgcode", None) == "42701"
+        if conn.postgres:
+            conn.execute("ROLLBACK TO SAVEPOINT add_column_guard")
+            conn.execute("RELEASE SAVEPOINT add_column_guard")
+        if not duplicate_column:
+            raise
+    else:
+        if conn.postgres:
+            conn.execute("RELEASE SAVEPOINT add_column_guard")
 
 
 def _id_column() -> str:
@@ -667,6 +685,10 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_live_fill_execution ON live_execution_fills(execution_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_bingx_cert_account ON bingx_certification_audits(account_id,started_at)",
             "CREATE INDEX IF NOT EXISTS idx_symbol_rules_expiry ON exchange_symbol_rules_cache(exchange,environment,expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_copy_journal_due ON copy_execution_journal(status,next_attempt_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_copy_journal_expired_lease ON copy_execution_journal(status,lease_expires_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_live_account_sync ON live_exchange_accounts(exchange,sync_status,last_sync_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_readiness_account_time ON live_readiness_audits(account_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

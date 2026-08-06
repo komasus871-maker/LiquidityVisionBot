@@ -326,3 +326,7 @@
 - Added read-only `LIVE_DRY_RUN` reports and separately classified VST economic certification with explicit server enablement, private confirmation, durable expiry, and zero-exposure verification.
 - Added durable BingX certification audits, synchronized account metadata and normalized symbol-rule caching without storing raw exchange payloads.
 - Added `/live_sync`, `/live_certify`, and `/live_account` operations. LIVE remains disabled by default and requires a recent VST economic certificate plus all v9.9.10 gates.
+- Hardened additive PostgreSQL startup migrations against concurrent rolling-deploy column races.
+- Added bounded Telegram webhook backpressure so overload returns a retryable response instead of accepting work into an unbounded task set.
+- Added production query indexes for due/expired execution claims, account synchronization and readiness history.
+- Documented stabilization invariants, rollback constraints, remaining debt and the staged GPT-trading readiness plan. No GPT or LIVE behavior was enabled.

@@ -26,5 +26,6 @@ Thumbs.db
 # Logs and caches
 *.log
 .pytest_cache/
+.codex-test-deps/
 .mypy_cache/
 .ruff_cache/
