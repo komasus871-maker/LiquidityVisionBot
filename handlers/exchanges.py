@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 from decimal import Decimal
 from datetime import datetime, timezone
 from html import escape
@@ -28,8 +29,10 @@ from services.execution_models import ExecutionMode
 from services.live_readiness import ReadinessContext, audit_readiness
 from services.bingx_certification import BingXCertificationService, live_certification_valid
 from services.execution_portfolio import ExecutionPortfolioEngine
+from services.bingx_sync import BingXAccountSyncService, BingXSyncReport
 
 router = Router()
+logger = logging.getLogger(__name__)
 _EMPTY_CREDENTIALS = {
     exchange: ExchangeCredentials("", "", testnet=True)
     for exchange in (ExchangeName.BINANCE, ExchangeName.BYBIT, ExchangeName.BINGX, ExchangeName.OKX)
@@ -84,14 +87,45 @@ async def live_sync(message: Message) -> None:
         await message.answer("LIVE account synchronization is currently certified only for BingX.")
         return
     symbol = args[0].upper() if args else os.getenv("BINGX_CERTIFICATION_SYMBOL", "BTCUSDT")
-    quantity = Decimal(os.getenv("BINGX_CERTIFICATION_QUANTITY", "0.001"))
-    price = Decimal(os.getenv("BINGX_CERTIFICATION_REFERENCE_PRICE", "60000"))
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    adapter = None
     try:
-        report = await _run_bingx_dry_certification(message, symbol=symbol, quantity=quantity, price=price)
-    except (ExchangeError, ValueError) as exc:
-        await message.answer(f"⚠️ BingX synchronization failed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        user_registry = _user_registry(message.from_user.id, exchange)
+        adapter = user_registry.create(exchange)
+        report = await BingXAccountSyncService(adapter).synchronize(
+            telegram_id=message.from_user.id, account_id=account.id, symbol=symbol)
+    except ExchangeError as exc:
+        await message.answer(
+            f"⚠️ <b>BingX synchronization failed before adapter sync</b>\n"
+            f"Reason: <code>{escape(exc.code)} · {escape(str(exc))}</code>", parse_mode="HTML")
         return
-    await message.answer(format_bingx_certification(report), parse_mode="HTML")
+    finally:
+        if adapter is not None:
+            try:
+                await adapter.close()
+            except Exception as exc:
+                logger.warning("bingx_sync adapter_cleanup_failed type=%s", type(exc).__name__)
+    if not report.success:
+        await message.answer(
+            f"⚠️ <b>BingX synchronization failed</b>\n\n"
+            f"Stage: <code>{escape(report.stage)}</code>\n"
+            f"Reason: <code>{escape(report.error_code or 'UNKNOWN')} · "
+            f"{escape(report.error_message or 'no detail')}</code>\n"
+            f"Environment: <code>{escape(report.environment)}</code>\n"
+            f"Adapter: <code>{escape(report.adapter_version)}</code>", parse_mode="HTML")
+        return
+    await message.answer(
+        f"✅ <b>BingX synchronization complete</b>\n\n"
+        f"Adapter: <code>{escape(report.adapter_version)}</code>\n"
+        f"Environment: <code>{escape(report.environment)}</code>\n"
+        f"Last successful sync: <code>{escape(report.synchronized_at or 'unknown')}</code>\n"
+        f"Server drift: <code>{report.server_time_drift_ms} ms</code>\n"
+        f"Account / margin mode: <code>{escape(report.account_mode or 'unknown')} / "
+        f"{escape(report.margin_mode or 'unknown')}</code>\n"
+        f"Available funds: <code>{escape(report.available_funds)}</code>\n"
+        f"Positions / orders: <code>{report.open_positions} / {report.open_orders}</code>\n"
+        f"Capabilities: <code>{report.capability_count}</code>\n"
+        f"Symbol: <code>{escape(report.symbol or symbol)}</code>", parse_mode="HTML")
 
 
 @router.message(Command("live_certify"))
@@ -152,6 +186,9 @@ async def live_account(message: Message) -> None:
         f"Mode: <code>{account.execution_mode.value}</code>\n"
         f"Account / margin mode: <code>{escape(account.account_mode or 'unknown')} / {escape(account.margin_mode or 'unknown')}</code>\n"
         f"Last sync: <code>{escape(account.last_sync_at or 'never')}</code>\n"
+        f"Sync status: <code>{escape(account.sync_status or 'never')} · {escape(account.sync_stage or 'none')}</code>\n"
+        f"Sync error: <code>{escape(account.sync_error_code or 'none')}"
+        f"{(' · ' + escape(account.sync_error_message)) if account.sync_error_message else ''}</code>\n"
         f"Time drift: <code>{account.server_time_drift_ms if account.server_time_drift_ms is not None else 'unknown'} ms</code>\n"
         f"Certification: <code>{escape(account.certification_status or 'none')}</code>\n"
         f"Unresolved executions: <b>{len(unresolved)}</b>\n"

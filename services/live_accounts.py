@@ -30,6 +30,9 @@ class LiveAccountConfig:
     margin_mode: str | None = None
     last_sync_at: str | None = None
     sync_status: str | None = None
+    sync_stage: str | None = None
+    sync_error_code: str | None = None
+    sync_error_message: str | None = None
     server_time_drift_ms: int | None = None
     certification_status: str | None = None
     certification_expires_at: str | None = None
@@ -131,6 +134,9 @@ class LiveAccountRepository:
             margin_mode=str(row.get("margin_mode")) if row.get("margin_mode") else None,
             last_sync_at=str(row.get("last_sync_at")) if row.get("last_sync_at") else None,
             sync_status=str(row.get("sync_status")) if row.get("sync_status") else None,
+            sync_stage=str(row.get("sync_stage")) if row.get("sync_stage") else None,
+            sync_error_code=str(row.get("sync_error_code")) if row.get("sync_error_code") else None,
+            sync_error_message=str(row.get("sync_error_message")) if row.get("sync_error_message") else None,
             server_time_drift_ms=int(row["server_time_drift_ms"]) if row.get("server_time_drift_ms") is not None else None,
             certification_status=str(row.get("certification_status")) if row.get("certification_status") else None,
             certification_expires_at=str(row.get("certification_expires_at")) if row.get("certification_expires_at") else None,

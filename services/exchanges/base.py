@@ -37,14 +37,17 @@ class ExchangeError(RuntimeError):
 
 class ExchangeConfigurationError(ExchangeError):
     """Raised when authenticated operations are requested without credentials."""
+    code = "CONFIGURATION_ERROR"
 
 
 class ExchangeAuthenticationError(ExchangeError):
     """Raised when an exchange rejects credentials or a request signature."""
+    code = "AUTHENTICATION_FAILED"
 
 
 class ExchangeRequestError(ExchangeError):
     """Raised for transport, rate-limit, validation, or remote API failures."""
+    code = "REQUEST_FAILED"
 
 
 class ExchangeTimeoutError(ExchangeRequestError):
