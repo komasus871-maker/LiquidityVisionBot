@@ -311,3 +311,11 @@
 ## 9.1.0 — Runtime Integrity & Resilient Analysis Core
 
 - Stabilized runtime imports and analysis dependencies.
+## v9.9.10 — Durable Live Execution Foundation
+
+- Added a normalized, capability-discoverable exchange execution contract whose unsupported operations fail explicitly.
+- Added durable live execution, submission-attempt, fill, account-configuration, and readiness-audit records with stable client order IDs.
+- Added a fail-closed live state machine: ambiguous submissions enter recovery and are queried by client ID before any further action.
+- Added idempotent fill ingestion, weighted average price and commission aggregation, reduce-only close validation, bounded deterministic retries, and account isolation.
+- Added PAPER, SHADOW, LIVE_DRY_RUN, LIVE and DISABLED modes. PAPER remains the default; dry-run never places orders; LIVE requires external enablement plus every readiness gate.
+- Added scoped Telegram readiness, dry-run, two-step confirmation, emergency-disable, and recovery diagnostics. Confirmation alone cannot enable LIVE.

@@ -192,5 +192,5 @@ class BybitV5Adapter(ExchangeAdapter):
             base_asset=str(item.get("baseCoin") or ""), quote_asset=str(item.get("quoteCoin") or ""),
             price_tick=_decimal(price_filter.get("tickSize")), quantity_step=_decimal(lot_filter.get("qtyStep")),
             min_quantity=_decimal(lot_filter.get("minOrderQty")),
-            min_notional=_decimal(lot_filter.get("minNotionalValue")) or None, raw=dict(item),
+            min_notional=_decimal(lot_filter.get("minNotionalValue")) or None,
         )

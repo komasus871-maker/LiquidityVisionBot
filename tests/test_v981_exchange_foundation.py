@@ -6,7 +6,7 @@ import pytest
 
 from services.exchanges.base import ExchangeConfigurationError, ExchangeRequestError
 from services.exchanges.binance_usdm import BinanceUsdmAdapter
-from services.exchanges.models import ExchangeCredentials, ExchangeName
+from services.exchanges.models import ExchangeCapability, ExchangeCredentials, ExchangeName
 from services.exchanges.registry import ExchangeRegistry
 from version import APP_VERSION, RELEASE_NAME
 
@@ -30,8 +30,8 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.9"
-    assert "Provenance Migration and Unified Read Cutover" in RELEASE_NAME
+    assert APP_VERSION == "9.9.10"
+    assert "Durable Live Execution Foundation" in RELEASE_NAME
 
 
 @pytest.mark.asyncio
@@ -47,7 +47,7 @@ async def test_binance_balance_mapping_is_read_only() -> None:
     assert balances[0].asset == "USDT"
     assert balances[0].wallet_balance == Decimal("100.5")
     assert adapter.calls == [("/fapi/v3/balance", True)]
-    assert not hasattr(adapter, "place_order")
+    assert not adapter.capabilities().supports(ExchangeCapability.PLACE_ORDER)
 
 
 @pytest.mark.asyncio

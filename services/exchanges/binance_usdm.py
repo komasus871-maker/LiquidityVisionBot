@@ -236,5 +236,4 @@ class BinanceUsdmAdapter(ExchangeAdapter):
             quantity_step=_decimal(lot_filter.get("stepSize")),
             min_quantity=_decimal(lot_filter.get("minQty")),
             min_notional=min_notional if min_notional > 0 else None,
-            raw=dict(item),
         )

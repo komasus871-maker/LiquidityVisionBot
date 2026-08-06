@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.9"
-    assert RELEASE_NAME == "Provenance Migration and Unified Read Cutover"
+    assert APP_VERSION == "9.9.10"
+    assert RELEASE_NAME == "Durable Live Execution Foundation"
 
 
 @pytest.mark.asyncio

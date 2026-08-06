@@ -20,6 +20,9 @@ from services.exchanges.safety import (
 )
 from services.exchanges.registry import build_exchange_registry
 from services.exchanges.credentials_store import CredentialCipher, UserExchangeCredentialStore
+from services.live_accounts import LiveAccountRepository
+from services.execution_models import ExecutionMode
+from services.live_readiness import ReadinessContext, audit_readiness
 
 router = Router()
 _EMPTY_CREDENTIALS = {
@@ -34,6 +37,93 @@ manager = ExchangeManager(
 execution_manager = DemoExecutionManager(
     registry, timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25"))
 )
+live_accounts = LiveAccountRepository()
+
+
+@router.message(Command("live_dry_run"))
+async def live_dry_run(message: Message) -> None:
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    enabled = bool(args and args[0].lower() in {"on", "enable", "enabled"})
+    account = live_accounts.set_dry_run(message.from_user.id, exchange.value, enabled)
+    await message.answer(
+        f"🧪 <b>LIVE_DRY_RUN {'enabled' if enabled else 'disabled'}</b> for {escape(exchange.value)}.\n"
+        f"Mode: <code>{account.execution_mode.value}</code>\nNo economic orders can be submitted in this mode.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("live_confirm"))
+async def live_confirm(message: Message) -> None:
+    if getattr(message.chat, "type", "private") != "private":
+        await message.answer("⛔ Live confirmation is available only in a private chat.")
+        return
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if args:
+        confirmed = live_accounts.confirm(message.from_user.id, exchange.value, args[0])
+        await message.answer(
+            "✅ Confirmation recorded. LIVE remains disabled and the kill switch remains active."
+            if confirmed else "⚠️ Confirmation code is invalid or expired."
+        )
+        return
+    token = live_accounts.begin_confirmation(message.from_user.id, exchange.value)
+    await message.answer(
+        f"⚠️ <b>Step 1 of 2</b> for {escape(exchange.value)}\n"
+        f"Confirm within 10 minutes with <code>/live_confirm {escape(exchange.value)} {token}</code>.\n"
+        "This records intent only; it does not enable LIVE or release the kill switch.", parse_mode="HTML")
+
+
+@router.message(Command("live_disable"))
+async def live_disable(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    live_accounts.emergency_disable(message.from_user.id, exchange.value)
+    await message.answer(f"🛑 {escape(exchange.value)} execution disabled. Kill switch is active.")
+
+
+@router.message(Command("recovery"))
+async def recovery_status(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    rows = live_accounts.unresolved(message.from_user.id, exchange.value)
+    if not rows:
+        await message.answer(f"✅ No unresolved {escape(exchange.value)} live executions.")
+        return
+    lines = [f"⚠️ <b>{len(rows)} unresolved execution(s)</b>"]
+    lines.extend(f"<code>#{row['id']} {escape(row['symbol'])} {row['state']} {escape(row['client_order_id'])}</code>" for row in rows[:10])
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("live_readiness"))
+async def live_readiness(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    credentials = live_accounts.credentials_present(message.from_user.id, exchange.value)
+    unresolved = live_accounts.unresolved(message.from_user.id, exchange.value)
+    adapter_capabilities = registry.create(exchange).capabilities()
+    readiness = audit_readiness(
+        telegram_id=message.from_user.id, account_id=account.id, exchange=exchange.value,
+        mode=ExecutionMode.LIVE, context=ReadinessContext(
+        environment=os.getenv("ENVIRONMENT", "local"),
+        feature_flag=os.getenv("LIVE_EXECUTION_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+        account_enabled=account.live_enabled, confirmed=bool(account.confirmed_at),
+        credentials_present=credentials, recovery_required=len(unresolved),
+        max_order_notional=account.max_order_notional,
+        max_account_exposure=account.max_account_exposure, max_leverage=account.max_leverage,
+        kill_switch_available=True, kill_switch_active=account.kill_switch,
+        capabilities=adapter_capabilities,
+    ))
+    reasons = ", ".join(readiness.reason_codes[:8]) or "READY"
+    await message.answer(
+        f"🛡 <b>Live readiness · {escape(exchange.value)}</b>\n\n"
+        f"Mode: <code>{account.execution_mode.value}</code>\n"
+        f"Credentials present: <b>{'YES' if credentials else 'NO'}</b>\n"
+        f"Two-step confirmed: <b>{'YES' if account.confirmed_at else 'NO'}</b>\n"
+        f"Account enabled: <b>{'YES' if account.live_enabled else 'NO'}</b>\n"
+        f"Kill switch: <b>{'ACTIVE' if account.kill_switch else 'RELEASED'}</b>\n"
+        f"Unresolved/retry executions: <b>{len(unresolved)}</b>\n"
+        f"Max order / exposure / leverage: <code>{account.max_order_notional or 'unset'} / "
+        f"{account.max_account_exposure or 'unset'} / {account.max_leverage or 'unset'}</code>\n\n"
+        f"Readiness: <b>{'READY' if readiness.ready else 'BLOCKED'}</b>\n"
+        f"Reasons: <code>{escape(reasons)}</code>\n\n"
+        "LIVE is fail-closed until every server-side readiness gate passes.", parse_mode="HTML")
 
 
 def _credential_store() -> UserExchangeCredentialStore:

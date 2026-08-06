@@ -5,16 +5,34 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 
 from services.exchanges.models import (
+    ExchangeAccountInfo,
     ExchangeBalance,
+    ExchangeCapabilities,
+    ExchangeCapability,
+    ExchangeFill,
     ExchangeHealth,
     ExchangeOrder,
     ExchangePosition,
+    ExchangeOrderRequest,
+    ExchangeRateLimits,
     SymbolRules,
 )
 
 
 class ExchangeError(RuntimeError):
     """Base exception for normalized exchange failures."""
+
+    code = "EXCHANGE_ERROR"
+    retryable = False
+    ambiguous_submission = False
+
+    def __init__(self, message: str = "exchange operation failed") -> None:
+        import re
+        sanitized = re.sub(
+            r"(?i)(api[_-]?key|secret|signature|passphrase|token)\s*[:=]\s*[^\s&,;]+",
+            r"\1=[REDACTED]", str(message),
+        )
+        super().__init__(sanitized[:500])
 
 
 class ExchangeConfigurationError(ExchangeError):
@@ -31,18 +49,44 @@ class ExchangeRequestError(ExchangeError):
 
 class ExchangeTimeoutError(ExchangeRequestError):
     """Raised when an exchange request exceeds its connect/read deadline."""
+    code = "TIMEOUT"
+    retryable = True
+    ambiguous_submission = True
 
 
 class ExchangeRateLimitError(ExchangeRequestError):
     """Raised when an exchange asks the client to slow down."""
+    code = "RATE_LIMIT"
+    retryable = True
 
 
 class ExchangeResponseError(ExchangeRequestError):
     """Raised when a remote response cannot be safely decoded or validated."""
+    code = "INVALID_RESPONSE"
+
+
+class ExchangeUnsupportedCapabilityError(ExchangeConfigurationError):
+    code = "UNSUPPORTED_CAPABILITY"
+
+
+class ExchangeOrderRejectedError(ExchangeRequestError):
+    code = "ORDER_REJECTED"
 
 
 class ExchangeAdapter(ABC):
-    """Read-only exchange contract used before LIVE order execution is enabled."""
+    """Backend-neutral contract. Unsupported economic operations fail explicitly."""
+
+    def capabilities(self) -> ExchangeCapabilities:
+        return ExchangeCapabilities(frozenset({
+            ExchangeCapability.BALANCES,
+            ExchangeCapability.SYMBOL_RULES, ExchangeCapability.OPEN_ORDERS,
+            ExchangeCapability.POSITIONS,
+        }))
+
+    def _unsupported(self, capability: ExchangeCapability):
+        raise ExchangeUnsupportedCapabilityError(
+            f"{type(self).__name__} does not support {capability.value}"
+        )
 
     @abstractmethod
     async def health(self) -> ExchangeHealth:
@@ -63,6 +107,36 @@ class ExchangeAdapter(ABC):
     @abstractmethod
     async def symbol_rules(self, symbol: str) -> SymbolRules:
         raise NotImplementedError
+
+    async def account_info(self) -> ExchangeAccountInfo:
+        self._unsupported(ExchangeCapability.ACCOUNT_SYNC)
+
+    async def server_time(self) -> int:
+        self._unsupported(ExchangeCapability.SERVER_TIME)
+
+    async def rate_limits(self) -> ExchangeRateLimits:
+        self._unsupported(ExchangeCapability.RATE_LIMITS)
+
+    async def set_leverage(self, symbol: str, leverage: int) -> None:
+        self._unsupported(ExchangeCapability.LEVERAGE)
+
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> None:
+        self._unsupported(ExchangeCapability.MARGIN_MODE)
+
+    async def place_order(self, request: ExchangeOrderRequest) -> ExchangeOrder:
+        self._unsupported(ExchangeCapability.PLACE_ORDER)
+
+    async def cancel_order(self, *, symbol: str, order_id: str) -> ExchangeOrder:
+        self._unsupported(ExchangeCapability.CANCEL_ORDER)
+
+    async def query_order(self, *, symbol: str, order_id: str) -> ExchangeOrder | None:
+        self._unsupported(ExchangeCapability.QUERY_ORDER)
+
+    async def query_order_by_client_id(self, *, symbol: str, client_order_id: str) -> ExchangeOrder | None:
+        self._unsupported(ExchangeCapability.QUERY_BY_CLIENT_ID)
+
+    async def fills(self, *, symbol: str, order_id: str | None = None) -> list[ExchangeFill]:
+        self._unsupported(ExchangeCapability.FILLS)
 
 
     async def create_demo_order(

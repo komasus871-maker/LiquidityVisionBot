@@ -10,6 +10,7 @@ from database.database import connect, database_backend, get_runtime_states, per
 
 from version import APP_VERSION
 from services.execution_repositories import ExecutionRepository
+from services.live_readiness import configured_mode
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -80,6 +81,9 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "portfolio_ledger_entries": _scalar(conn, "SELECT COUNT(*) FROM paper_portfolio_ledger"),
             "historical_migrated": _scalar(conn, "SELECT COUNT(*) FROM historical_execution_records"),
             "historical_unresolved": _scalar(conn, "SELECT COUNT(*) FROM historical_execution_records WHERE migration_status='UNRESOLVED'"),
+            "live_unknown": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='UNKNOWN'"),
+            "live_recovery_required": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RECOVERY_REQUIRED'"),
+            "live_retry_wait": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RETRY_WAIT'"),
         }
         duplicate_open_plans = _scalar(conn, """
             SELECT COUNT(*) FROM (
@@ -129,6 +133,8 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "admission_mode": os.getenv("PORTFOLIO_ACCOUNTING_SOURCE", "SHADOW").strip().upper(),
             "daily_timezone": "UTC",
         },
+        "execution_mode": configured_mode().value,
+        "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "environment": os.getenv("RENDER_SERVICE_NAME") or os.getenv("ENVIRONMENT", "local"),
         "database_backend": database_backend(),
         "persistent_database": persistent_database(),

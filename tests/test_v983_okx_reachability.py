@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from services.exchanges.models import ExchangeCredentials, ExchangeName, ExchangeStatus
+from services.exchanges.models import ExchangeCapability, ExchangeCredentials, ExchangeName, ExchangeStatus
 from services.exchanges.okx_v5 import OkxV5Adapter, _instrument_id
 from services.exchanges.registry import build_exchange_registry
 from version import APP_VERSION, RELEASE_NAME
@@ -28,8 +28,8 @@ class StubOkx(OkxV5Adapter):
 def test_release_registry_and_symbol_normalization(monkeypatch):
     monkeypatch.setenv("OKX_DEMO", "true")
     registry = build_exchange_registry()
-    assert APP_VERSION == "9.9.9"
-    assert "Provenance Migration and Unified Read Cutover" in RELEASE_NAME
+    assert APP_VERSION == "9.9.10"
+    assert "Durable Live Execution Foundation" in RELEASE_NAME
     assert ExchangeName.OKX in registry.available()
     assert isinstance(registry.create("okx"), OkxV5Adapter)
     assert _instrument_id("BTCUSDT") == "BTC-USDT-SWAP"
@@ -63,4 +63,4 @@ async def test_okx_read_only_mapping():
     assert positions[0].side == "LONG" and positions[0].quantity == Decimal("2")
     assert orders[0].reduce_only is True
     assert rules.symbol == "BTC-USDT-SWAP" and rules.price_tick == Decimal("0.1")
-    assert not hasattr(adapter, "place_order")
+    assert not adapter.capabilities().supports(ExchangeCapability.PLACE_ORDER)

@@ -17,7 +17,7 @@ def _frame(rows: int = 260) -> pd.DataFrame:
 
 def test_release_integrity_and_version():
     report = validate_release(required_modules=("services.brain", "services.unified_core"))
-    assert APP_VERSION == "9.9.9"
+    assert APP_VERSION == "9.9.10"
     assert report.valid, report.as_dict()
 
 
@@ -40,7 +40,7 @@ def test_legacy_brain_facade_produces_scanner_contract():
         "execution_readiness": 68,
         "entry_quality": 70,
         "unified_decision": {"action": "WAIT", "score": 71},
-        "reasons": ["âœ… Bullish structure"],
+        "reasons": ["Ã¢Å“â€¦ Bullish structure"],
     })
     assert result["signal"] == "WAIT"
     assert result["score"] == 71

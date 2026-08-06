@@ -424,6 +424,60 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_exchange_accounts(
+                id {id_col}, telegram_id BIGINT NOT NULL, exchange TEXT NOT NULL,
+                credential_ref TEXT NOT NULL, execution_mode TEXT NOT NULL DEFAULT 'PAPER',
+                live_enabled INTEGER NOT NULL DEFAULT 0, dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+                confirmation_hash TEXT, confirmation_expires_at TEXT, confirmed_at TEXT,
+                kill_switch INTEGER NOT NULL DEFAULT 1, max_order_notional DOUBLE PRECISION,
+                max_account_exposure DOUBLE PRECISION, max_leverage INTEGER,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(telegram_id, exchange)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_executions(
+                id {id_col}, execution_key TEXT NOT NULL UNIQUE, plan_id TEXT,
+                telegram_id BIGINT NOT NULL, account_id BIGINT NOT NULL, exchange TEXT NOT NULL,
+                mode TEXT NOT NULL, client_order_id TEXT NOT NULL, exchange_order_id TEXT,
+                symbol TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL, price DOUBLE PRECISION, reduce_only INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL, executed_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+                average_fill_price DOUBLE PRECISION, commission DOUBLE PRECISION NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                recovery_reason TEXT, version INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(account_id, client_order_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_execution_attempts(
+                id {id_col}, execution_id BIGINT NOT NULL, attempt_number INTEGER NOT NULL,
+                client_order_id TEXT NOT NULL, adapter TEXT NOT NULL, account_id BIGINT NOT NULL,
+                request_checksum TEXT NOT NULL, status TEXT NOT NULL, reason TEXT,
+                exchange_order_id TEXT, normalized_error_code TEXT, normalized_error TEXT,
+                raw_response_checksum TEXT, retry_at TEXT, started_at TEXT NOT NULL, completed_at TEXT,
+                UNIQUE(execution_id, attempt_number)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_execution_fills(
+                id {id_col}, execution_id BIGINT NOT NULL, account_id BIGINT NOT NULL,
+                exchange_fill_id TEXT NOT NULL, exchange_order_id TEXT NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL, price DOUBLE PRECISION NOT NULL,
+                commission DOUBLE PRECISION NOT NULL DEFAULT 0, commission_asset TEXT,
+                filled_at TEXT, created_at TEXT NOT NULL,
+                UNIQUE(account_id, exchange_fill_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_readiness_audits(
+                id {id_col}, telegram_id BIGINT NOT NULL, account_id BIGINT,
+                exchange TEXT NOT NULL, requested_mode TEXT NOT NULL, ready INTEGER NOT NULL,
+                reason_codes_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -570,6 +624,10 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_portfolio_ledger_position ON paper_portfolio_ledger(position_id)",
             "CREATE INDEX IF NOT EXISTS idx_historical_execution_owner_class ON historical_execution_records(telegram_id,classification)",
             "CREATE INDEX IF NOT EXISTS idx_historical_execution_signal ON historical_execution_records(signal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_live_execution_state ON live_executions(state,next_retry_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_execution_owner ON live_executions(telegram_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_attempt_execution ON live_execution_attempts(execution_id,attempt_number)",
+            "CREATE INDEX IF NOT EXISTS idx_live_fill_execution ON live_execution_fills(execution_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

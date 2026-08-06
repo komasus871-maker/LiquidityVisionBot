@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.9
+APP_VERSION=9.9.10
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -194,3 +194,6 @@ Paper portfolio accounting is derived from unified execution positions and the i
 ## Historical provenance migration (v9.9.9)
 
 Startup incrementally catalogs legacy paper executions in a normalized provenance model. It never fabricates orders, fills, fees, prices, risk, or lifecycle events. Analytics use unified outcomes first, truthfully reconstructable unlinked history second, and an explicit legacy compatibility path until catalog coverage completes. See `V9_9_9_PROVENANCE_MIGRATION.md`.
+# LiquidityVisionBot v9.9.10
+
+The durable live-execution foundation adds normalized adapter capabilities, stable exchange identities, persistent attempts/fills, restart recovery and fail-closed readiness controls. Real-money execution remains disabled by default; see `V9_9_10_DURABLE_LIVE_EXECUTION.md` before deployment.

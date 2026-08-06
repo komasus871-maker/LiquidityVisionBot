@@ -5,7 +5,10 @@ from enum import Enum
 
 
 class ExecutionMode(str, Enum):
+    DISABLED = "DISABLED"
     PAPER = "PAPER"
+    SHADOW = "SHADOW"
+    LIVE_DRY_RUN = "LIVE_DRY_RUN"
     LIVE = "LIVE"
 
 

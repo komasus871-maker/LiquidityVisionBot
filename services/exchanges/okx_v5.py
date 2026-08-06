@@ -272,7 +272,7 @@ class OkxV5Adapter(ExchangeAdapter):
             base_asset=str(item.get("ctValCcy") or item.get("baseCcy") or inst_id.split("-")[0]),
             quote_asset=str(item.get("settleCcy") or item.get("quoteCcy") or "USDT"),
             price_tick=_decimal(item.get("tickSz")), quantity_step=_decimal(item.get("lotSz")),
-            min_quantity=min_size, min_notional=None, raw=dict(item),
+            min_quantity=min_size, min_notional=None,
         )
         if self.symbol_cache_ttl_seconds > 0:
             _SYMBOL_RULES_CACHE[cache_key] = (now, rules)

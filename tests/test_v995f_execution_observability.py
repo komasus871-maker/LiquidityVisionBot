@@ -39,8 +39,8 @@ def _plan(telegram_id: int = 99550):
 
 
 def test_release_identity():
-    assert APP_VERSION == "9.9.9"
-    assert RELEASE_NAME == "Provenance Migration and Unified Read Cutover"
+    assert APP_VERSION == "9.9.10"
+    assert RELEASE_NAME == "Durable Live Execution Foundation"
 
 
 def test_execution_records_auditable_timeline(tmp_path, monkeypatch):

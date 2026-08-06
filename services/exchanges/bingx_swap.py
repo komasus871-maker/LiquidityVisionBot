@@ -252,7 +252,6 @@ class BingXSwapAdapter(ExchangeAdapter):
             quantity_step=_decimal(item.get("stepSize") or Decimal(1).scaleb(-quantity_precision)),
             min_quantity=_decimal(item.get("minQty") or item.get("tradeMinQuantity") or item.get("size")),
             min_notional=_decimal(item.get("minNotional")) if _decimal(item.get("minNotional")) > 0 else None,
-            raw=dict(item),
         )
         if self.symbol_cache_ttl_seconds > 0:
             _SYMBOL_RULES_CACHE[cache_key] = (now, rules)
@@ -324,4 +323,3 @@ class BingXSwapAdapter(ExchangeAdapter):
         )
         item = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(item)
-
