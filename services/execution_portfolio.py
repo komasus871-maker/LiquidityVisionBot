@@ -157,10 +157,10 @@ class ExecutionPortfolioEngine:
         with connect() as conn:
             legacy = conn.execute(
                 """SELECT
-                    COALESCE(SUM(CASE WHEN status IN ('OPEN','PARTIAL') THEN 1 ELSE 0 END),0),
-                    COALESCE(SUM(CASE WHEN status IN ('OPEN','PARTIAL') THEN initial_risk_r*remaining_fraction ELSE 0 END),0),
-                    COALESCE(SUM(realized_pnl),0),
-                    COALESCE(SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END),0)
+                    COALESCE(SUM(CASE WHEN status IN ('OPEN','PARTIAL') THEN 1 ELSE 0 END),0) AS legacy_open_count,
+                    COALESCE(SUM(CASE WHEN status IN ('OPEN','PARTIAL') THEN initial_risk_r*remaining_fraction ELSE 0 END),0) AS legacy_heat_r,
+                    COALESCE(SUM(realized_pnl),0) AS legacy_realized_pnl,
+                    COALESCE(SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END),0) AS legacy_rejection_count
                     FROM paper_positions WHERE telegram_id=?""", (telegram_id,)
             ).fetchone()
             legacy_daily = conn.execute(
@@ -177,7 +177,9 @@ class ExecutionPortfolioEngine:
                    WHERE telegram_id=? AND status='CLOSED' AND closed_at>=?""",
                 (telegram_id, cooldown_start),
             ).fetchall()
-        legacy_open, legacy_heat, legacy_realized, legacy_rejected = legacy
+        legacy_open, legacy_heat, legacy_realized, legacy_rejected = (
+            legacy[0], legacy[1], legacy[2], legacy[3]
+        )
         legacy_equity = unified.starting_balance + float(legacy_realized or 0)
         legacy_symbol_set = {str(row[0]) for row in legacy_symbols if row[0]}
         legacy_cooldown_set = {str(row[0]) for row in legacy_cooldown if row[0]}

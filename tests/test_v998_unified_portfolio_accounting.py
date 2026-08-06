@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from database.database import connect, create_tables
+from database.database import DBRow
 from services.execution_models import CopyExecutionPlan, ExecutionPlanStatus, RiskProfile
 from services.execution_portfolio import ExecutionPortfolioEngine
 from services.execution_validator import ExecutionValidator
@@ -123,3 +124,43 @@ def test_parity_and_source_mode_rollback(tmp_path, monkeypatch):
     monkeypatch.setenv("PORTFOLIO_ACCOUNTING_SOURCE", "LEGACY")
     legacy = CopyTradingService()._portfolio_state(1, "ETHUSDT", 30)
     assert legacy.position_state_source == "LEGACY_ROLLBACK" and legacy.open_positions == 0
+
+
+def test_parity_aggregate_is_postgres_real_dict_safe(monkeypatch):
+    """RealDictCursor collapses unnamed duplicate COALESCE columns to one key."""
+    from contextlib import contextmanager
+    import services.execution_portfolio as portfolio_module
+
+    class FakeConnection:
+        def execute(self, sql, params=()):
+            class Cursor:
+                def fetchone(inner_self):
+                    if "FROM paper_positions" in sql and "SUM" in sql:
+                        assert "AS legacy_open_count" in sql
+                        assert "AS legacy_heat_r" in sql
+                        assert "AS legacy_realized_pnl" in sql
+                        assert "AS legacy_rejection_count" in sql
+                        return DBRow(legacy_open_count=1, legacy_heat_r=.5,
+                                     legacy_realized_pnl=25, legacy_rejection_count=2)
+                    if "FROM execution_events" in sql:
+                        return DBRow(daily_pnl=5)
+                    raise AssertionError(sql)
+
+                def fetchall(inner_self):
+                    return []
+            return Cursor()
+
+    @contextmanager
+    def fake_connect():
+        yield FakeConnection()
+
+    engine = ExecutionPortfolioEngine()
+    monkeypatch.setattr(engine, "snapshot", lambda *args, **kwargs: type("Snapshot", (), {
+        "starting_balance": 10_000.0, "open_positions": 1, "confirmed_heat_r": .5,
+        "realized_gross_pnl": 25.0, "daily_realized_result": 5.0,
+        "net_equity": 10_025.0, "symbols": (), "cooldown_symbols": (),
+        "rejection_count": 2, "resolved": True,
+    })())
+    monkeypatch.setattr(portfolio_module, "connect", fake_connect)
+    report = engine.parity_report(1)
+    assert report["status"] == "MATCH"
