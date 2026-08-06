@@ -478,6 +478,26 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS bingx_certification_audits(
+                id {id_col}, run_key TEXT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
+                account_id BIGINT NOT NULL, environment TEXT NOT NULL, adapter_version TEXT NOT NULL,
+                certification_type TEXT NOT NULL, status TEXT NOT NULL, symbol TEXT NOT NULL,
+                capability_snapshot_json TEXT NOT NULL, permission_snapshot_json TEXT NOT NULL,
+                report_json TEXT NOT NULL, server_time_drift_ms BIGINT, account_mode TEXT,
+                margin_mode TEXT, started_at TEXT NOT NULL, completed_at TEXT,
+                expires_at TEXT, error_code TEXT
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS exchange_symbol_rules_cache(
+                id {id_col}, account_id BIGINT NOT NULL, exchange TEXT NOT NULL, environment TEXT NOT NULL,
+                symbol TEXT NOT NULL, price_tick TEXT NOT NULL, quantity_step TEXT NOT NULL,
+                min_quantity TEXT NOT NULL, min_notional TEXT, max_quantity TEXT, max_leverage INTEGER,
+                adapter_version TEXT NOT NULL, fetched_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+                UNIQUE(account_id, exchange, environment, symbol)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -573,6 +593,20 @@ def create_tables() -> None:
             "last_signal_status": "TEXT",
         }.items():
             _add_column(conn, "paper_execution_positions", name, definition)
+        for name, definition in {
+            "adapter_environment": "TEXT",
+            "adapter_version": "TEXT",
+            "account_mode": "TEXT",
+            "margin_mode": "TEXT",
+            "last_sync_at": "TEXT",
+            "sync_status": "TEXT",
+            "server_time_drift_ms": "BIGINT",
+            "capability_snapshot_json": "TEXT",
+            "permission_snapshot_json": "TEXT",
+            "certification_status": "TEXT",
+            "certification_expires_at": "TEXT",
+        }.items():
+            _add_column(conn, "live_exchange_accounts", name, definition)
         _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
@@ -628,6 +662,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_live_execution_owner ON live_executions(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_live_attempt_execution ON live_execution_attempts(execution_id,attempt_number)",
             "CREATE INDEX IF NOT EXISTS idx_live_fill_execution ON live_execution_fills(execution_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_bingx_cert_account ON bingx_certification_audits(account_id,started_at)",
+            "CREATE INDEX IF NOT EXISTS idx_symbol_rules_expiry ON exchange_symbol_rules_cache(exchange,environment,expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

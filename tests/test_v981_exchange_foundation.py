@@ -30,8 +30,8 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.10"
-    assert "Durable Live Execution Foundation" in RELEASE_NAME
+    assert APP_VERSION == "9.9.11"
+    assert "BingX Production Adapter Certification" in RELEASE_NAME
 
 
 @pytest.mark.asyncio

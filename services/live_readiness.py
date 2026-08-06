@@ -40,6 +40,9 @@ class ReadinessContext:
     kill_switch_available: bool = False
     kill_switch_active: bool = True
     capabilities: ExchangeCapabilities = ExchangeCapabilities()
+    recent_certification: bool = False
+    production_adapter_allowed: bool = False
+    account_mode_known: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +72,9 @@ def evaluate_live_readiness(context: ReadinessContext) -> ReadinessResult:
         (context.kill_switch_available, "KILL_SWITCH_UNAVAILABLE"),
         (not context.kill_switch_active, "KILL_SWITCH_ACTIVE"),
         (context.environment.lower() in {"production", "render"}, "DEPLOYMENT_ENVIRONMENT_INVALID"),
+        (context.recent_certification, "CERTIFICATION_REQUIRED_OR_EXPIRED"),
+        (context.production_adapter_allowed, "PRODUCTION_ADAPTER_NOT_ALLOWED"),
+        (context.account_mode_known, "ACCOUNT_MODE_UNKNOWN"),
     )
     failures.extend(code for passed, code in checks if not passed)
     failures.extend(f"CAPABILITY_MISSING_{item.value.upper()}" for item in sorted(

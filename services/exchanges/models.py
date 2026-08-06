@@ -92,6 +92,8 @@ class ExchangePosition:
     unrealized_pnl: Decimal
     leverage: int
     liquidation_price: Decimal | None = None
+    margin_mode: str | None = None
+    position_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +126,8 @@ class ExchangeOrderRequest:
     reduce_only: bool = False
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
+    position_side: str | None = None
+    working_type: str = "MARK_PRICE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +142,7 @@ class ExchangeFill:
     commission: Decimal = Decimal("0")
     commission_asset: str | None = None
     filled_at_ms: int | None = None
+    realized_pnl: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +150,8 @@ class ExchangeAccountInfo:
     trading_enabled: bool
     withdrawal_enabled: bool | None = None
     margin_mode: str | None = None
+    position_mode: str | None = None
+    environment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,3 +170,5 @@ class SymbolRules:
     quantity_step: Decimal
     min_quantity: Decimal
     min_notional: Decimal | None = None
+    max_quantity: Decimal | None = None
+    max_leverage: int | None = None

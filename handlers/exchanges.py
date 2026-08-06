@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import json
 from decimal import Decimal
+from datetime import datetime, timezone
 from html import escape
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from database.database import connect
 
 from services.exchanges.base import ExchangeConfigurationError, ExchangeError
 from services.exchanges.manager import ExchangeManager
@@ -23,6 +26,8 @@ from services.exchanges.credentials_store import CredentialCipher, UserExchangeC
 from services.live_accounts import LiveAccountRepository
 from services.execution_models import ExecutionMode
 from services.live_readiness import ReadinessContext, audit_readiness
+from services.bingx_certification import BingXCertificationService, live_certification_valid
+from services.execution_portfolio import ExecutionPortfolioEngine
 
 router = Router()
 _EMPTY_CREDENTIALS = {
@@ -38,6 +43,119 @@ execution_manager = DemoExecutionManager(
     registry, timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25"))
 )
 live_accounts = LiveAccountRepository()
+
+
+def format_bingx_certification(report) -> str:
+    blockers = ", ".join(report.readiness_blockers) or "none"
+    return (
+        f"🧪 <b>BingX {escape(report.certification_type)} certification</b>\n\n"
+        f"Status: <b>{escape(report.status)}</b>\nEnvironment: <code>{escape(report.environment)}</code>\n"
+        f"Adapter: <code>{escape(report.adapter_version)}</code>\nCredentials: <b>{escape(report.credential_status)}</b>\n"
+        f"Account mode: <code>{escape(report.account_mode)}</code> · Margin: <code>{escape(report.margin_mode)}</code>\n"
+        f"Available funds: <code>{escape(report.available_funds)}</code>\n"
+        f"Positions / orders: <code>{report.open_positions} / {report.open_orders}</code>\n"
+        f"Server drift: <code>{report.server_time_drift_ms} ms</code>\n"
+        f"Symbol: <code>{escape(report.symbol)}</code> · qty <code>{escape(str(report.normalized_quantity))}</code> "
+        f"@ <code>{escape(str(report.normalized_price))}</code>\n"
+        f"Economic order calls: <b>{report.order_submission_calls}</b>\n"
+        f"Blockers: <code>{escape(blockers)}</code>"
+    )
+
+
+async def _run_bingx_dry_certification(message: Message, *, symbol: str, quantity: Decimal,
+                                      price: Decimal):
+    account = live_accounts.ensure(message.from_user.id, ExchangeName.BINGX.value)
+    user_registry = _user_registry(message.from_user.id, ExchangeName.BINGX)
+    adapter = user_registry.create(ExchangeName.BINGX)
+    try:
+        return await BingXCertificationService(adapter).dry_run(
+            telegram_id=message.from_user.id, account_id=account.id, symbol=symbol,
+            sample_quantity=quantity, sample_price=price,
+            expected_environment="prod-vst" if adapter.credentials.testnet else "prod-live",
+        )
+    finally:
+        await adapter.close()
+
+
+@router.message(Command("live_sync"))
+async def live_sync(message: Message) -> None:
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if exchange is not ExchangeName.BINGX:
+        await message.answer("LIVE account synchronization is currently certified only for BingX.")
+        return
+    symbol = args[0].upper() if args else os.getenv("BINGX_CERTIFICATION_SYMBOL", "BTCUSDT")
+    quantity = Decimal(os.getenv("BINGX_CERTIFICATION_QUANTITY", "0.001"))
+    price = Decimal(os.getenv("BINGX_CERTIFICATION_REFERENCE_PRICE", "60000"))
+    try:
+        report = await _run_bingx_dry_certification(message, symbol=symbol, quantity=quantity, price=price)
+    except (ExchangeError, ValueError) as exc:
+        await message.answer(f"⚠️ BingX synchronization failed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer(format_bingx_certification(report), parse_mode="HTML")
+
+
+@router.message(Command("live_certify"))
+async def live_certify(message: Message) -> None:
+    if getattr(message.chat, "type", "private") != "private":
+        await message.answer("⛔ BingX certification is available only in a private chat.")
+        return
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    if exchange is not ExchangeName.BINGX:
+        await message.answer("Certification is currently implemented only for BingX.")
+        return
+    if args and args[0].lower() == "execute":
+        if len(args) != 2 or args[1] != "CERTIFY_VST":
+            await message.answer(
+                "⚠️ VST economic certification requires exactly "
+                "<code>/live_certify bingx execute CERTIFY_VST</code>.", parse_mode="HTML")
+            return
+        account = live_accounts.ensure(message.from_user.id, exchange.value)
+        adapter = None
+        try:
+            user_registry = _user_registry(message.from_user.id, exchange)
+            adapter = user_registry.create(exchange)
+            report = await BingXCertificationService(adapter).certify_vst_economic(
+                telegram_id=message.from_user.id, account_id=account.id,
+                symbol=os.getenv("BINGX_CERTIFICATION_SYMBOL", "BTCUSDT"),
+                quantity=Decimal(os.getenv("BINGX_CERTIFICATION_QUANTITY", "0.001")),
+                reference_price=Decimal(os.getenv("BINGX_CERTIFICATION_REFERENCE_PRICE", "60000")),
+                confirmation=args[1],
+            )
+        except (ExchangeError, ValueError, PermissionError) as exc:
+            await message.answer(f"⚠️ BingX VST certification failed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+            return
+        finally:
+            if adapter is not None:
+                await adapter.close()
+        await message.answer(format_bingx_certification(report), parse_mode="HTML")
+        return
+    symbol = args[0].upper() if args else os.getenv("BINGX_CERTIFICATION_SYMBOL", "BTCUSDT")
+    try:
+        quantity = Decimal(args[1]) if len(args) > 1 else Decimal(os.getenv("BINGX_CERTIFICATION_QUANTITY", "0.001"))
+        price = Decimal(args[2]) if len(args) > 2 else Decimal(os.getenv("BINGX_CERTIFICATION_REFERENCE_PRICE", "60000"))
+        report = await _run_bingx_dry_certification(message, symbol=symbol, quantity=quantity, price=price)
+    except (ExchangeError, ValueError) as exc:
+        await message.answer(f"⚠️ BingX certification failed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer(format_bingx_certification(report), parse_mode="HTML")
+
+
+@router.message(Command("live_account"))
+async def live_account(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    unresolved = live_accounts.unresolved(message.from_user.id, exchange.value)
+    await message.answer(
+        f"🔐 <b>{escape(exchange.value.title())} live account</b>\n\n"
+        f"Environment: <code>{escape(account.adapter_environment or 'not synchronized')}</code>\n"
+        f"Adapter: <code>{escape(account.adapter_version or 'unknown')}</code>\n"
+        f"Mode: <code>{account.execution_mode.value}</code>\n"
+        f"Account / margin mode: <code>{escape(account.account_mode or 'unknown')} / {escape(account.margin_mode or 'unknown')}</code>\n"
+        f"Last sync: <code>{escape(account.last_sync_at or 'never')}</code>\n"
+        f"Time drift: <code>{account.server_time_drift_ms if account.server_time_drift_ms is not None else 'unknown'} ms</code>\n"
+        f"Certification: <code>{escape(account.certification_status or 'none')}</code>\n"
+        f"Unresolved executions: <b>{len(unresolved)}</b>\n"
+        f"Kill switch: <b>{'ACTIVE' if account.kill_switch else 'RELEASED'}</b>", parse_mode="HTML")
 
 
 @router.message(Command("live_dry_run"))
@@ -95,19 +213,52 @@ async def recovery_status(message: Message) -> None:
 async def live_readiness(message: Message) -> None:
     exchange, _ = _parse_exchange((message.text or "").split()[1:])
     account = live_accounts.ensure(message.from_user.id, exchange.value)
+    metadata = live_accounts.readiness_metadata(account.id)
     credentials = live_accounts.credentials_present(message.from_user.id, exchange.value)
     unresolved = live_accounts.unresolved(message.from_user.id, exchange.value)
     adapter_capabilities = registry.create(exchange).capabilities()
+    try:
+        permissions = json.loads(metadata.get("permission_snapshot_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        permissions = {}
+    synced_at = None
+    if account.last_sync_at:
+        try:
+            synced_at = datetime.fromisoformat(account.last_sync_at.replace("Z", "+00:00"))
+            if synced_at.tzinfo is None:
+                synced_at = synced_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            synced_at = None
+    sync_fresh = bool(synced_at and (datetime.now(timezone.utc) - synced_at).total_seconds()
+                      <= int(os.getenv("BINGX_SYNC_MAX_AGE_SECONDS", "900")))
+    portfolio = ExecutionPortfolioEngine().snapshot(message.from_user.id)
+    with connect() as conn:
+        profile = conn.execute("SELECT daily_loss_pct FROM copy_profiles WHERE telegram_id=?",
+                               (message.from_user.id,)).fetchone()
+    daily_loss_guard = bool(profile and float(profile["daily_loss_pct"] or 0) > 0)
     readiness = audit_readiness(
         telegram_id=message.from_user.id, account_id=account.id, exchange=exchange.value,
         mode=ExecutionMode.LIVE, context=ReadinessContext(
         environment=os.getenv("ENVIRONMENT", "local"),
         feature_flag=os.getenv("LIVE_EXECUTION_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         account_enabled=account.live_enabled, confirmed=bool(account.confirmed_at),
-        credentials_present=credentials, recovery_required=len(unresolved),
+        credentials_present=credentials, trading_permission=bool(permissions.get("trading")),
+        withdrawal_enabled=permissions.get("withdrawal"), account_synced=sync_fresh,
+        server_time_synced=(account.server_time_drift_ms is not None and
+                            abs(account.server_time_drift_ms) <= int(os.getenv("BINGX_MAX_SERVER_DRIFT_MS", "1500"))),
+        symbol_rules_valid=bool(metadata.get("valid_symbol_rules")),
+        portfolio_resolved=portfolio.resolved, recovery_required=len(unresolved),
+        reconciliation_safe=portfolio.resolved and not unresolved,
+        daily_loss_protection=daily_loss_guard,
         max_order_notional=account.max_order_notional,
         max_account_exposure=account.max_account_exposure, max_leverage=account.max_leverage,
         kill_switch_available=True, kill_switch_active=account.kill_switch,
+        recent_certification=live_certification_valid(
+            account.id, environment=os.getenv("BINGX_LIVE_CERTIFICATION_ENVIRONMENT", "prod-vst")
+        ) if exchange is ExchangeName.BINGX else False,
+        production_adapter_allowed=(exchange is ExchangeName.BINGX and
+                                    os.getenv("BINGX_PRODUCTION_ADAPTER_ALLOWED", "false").lower() in {"1", "true", "yes", "on"}),
+        account_mode_known=account.account_mode in {"HEDGE", "ONE_WAY"},
         capabilities=adapter_capabilities,
     ))
     reasons = ", ".join(readiness.reason_codes[:8]) or "READY"

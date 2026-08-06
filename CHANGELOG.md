@@ -319,3 +319,10 @@
 - Added idempotent fill ingestion, weighted average price and commission aggregation, reduce-only close validation, bounded deterministic retries, and account isolation.
 - Added PAPER, SHADOW, LIVE_DRY_RUN, LIVE and DISABLED modes. PAPER remains the default; dry-run never places orders; LIVE requires external enablement plus every readiness gate.
 - Added scoped Telegram readiness, dry-run, two-step confirmation, emergency-disable, and recovery diagnostics. Confirmation alone cannot enable LIVE.
+## v9.9.11 — BingX Production Adapter Certification
+
+- Certified the existing BingX Swap v2/v3 adapter behind the normalized live-execution contract for explicit `prod-live` and `prod-vst` environments.
+- Added authenticated account/mode synchronization, server-time offset handling, symbol/order normalization, leverage and margin synchronization, production order/query/cancel/fill operations, and explicit capability discovery.
+- Added read-only `LIVE_DRY_RUN` reports and separately classified VST economic certification with explicit server enablement, private confirmation, durable expiry, and zero-exposure verification.
+- Added durable BingX certification audits, synchronized account metadata and normalized symbol-rule caching without storing raw exchange payloads.
+- Added `/live_sync`, `/live_certify`, and `/live_account` operations. LIVE remains disabled by default and requires a recent VST economic certificate plus all v9.9.10 gates.

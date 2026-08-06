@@ -24,6 +24,15 @@ class LiveAccountConfig:
     max_order_notional: float | None
     max_account_exposure: float | None
     max_leverage: int | None
+    adapter_environment: str | None = None
+    adapter_version: str | None = None
+    account_mode: str | None = None
+    margin_mode: str | None = None
+    last_sync_at: str | None = None
+    sync_status: str | None = None
+    server_time_drift_ms: int | None = None
+    certification_status: str | None = None
+    certification_expires_at: str | None = None
 
 
 class LiveAccountRepository:
@@ -106,6 +115,7 @@ class LiveAccountRepository:
 
     @staticmethod
     def _model(row) -> LiveAccountConfig:
+        row = dict(row)
         return LiveAccountConfig(
             id=int(row["id"]), telegram_id=int(row["telegram_id"]), exchange=str(row["exchange"]),
             credential_ref=str(row["credential_ref"]), execution_mode=ExecutionMode(str(row["execution_mode"])),
@@ -115,6 +125,15 @@ class LiveAccountRepository:
             max_order_notional=float(row["max_order_notional"]) if row["max_order_notional"] is not None else None,
             max_account_exposure=float(row["max_account_exposure"]) if row["max_account_exposure"] is not None else None,
             max_leverage=int(row["max_leverage"]) if row["max_leverage"] is not None else None,
+            adapter_environment=str(row.get("adapter_environment")) if row.get("adapter_environment") else None,
+            adapter_version=str(row.get("adapter_version")) if row.get("adapter_version") else None,
+            account_mode=str(row.get("account_mode")) if row.get("account_mode") else None,
+            margin_mode=str(row.get("margin_mode")) if row.get("margin_mode") else None,
+            last_sync_at=str(row.get("last_sync_at")) if row.get("last_sync_at") else None,
+            sync_status=str(row.get("sync_status")) if row.get("sync_status") else None,
+            server_time_drift_ms=int(row["server_time_drift_ms"]) if row.get("server_time_drift_ms") is not None else None,
+            certification_status=str(row.get("certification_status")) if row.get("certification_status") else None,
+            certification_expires_at=str(row.get("certification_expires_at")) if row.get("certification_expires_at") else None,
         )
 
     def unresolved(self, telegram_id: int, exchange: str) -> tuple[dict, ...]:
@@ -125,3 +144,14 @@ class LiveAccountRepository:
                 ORDER BY updated_at DESC
             """, (int(telegram_id), exchange)).fetchall()
         return tuple(dict(row) for row in rows)
+
+    def readiness_metadata(self, account_id: int) -> dict:
+        with connect() as conn:
+            account = conn.execute("SELECT * FROM live_exchange_accounts WHERE id=?", (account_id,)).fetchone()
+            valid_rules = conn.execute("""
+                SELECT COUNT(*) AS n FROM exchange_symbol_rules_cache
+                WHERE account_id=? AND expires_at>?
+            """, (account_id, datetime.now(timezone.utc).isoformat())).fetchone()
+        result = dict(account) if account else {}
+        result["valid_symbol_rules"] = int(valid_rules["n"] or 0) if valid_rules else 0
+        return result

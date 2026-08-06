@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
@@ -212,8 +213,9 @@ class LiveExecutionCoordinator:
             raise ValueError("safe close request must be reduce-only")
         self._require(ExchangeCapability.REDUCE_ONLY)
         self._require(ExchangeCapability.POSITIONS)
+        canonical = lambda value: "".join(char for char in value.upper() if char.isalnum())
         matches = [position for position in await self.adapter.positions()
-                   if position.symbol.upper() == request.symbol.upper() and position.quantity > 0]
+                   if canonical(position.symbol) == canonical(request.symbol) and position.quantity > 0]
         if len(matches) != 1:
             raise ValueError("safe close requires exactly one resolved exchange position")
         position = matches[0]
@@ -226,6 +228,31 @@ class LiveExecutionCoordinator:
                      request: ExchangeOrderRequest, readiness_passed: bool = False) -> SubmissionResult:
         if mode is ExecutionMode.LIVE and not readiness_passed:
             raise PermissionError("LIVE_READINESS_REQUIRED")
+        if mode is ExecutionMode.LIVE and exchange.lower() == "bingx":
+            environment = str(getattr(self.adapter, "environment", ""))
+            if environment == "prod-live":
+                limits = self._require_durable_bingx_live_gate(account_id)
+                if request.leverage > int(limits["max_leverage"]):
+                    raise PermissionError("BINGX_MAX_LEVERAGE_EXCEEDED")
+                if not request.reduce_only:
+                    if request.price is None or request.price <= 0:
+                        raise PermissionError("BINGX_REFERENCE_PRICE_REQUIRED")
+                    order_notional = request.quantity * request.price
+                    if order_notional > Decimal(str(limits["max_order_notional"])):
+                        raise PermissionError("BINGX_MAX_ORDER_NOTIONAL_EXCEEDED")
+                    positions = await self.adapter.positions()
+                    exposure = Decimal("0")
+                    for position in positions:
+                        if position.quantity > 0 and position.mark_price <= 0:
+                            raise PermissionError("BINGX_POSITION_MARK_PRICE_UNRESOLVED")
+                        exposure += position.quantity * position.mark_price
+                    if exposure + order_notional > Decimal(str(limits["max_account_exposure"])):
+                        raise PermissionError("BINGX_MAX_ACCOUNT_EXPOSURE_EXCEEDED")
+            elif environment == "prod-vst":
+                if os.getenv("BINGX_VST_CERTIFICATION_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
+                    raise PermissionError("BINGX_VST_EXECUTION_DISABLED")
+            else:
+                raise PermissionError("BINGX_ENVIRONMENT_AMBIGUOUS")
         if mode in {ExecutionMode.LIVE_DRY_RUN, ExecutionMode.LIVE}:
             if request.stop_loss is not None:
                 self._require(ExchangeCapability.STOP_LOSS)
@@ -286,6 +313,40 @@ class LiveExecutionCoordinator:
                                    LiveExecutionState.ACKNOWLEDGED, exchange_order_id=order.order_id)
         return SubmissionResult(execution["id"], LiveExecutionState.ACKNOWLEDGED,
                                 request.client_order_id, order.order_id)
+
+    @staticmethod
+    def _require_durable_bingx_live_gate(account_id: int) -> dict:
+        enabled = os.getenv("LIVE_EXECUTION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+        allowed = os.getenv("BINGX_PRODUCTION_ADAPTER_ALLOWED", "false").lower() in {"1", "true", "yes", "on"}
+        deployment = os.getenv("ENVIRONMENT", "").lower() in {"production", "render"}
+        if not (enabled and allowed and deployment):
+            raise PermissionError("BINGX_PRODUCTION_ENVIRONMENT_GATE_FAILED")
+        now = datetime.now(timezone.utc)
+        with connect() as conn:
+            account = conn.execute("SELECT * FROM live_exchange_accounts WHERE id=?", (account_id,)).fetchone()
+            cert = conn.execute("""
+                SELECT status,environment,expires_at FROM bingx_certification_audits
+                WHERE account_id=? AND certification_type='VST_ECONOMIC'
+                ORDER BY started_at DESC LIMIT 1
+            """, (account_id,)).fetchone()
+            unresolved = conn.execute("""
+                SELECT COUNT(*) AS n FROM live_executions
+                WHERE account_id=? AND state IN ('UNKNOWN','RECOVERY_REQUIRED')
+            """, (account_id,)).fetchone()
+        if not account or not bool(account["live_enabled"]) or not account["confirmed_at"] or bool(account["kill_switch"]):
+            raise PermissionError("BINGX_ACCOUNT_LIVE_GATE_FAILED")
+        if not account["max_order_notional"] or not account["max_account_exposure"] or not account["max_leverage"]:
+            raise PermissionError("BINGX_ACCOUNT_LIMITS_MISSING")
+        if int(unresolved["n"] or 0):
+            raise PermissionError("BINGX_RECOVERY_REQUIRED")
+        if not cert or cert["status"] != "VST_ECONOMIC_PASSED" or cert["environment"] != "prod-vst" or not cert["expires_at"]:
+            raise PermissionError("BINGX_VST_CERTIFICATION_REQUIRED")
+        expires = datetime.fromisoformat(str(cert["expires_at"]).replace("Z", "+00:00"))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires <= now:
+            raise PermissionError("BINGX_VST_CERTIFICATION_EXPIRED")
+        return dict(account)
 
     async def recover(self, execution_id: int) -> SubmissionResult:
         execution = self.repository.get(execution_id)

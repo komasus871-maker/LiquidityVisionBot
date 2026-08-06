@@ -30,8 +30,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.10"
-    assert RELEASE_NAME == "Durable Live Execution Foundation"
+    assert APP_VERSION == "9.9.11"
+    assert RELEASE_NAME == "BingX Production Adapter Certification"
 
 
 def test_planner_builds_complete_approved_plan_without_side_effects() -> None:

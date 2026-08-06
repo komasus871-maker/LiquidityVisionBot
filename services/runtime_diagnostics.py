@@ -84,6 +84,8 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "live_unknown": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='UNKNOWN'"),
             "live_recovery_required": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RECOVERY_REQUIRED'"),
             "live_retry_wait": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RETRY_WAIT'"),
+            "bingx_certification_passed": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_PASSED'"),
+            "bingx_certification_running": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_RUNNING'"),
         }
         duplicate_open_plans = _scalar(conn, """
             SELECT COUNT(*) FROM (

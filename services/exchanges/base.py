@@ -65,6 +65,11 @@ class ExchangeResponseError(ExchangeRequestError):
     code = "INVALID_RESPONSE"
 
 
+class ExchangeTimestampError(ExchangeRequestError):
+    code = "TIMESTAMP_OUT_OF_SYNC"
+    retryable = True
+
+
 class ExchangeUnsupportedCapabilityError(ExchangeConfigurationError):
     code = "UNSUPPORTED_CAPABILITY"
 

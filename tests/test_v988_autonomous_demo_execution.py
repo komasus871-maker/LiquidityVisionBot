@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.10"
-    assert RELEASE_NAME == "Durable Live Execution Foundation"
+    assert APP_VERSION == "9.9.11"
+    assert RELEASE_NAME == "BingX Production Adapter Certification"
 
 
 @pytest.mark.asyncio

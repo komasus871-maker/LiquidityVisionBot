@@ -80,8 +80,8 @@ def request(client_id="lv-client", *, reduce_only=False):
 
 
 def test_release_and_modes_default_fail_closed(monkeypatch):
-    assert APP_VERSION == "9.9.10"
-    assert RELEASE_NAME == "Durable Live Execution Foundation"
+    assert APP_VERSION == "9.9.11"
+    assert RELEASE_NAME == "BingX Production Adapter Certification"
     monkeypatch.delenv("EXECUTION_MODE", raising=False)
     assert configured_mode() is ExecutionMode.PAPER
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -256,6 +256,7 @@ def test_readiness_reports_every_failure_and_can_pass():
         portfolio_resolved=True, reconciliation_safe=True, daily_loss_protection=True,
         max_order_notional=100, max_account_exposure=500, max_leverage=3,
         kill_switch_available=True, kill_switch_active=False,
+        recent_certification=True, production_adapter_allowed=True, account_mode_known=True,
         capabilities=ExchangeCapabilities(frozenset(ExchangeCapability)),
     ))
     assert ready.ready and not ready.reason_codes
