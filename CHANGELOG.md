@@ -1,3 +1,11 @@
+## v9.9.8 — Unified Portfolio Accounting
+
+- Added one normalized unified portfolio read model for open state, remaining-risk heat, realized/unrealized PnL, fees, equity, exposure, daily loss, cooldown, realized R, and rejections.
+- Added an idempotent append-only portfolio ledger and lifecycle commission deltas.
+- Added complete/partial/missing/invalid risk classification and fail-closed unified admission.
+- Added `LEGACY`/`SHADOW`/`UNIFIED` rollout configuration, parity diagnostics, and unified Telegram accounting labels.
+- Preserved legacy tables and historical analytics compatibility for the v9.9.9 backfill.
+
 ## 9.9.7 — Unified Lifecycle Authority
 
 - Made `paper_execution_positions` authoritative for new paper position lifecycle mutations.

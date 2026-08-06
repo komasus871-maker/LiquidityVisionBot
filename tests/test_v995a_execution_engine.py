@@ -90,8 +90,8 @@ def test_adapter_exception_transitions_to_failed(tmp_path, monkeypatch) -> None:
             raise RuntimeError("boom")
 
     result = CopyExecutionEngine(adapter=BrokenAdapter()).execute(_plan())
-    assert result.status is JournalStatus.FAILED
-    assert result.code == "ADAPTER_EXCEPTION"
+    assert result.status is JournalStatus.RETRY_WAIT
+    assert result.code == "RETRY_SCHEDULED"
     assert "RuntimeError: boom" in result.reason
 
 
@@ -105,6 +105,6 @@ def test_live_mode_remains_fail_closed(tmp_path, monkeypatch) -> None:
             return ExecutionAdapterResult(True, execution_ref="live:forbidden")
 
     result = CopyExecutionEngine(adapter=LiveAdapter(), mode=ExecutionMode.LIVE).execute(_plan())
-    assert result.status is JournalStatus.FAILED
+    assert result.status is JournalStatus.REJECTED
     assert result.code == "LIVE_DISABLED"
     assert result.execution_ref is None

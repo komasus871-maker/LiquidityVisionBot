@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.7
+APP_VERSION=9.9.8
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -187,3 +187,6 @@ See `V9_8_8_AUTONOMOUS_DEMO_EXECUTION.md`. BingX demo orders can be submitted au
 
 ## v9.9.4
 Persistent execution journal and idempotency foundation are documented in `V9_9_4_EXECUTION_JOURNAL_IDEMPOTENCY.md`.
+# Unified portfolio accounting (v9.9.8)
+
+Paper portfolio accounting is derived from unified execution positions and the idempotent portfolio ledger. Set `PORTFOLIO_ACCOUNTING_SOURCE=SHADOW` (default), `UNIFIED`, or `LEGACY`. SHADOW is the safe rollout mode; UNIFIED fails closed whenever an economically open position has missing or invalid risk metadata. See `V9_9_8_UNIFIED_PORTFOLIO_ACCOUNTING.md` for formulas, migration, and rollback details.

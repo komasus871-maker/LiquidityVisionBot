@@ -7,7 +7,7 @@ from services.execution_repositories import ExecutionRepository
 
 
 def plan():
-    return CopyExecutionPlan(plan_id="p-9965", idempotency_key="idem-9965", status=ExecutionPlanStatus.APPROVED, code="APPROVED", reason="ok", telegram_id=9965, signal_id=65, exchange_account_id=None, symbol="BTC", timeframe="1h", side="LONG", order_type="MARKET", entry_price=100.0, quantity=2.0, notional=200.0, leverage=2)
+    return CopyExecutionPlan(plan_id="p-9965", idempotency_key="idem-9965", status=ExecutionPlanStatus.APPROVED, code="APPROVED", reason="ok", telegram_id=9965, signal_id=65, exchange_account_id=None, symbol="BTC", timeframe="1h", side="LONG", order_type="MARKET", entry_price=100.0, quantity=2.0, notional=200.0, leverage=2, stop_loss=95.0, risk_amount=10.0)
 
 def test_mark_to_market_partial_and_full_close(tmp_path, monkeypatch):
     monkeypatch.setattr("database.database.DATA_DIR", tmp_path)

@@ -55,5 +55,5 @@ def test_scenario_map_uses_visual_flow():
 
 
 def test_keyboard_source_contains_why_not():
-    source = Path("keyboards/analysis_actions.py").read_text()
+    source = Path("keyboards/analysis_actions.py").read_text(encoding="utf-8")
     assert "whynot:{symbol}:{timeframe}" in source

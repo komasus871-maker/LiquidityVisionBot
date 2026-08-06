@@ -105,6 +105,6 @@ def test_old_unified_row_without_risk_metadata_remains_diagnostics_only(tmp_path
         )
 
     state = CopyTradingService()._portfolio_state(4, "ETHUSDT", 30)
-    assert state.portfolio_state_resolved
+    assert not state.portfolio_state_resolved
     assert state.unified_unresolved_risk_positions == 1
     assert state.current_heat_r == 0.0

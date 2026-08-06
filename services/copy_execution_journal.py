@@ -33,6 +33,7 @@ class InvalidJournalTransition(ValueError):
 ALLOWED_JOURNAL_TRANSITIONS: dict[JournalStatus, frozenset[JournalStatus]] = {
     JournalStatus.PLANNED: frozenset({
         JournalStatus.EXECUTING,
+        JournalStatus.REJECTED,
         JournalStatus.FAILED,
         JournalStatus.CANCELLED,
     }),

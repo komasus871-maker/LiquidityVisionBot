@@ -39,8 +39,8 @@ def _plan(telegram_id: int = 99550):
 
 
 def test_release_identity():
-    assert APP_VERSION == "9.9.5f"
-    assert RELEASE_NAME == "Execution Observability & Transition Audit"
+    assert APP_VERSION == "9.9.8"
+    assert RELEASE_NAME == "Unified Portfolio Accounting"
 
 
 def test_execution_records_auditable_timeline(tmp_path, monkeypatch):

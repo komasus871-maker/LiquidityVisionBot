@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -15,6 +16,7 @@ from services.copy_training import CopyTrainingService
 from services.copy_similarity import CopySimilarityService
 from services.portfolio_reconciliation import PortfolioReconciliationService
 from services.execution_repositories import ExecutionRepository, UnifiedOpenPositionState
+from services.execution_portfolio import ExecutionPortfolioEngine
 
 
 def _now() -> str:
@@ -42,6 +44,7 @@ class CopyTradingService:
         self.similarity = CopySimilarityService()
         self.reconciliation = PortfolioReconciliationService()
         self.execution_repository = ExecutionRepository()
+        self.portfolio_engine = ExecutionPortfolioEngine()
 
     def ensure_profile(self, telegram_id: int) -> dict[str, Any]:
         now = _now()
@@ -169,8 +172,18 @@ class CopyTradingService:
                 (telegram_id, _day_start()),
             ).fetchone()
         result = dict(row)
-        result["daily_pnl"] = float(daily[0] or 0.0)
-        result["equity"] = float(profile["paper_balance"]) + float(result.get("realized_pnl") or 0.0)
+        accounting = self.portfolio_engine.snapshot(
+            telegram_id, cooldown_min=int(profile.get("symbol_cooldown_min") or 30)
+        )
+        parity = self.portfolio_engine.parity_report(
+            telegram_id, cooldown_min=int(profile.get("symbol_cooldown_min") or 30)
+        )
+        mode = self._accounting_mode()
+        legacy_daily_pnl = float(daily[0] or 0.0)
+        legacy_equity = float(profile["paper_balance"]) + float(result.get("realized_pnl") or 0.0)
+        result["legacy_daily_pnl"] = legacy_daily_pnl
+        result["daily_pnl"] = legacy_daily_pnl if mode == "LEGACY" else accounting.daily_realized_result
+        result["equity"] = legacy_equity if mode == "LEGACY" else accounting.net_equity
         closed = int(result.get("closed_count") or 0)
         result["win_rate"] = (float(result.get("wins") or 0) / closed * 100.0) if closed else 0.0
         top_rejection = self.rejection_summary(telegram_id, limit=1)
@@ -185,26 +198,45 @@ class CopyTradingService:
         unified_confirmed_heat = max(0.0, unified.confirmed_heat_r - duplicate_unified_heat)
         unresolved_unified_signals = unified.unresolved_risk_signal_ids.difference(legacy_signal_ids)
         unresolved_unified_count = len(unresolved_unified_signals)
-        portfolio_resolved = reconciliation.portfolio_state_resolved
+        portfolio_resolved = reconciliation.portfolio_state_resolved and unresolved_unified_count == 0
         result.update(
             legacy_confirmed_open=reconciliation.confirmed_active_legacy_count,
             unified_open_positions=unified.open_count,
             hybrid_open_positions=hybrid_count,
             position_state_source="HYBRID_LEGACY_UNIFIED",
             unified_symbols=unified.symbols,
-            unified_gross_notional=unified.gross_notional,
-            unified_net_notional=unified.net_notional,
-            unified_unrealized_pnl=unified.unrealized_pnl,
-            unified_realized_pnl=unified.realized_pnl,
-            unified_commission=unified.total_commission,
             unified_confirmed_heat_r=unified_confirmed_heat,
-            unified_unresolved_risk_positions=unresolved_unified_count,
             hybrid_confirmed_heat_r=(
                 reconciliation.confirmed_active_heat_r + unified_confirmed_heat
             ),
             hybrid_portfolio_state_resolved=portfolio_resolved,
+            accounting_authority=("LEGACY_ROLLBACK" if mode == "LEGACY" else accounting.authority),
+            accounting_source_mode=mode,
+            unified_realized_pnl=accounting.realized_gross_pnl,
+            unified_realized_r=accounting.realized_r,
+            unified_commission=accounting.commissions,
+            unified_net_realized_pnl=accounting.net_realized_pnl,
+            unified_unrealized_pnl=accounting.unrealized_pnl,
+            unified_equity=accounting.net_equity,
+            unified_daily_pnl=accounting.daily_realized_result,
+            unified_gross_notional=accounting.gross_notional,
+            unified_net_notional=accounting.net_notional,
+            unified_risk_complete=accounting.risk_complete,
+            unified_risk_partial=accounting.risk_partial,
+            unified_risk_missing=accounting.risk_missing,
+            unified_risk_invalid=accounting.risk_invalid,
+            unified_unresolved_risk_positions=accounting.unresolved_risk_count,
+            cooldown_source="UNIFIED_TERMINAL_LIFECYCLE",
+            parity_status=parity["status"],
+            parity_mismatches=parity["mismatches"],
+            parity_expected_historical_difference=parity["expected_historical_difference"],
         )
         return result
+
+    @staticmethod
+    def _accounting_mode() -> str:
+        mode = os.getenv("PORTFOLIO_ACCOUNTING_SOURCE", "SHADOW").strip().upper()
+        return mode if mode in {"LEGACY", "SHADOW", "UNIFIED"} else "SHADOW"
 
     def rejection_summary(self, telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 20))
@@ -342,7 +374,7 @@ class CopyTradingService:
         unresolved_unified_count = len(
             unified.unresolved_risk_signal_ids.difference(legacy_signal_ids)
         )
-        portfolio_resolved = reconciliation.portfolio_state_resolved
+        portfolio_resolved = reconciliation.portfolio_state_resolved and unresolved_unified_count == 0
         normalized_symbol = str(symbol or "").strip().upper()
         cooldown_since = (datetime.now(timezone.utc) - timedelta(minutes=max(0, cooldown_min))).isoformat()
         with connect() as conn:
@@ -364,7 +396,57 @@ class CopyTradingService:
                    WHERE telegram_id=? AND created_at>=? AND event_type IN ('PARTIAL_FILLED','CLOSED')""",
                 (telegram_id, _day_start()),
             ).fetchone()
-        unified_symbol_open = normalized_symbol in set(unified.symbols)
+        accounting = self.portfolio_engine.snapshot(telegram_id, cooldown_min=cooldown_min)
+        mode = self._accounting_mode()
+        unified_symbol_open = normalized_symbol in set(accounting.symbols)
+        if mode == "LEGACY":
+            return PortfolioState(
+                open_positions=reconciliation.legacy_open_count,
+                current_heat_r=reconciliation.confirmed_active_heat_r,
+                daily_realized_pnl=float(daily[0] or 0.0),
+                symbol_is_open=bool(symbol_open[0]), symbol_in_cooldown=bool(cooldown[0]),
+                portfolio_state_resolved=reconciliation.portfolio_state_resolved,
+                unresolved_legacy_positions=reconciliation.unresolved_legacy_count,
+                unresolved_heat_r=reconciliation.unresolved_heat_r,
+                heat_source=reconciliation.heat_source,
+                reconciliation_status=reconciliation.status,
+                legacy_open_positions=reconciliation.legacy_open_count,
+                unified_open_positions=accounting.open_positions,
+                deduplicated_open_positions=reconciliation.legacy_open_count,
+                position_state_source="LEGACY_ROLLBACK",
+                unified_symbols=accounting.symbols,
+                unified_gross_notional=accounting.gross_notional,
+                unified_net_notional=accounting.net_notional,
+                unified_unrealized_pnl=accounting.unrealized_pnl,
+                unified_realized_pnl=accounting.realized_gross_pnl,
+                unified_commission=accounting.commissions,
+                unified_confirmed_heat_r=accounting.confirmed_heat_r,
+                unified_unresolved_risk_positions=accounting.unresolved_risk_count,
+            )
+        if mode == "UNIFIED":
+            return PortfolioState(
+                open_positions=accounting.open_positions,
+                current_heat_r=accounting.confirmed_heat_r,
+                daily_realized_pnl=accounting.daily_realized_result,
+                symbol_is_open=unified_symbol_open,
+                symbol_in_cooldown=normalized_symbol in set(accounting.cooldown_symbols),
+                portfolio_state_resolved=accounting.resolved,
+                unresolved_legacy_positions=accounting.unresolved_risk_count,
+                heat_source="UNIFIED_REMAINING_RISK",
+                reconciliation_status=reconciliation.status,
+                legacy_open_positions=reconciliation.confirmed_active_legacy_count,
+                unified_open_positions=accounting.open_positions,
+                deduplicated_open_positions=accounting.open_positions,
+                position_state_source="UNIFIED",
+                unified_symbols=accounting.symbols,
+                unified_gross_notional=accounting.gross_notional,
+                unified_net_notional=accounting.net_notional,
+                unified_unrealized_pnl=accounting.unrealized_pnl,
+                unified_realized_pnl=accounting.realized_gross_pnl,
+                unified_commission=accounting.commissions,
+                unified_confirmed_heat_r=accounting.confirmed_heat_r,
+                unified_unresolved_risk_positions=accounting.unresolved_risk_count,
+            )
         return PortfolioState(
             open_positions=hybrid_count,
             current_heat_r=reconciliation.confirmed_active_heat_r + unified_confirmed_heat,

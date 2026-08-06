@@ -93,7 +93,7 @@ def test_engine_rejects_invalid_plan_before_adapter_claim(tmp_path, monkeypatch)
     invalid = replace(_plan(), quantity=0.0)
     result = CopyExecutionEngine(adapter=adapter).execute(invalid)
 
-    assert result.status is JournalStatus.REJECTED
+    assert result.status == JournalStatus.REJECTED
     assert result.code == "INVALID_QUANTITY"
     assert result.claimed is False
     assert adapter.calls == 0
@@ -109,7 +109,7 @@ def test_live_and_adapter_mode_are_fail_closed_by_pipeline(tmp_path, monkeypatch
             raise AssertionError("live adapter must never be invoked")
 
     result = CopyExecutionEngine(adapter=LiveAdapter(), mode=ExecutionMode.LIVE).execute(_plan())
-    assert result.status is JournalStatus.REJECTED
+    assert result.status == JournalStatus.REJECTED
     assert result.code == "LIVE_DISABLED"
     assert result.claimed is False
 

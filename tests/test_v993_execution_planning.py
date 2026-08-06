@@ -30,8 +30,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.5c"
-    assert RELEASE_NAME == "Journal State Machine Integration"
+    assert APP_VERSION == "9.9.8"
+    assert RELEASE_NAME == "Unified Portfolio Accounting"
 
 
 def test_planner_builds_complete_approved_plan_without_side_effects() -> None:

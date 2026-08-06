@@ -10,6 +10,7 @@ from services.unified_execution_state import PipelineStage, UnifiedStateMachine
 from services.execution_models import CopyExecutionPlan, ExecutionMode
 from services.paper_execution_lifecycle import PaperExecutionLifecycle
 from services.execution_reliability import ExecutionRetryPolicy
+from services.execution_validation_pipeline import ExecutionValidationPipeline
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class CopyExecutionEngine:
         dispatcher: ExecutionDispatcher | None = None,
         worker_id: str = "copy-worker",
         lease_seconds: int = 180,
+        validation_pipeline: ExecutionValidationPipeline | None = None,
     ) -> None:
         self.journal = journal or CopyExecutionJournal()
         self.adapter = adapter or PaperExecutionAdapter()
@@ -59,6 +61,7 @@ class CopyExecutionEngine:
         self.dispatcher = dispatcher or ExecutionDispatcher()
         self.worker_id = worker_id
         self.lease_seconds = max(30, int(lease_seconds))
+        self.validation_pipeline = validation_pipeline or ExecutionValidationPipeline()
 
     def execute(self, plan: CopyExecutionPlan) -> CopyExecutionResult:
         context = ExecutionContext.from_plan(plan, mode=self.mode, worker_id=self.worker_id)
@@ -86,11 +89,14 @@ class CopyExecutionEngine:
         if current in self.TERMINAL:
             return self._from_row(row, created=created, claimed=False, code="IDEMPOTENT_REPLAY")
 
-        if self.mode is not ExecutionMode.PAPER or self.adapter.mode is not ExecutionMode.PAPER:
-            failed = self.journal.transition(
-                plan.idempotency_key, JournalStatus.FAILED, error="LIVE execution is disabled",
+        validation = self.validation_pipeline.validate(
+            plan, mode=self.mode, adapter_mode=self.adapter.mode,
+        )
+        if not validation.allowed:
+            rejected = self.journal.transition(
+                plan.idempotency_key, JournalStatus.REJECTED, error=validation.reason,
             )
-            return self._from_row(failed, created=created, claimed=False, code="LIVE_DISABLED")
+            return self._from_row(rejected, created=created, claimed=False, code=validation.code)
 
         claimed_row, claimed = self.journal.claim(
             plan.idempotency_key, worker_id=self.worker_id, lease_seconds=self.lease_seconds

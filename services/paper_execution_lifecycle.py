@@ -264,6 +264,15 @@ class PaperExecutionLifecycle:
             self._event(conn, order_id, current, target, actor, "FULL_FILL" if target is OrderStatus.FILLED else "PARTIAL_FILL",
                         f"Filled {applied_qty:g} at {price:g}")
             position = self._upsert_position(conn, order, fill, new_qty, average_price, commission, now)
+            conn.execute(
+                """INSERT INTO paper_portfolio_ledger(
+                       source_key,telegram_id,position_id,order_id,entry_type,amount,
+                       symbol,occurred_at,metadata_json,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_key) DO NOTHING""",
+                (f"fill:{fill_key}:commission", order["telegram_id"], position.get("id"), order_id,
+                 "COMMISSION", commission, order.get("symbol"), now,
+                 '{"phase":"entry"}', now),
+            )
             updated = dict(conn.execute("SELECT * FROM paper_execution_orders WHERE id=?", (order_id,)).fetchone())
         return FillResult(order=updated, fill=fill, position=position, created=True)
 
@@ -334,16 +343,18 @@ class PaperExecutionLifecycle:
                 """INSERT INTO paper_position_lifecycle_events(
                        event_key,position_id,idempotency_key,telegram_id,signal_id,event_type,
                        from_status,to_status,signal_status,price,quantity_before,quantity_after,
-                       realized_pnl_delta,realized_r_delta,reason,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       realized_pnl_delta,realized_r_delta,commission_delta,reason,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     event_key, position_id, item["idempotency_key"], item["telegram_id"],
                     item["signal_id"],
                     "CLOSED" if status == PositionStatus.CLOSED.value else "PARTIAL_CLOSED",
                     item["status"], status, None, float(exit_price), current_qty, remaining,
-                    realized_delta, realized_r_delta, reason, now,
+                    realized_delta, realized_r_delta, close_commission, reason, now,
                 ),
             )
+            self._write_close_ledger(conn, item, event_key, realized_delta, realized_r_delta,
+                                     close_commission, float(exit_price), now)
             updated = conn.execute("SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)).fetchone()
         return dict(updated)
 
@@ -460,15 +471,17 @@ class PaperExecutionLifecycle:
                 """INSERT INTO paper_position_lifecycle_events(
                        event_key,position_id,idempotency_key,telegram_id,signal_id,event_type,
                        from_status,to_status,signal_status,price,quantity_before,quantity_after,
-                       realized_pnl_delta,realized_r_delta,reason,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       realized_pnl_delta,realized_r_delta,commission_delta,reason,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     event_key, position_id, item["idempotency_key"], item["telegram_id"],
                     item["signal_id"], event_type, current_status, next_status, normalized,
-                    float(price), current_qty, target_qty, realized_delta, realized_r_delta,
+                    float(price), current_qty, target_qty, realized_delta, realized_r_delta, close_commission,
                     reason or normalized, now,
                 ),
             )
+            self._write_close_ledger(conn, item, event_key, realized_delta, realized_r_delta,
+                                     close_commission, float(price), now)
             updated = conn.execute(
                 "SELECT * FROM paper_execution_positions WHERE id=?", (position_id,)
             ).fetchone()
@@ -545,6 +558,30 @@ class PaperExecutionLifecycle:
              cumulative_qty, average_price, fill["price"], remaining_fraction, commission, now),
         )
         return self._position_for_order_conn(conn, int(order["id"])) or {}
+
+    @staticmethod
+    def _write_close_ledger(conn, position: dict[str, Any], event_key: str,
+                            realized: float, realized_r: float, commission: float,
+                            price: float, now: str) -> None:
+        common = (position["telegram_id"], position["id"], position.get("order_id"),
+                  position.get("symbol"), now, now)
+        conn.execute(
+            """INSERT INTO paper_portfolio_ledger(
+                   source_key,telegram_id,position_id,order_id,entry_type,amount,realized_r_delta,
+                   symbol,occurred_at,metadata_json,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_key) DO NOTHING""",
+            (f"lifecycle:{event_key}:realized", common[0], common[1], common[2], "REALIZED_PNL",
+             realized, realized_r, common[3], common[4], '{"price":' + str(price) + '}', common[5]),
+        )
+        if commission:
+            conn.execute(
+                """INSERT INTO paper_portfolio_ledger(
+                       source_key,telegram_id,position_id,order_id,entry_type,amount,
+                       symbol,occurred_at,metadata_json,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_key) DO NOTHING""",
+                (f"lifecycle:{event_key}:commission", common[0], common[1], common[2], "COMMISSION",
+                 commission, common[3], common[4], '{"phase":"exit"}', common[5]),
+            )
 
     @staticmethod
     def _position_for_order_conn(conn, order_id: int) -> dict[str, Any] | None:

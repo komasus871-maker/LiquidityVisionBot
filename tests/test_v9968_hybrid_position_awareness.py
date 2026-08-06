@@ -121,10 +121,10 @@ def test_unified_only_symbol_blocks_duplicate_without_affecting_heat(tmp_path, m
     assert state.symbol_is_open
     assert state.open_positions == 1
     assert state.current_heat_r == 0.0
-    assert state.portfolio_state_resolved
+    assert not state.portfolio_state_resolved
     assert state.legacy_open_positions == 0
     assert state.unified_open_positions == 1
-    assert decision.code == "SYMBOL_ALREADY_OPEN"
+    assert decision.code == "PORTFOLIO_STATE_UNRESOLVED"
 
 
 def test_legacy_only_active_position_keeps_existing_behavior(tmp_path, monkeypatch):
@@ -245,6 +245,6 @@ def test_copy_stats_formatter_shows_hybrid_diagnostics():
     assert "Legacy confirmed open: 1" in text
     assert "Unified open: 2" in text
     assert "Hybrid open: 2" in text
-    assert "Position source: <b>HYBRID_LEGACY_UNIFIED</b>" in text
+    assert "Accounting authority: <b>LEGACY</b>" in text
     assert "Unified symbols: BTC, ETH" in text
-    assert "Unified exposure/PnL: diagnostics only" in text
+    assert "Legacy values are shadow/rollback diagnostics" in text

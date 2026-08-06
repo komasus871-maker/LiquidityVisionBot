@@ -49,8 +49,8 @@ def _journal_and_plan(tmp_path, monkeypatch):
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.5c"
-    assert RELEASE_NAME == "Journal State Machine Integration"
+    assert APP_VERSION == "9.9.8"
+    assert RELEASE_NAME == "Unified Portfolio Accounting"
 
 
 def test_transition_table_exposes_expected_execution_path() -> None:

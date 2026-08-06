@@ -389,6 +389,15 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS paper_portfolio_ledger(
+                id {id_col}, source_key TEXT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
+                position_id BIGINT, order_id BIGINT, entry_type TEXT NOT NULL,
+                amount DOUBLE PRECISION NOT NULL, realized_r_delta DOUBLE PRECISION NOT NULL DEFAULT 0,
+                symbol TEXT, occurred_at TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -484,6 +493,7 @@ def create_tables() -> None:
             "last_signal_status": "TEXT",
         }.items():
             _add_column(conn, "paper_execution_positions", name, definition)
+        _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
         duplicate_groups = conn.execute("""
@@ -530,6 +540,8 @@ def create_tables() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_events_source_event ON execution_events(source_event_key)",
             "CREATE INDEX IF NOT EXISTS idx_unified_positions_owner_signal ON paper_execution_positions(telegram_id,signal_id)",
             "CREATE INDEX IF NOT EXISTS idx_position_lifecycle_position ON paper_position_lifecycle_events(position_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_portfolio_ledger_owner_time ON paper_portfolio_ledger(telegram_id,occurred_at)",
+            "CREATE INDEX IF NOT EXISTS idx_portfolio_ledger_position ON paper_portfolio_ledger(position_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

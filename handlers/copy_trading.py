@@ -46,17 +46,23 @@ Legacy confirmed open: {int(stats.get('legacy_confirmed_open') or stats.get('rec
 Confirmed legacy active: {int(stats.get('legacy_confirmed_open') or stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
 Unified open: {int(stats.get('unified_open_positions') or stats.get('reconciliation_unified_open_count') or 0)}
 Hybrid open: {int(stats.get('hybrid_open_positions') or 0)}
-Position source: <b>{stats.get('position_state_source') or 'LEGACY'}</b>
-Lifecycle authority: <b>{stats.get('reconciliation_lifecycle_authority') or 'UNIFIED_WITH_LEGACY_PROJECTION'}</b>
+Accounting authority: <b>{stats.get('accounting_authority') or 'LEGACY'}</b>
+Admission mode: <b>{stats.get('accounting_source_mode') or 'SHADOW'}</b>
 Unified symbols: {', '.join(stats.get('unified_symbols') or ()) or '—'}
 Unified gross exposure: ${float(stats.get('unified_gross_notional') or 0):,.2f}
 Unified net exposure: ${float(stats.get('unified_net_notional') or 0):+,.2f}
 Unified unrealized PnL: ${float(stats.get('unified_unrealized_pnl') or 0):+,.2f}
 Unified commissions: ${float(stats.get('unified_commission') or 0):,.2f}
+Unified realized PnL: ${float(stats.get('unified_realized_pnl') or 0):+,.2f}
+Unified net equity: ${float(stats.get('unified_equity') or profile['paper_balance']):,.2f}
+Unified daily result: ${float(stats.get('unified_daily_pnl') or 0):+,.2f}
 Unified confirmed heat: {float(stats.get('unified_confirmed_heat_r') or 0):.2f}R
 Unified unresolved risk: {int(stats.get('unified_unresolved_risk_positions') or 0)}
+Risk classes C/P/M/I: {int(stats.get('unified_risk_complete') or 0)}/{int(stats.get('unified_risk_partial') or 0)}/{int(stats.get('unified_risk_missing') or 0)}/{int(stats.get('unified_risk_invalid') or 0)}
+Cooldown source: <b>{stats.get('cooldown_source') or 'LEGACY_SHADOW'}</b>
+Parity: <b>{stats.get('parity_status') or 'UNKNOWN'}</b>
 Hybrid confirmed heat: {float(stats.get('hybrid_confirmed_heat_r') or stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
-<i>Unified exposure/PnL: diagnostics only; confirmed unified risk participates in heat.</i>
+<i>Legacy values are shadow/rollback diagnostics in v9.9.8.</i>
 Unresolved legacy: {int(stats.get('reconciliation_unresolved_legacy_count') or 0)} ({float(stats.get('reconciliation_unresolved_heat_r') or 0):.2f}R)
 Confirmed heat: {float(stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
 Heat source: <b>{stats.get('reconciliation_heat_source') or 'UNKNOWN'}</b>

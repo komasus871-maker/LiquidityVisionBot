@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.5c"
-    assert RELEASE_NAME == "Journal State Machine Integration"
+    assert APP_VERSION == "9.9.8"
+    assert RELEASE_NAME == "Unified Portfolio Accounting"
 
 
 @pytest.mark.asyncio

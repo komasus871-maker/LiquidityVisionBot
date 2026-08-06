@@ -36,7 +36,7 @@ def test_database_schema_is_isolated_by_user_and_exchange() -> None:
 
 
 def test_handlers_do_not_use_global_execution_for_user_orders() -> None:
-    source = Path("handlers/exchanges.py").read_text()
+    source = Path("handlers/exchanges.py").read_text(encoding="utf-8")
     assert "_user_execution_manager(message.from_user.id, exchange)" in source
     assert "_user_adapter_call(message.from_user.id" in source
     assert "Connect exchange accounts only in a private chat" in source

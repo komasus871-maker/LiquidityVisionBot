@@ -76,6 +76,8 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "execution_retry_wait": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='RETRY_WAIT'"),
             "execution_dead_letter": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='DEAD_LETTER'"),
             "execution_claimed": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='EXECUTING'"),
+            "unified_open_positions": _scalar(conn, "SELECT COUNT(*) FROM paper_execution_positions WHERE status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')"),
+            "portfolio_ledger_entries": _scalar(conn, "SELECT COUNT(*) FROM paper_portfolio_ledger"),
         }
         duplicate_open_plans = _scalar(conn, """
             SELECT COUNT(*) FROM (
@@ -120,6 +122,11 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         "status": status,
         "service": "Liquidity Vision Intelligence",
         "version": APP_VERSION,
+        "portfolio_accounting": {
+            "authority": "UNIFIED_POSITIONS+PORTFOLIO_LEDGER",
+            "admission_mode": os.getenv("PORTFOLIO_ACCOUNTING_SOURCE", "SHADOW").strip().upper(),
+            "daily_timezone": "UTC",
+        },
         "environment": os.getenv("RENDER_SERVICE_NAME") or os.getenv("ENVIRONMENT", "local"),
         "database_backend": database_backend(),
         "persistent_database": persistent_database(),
