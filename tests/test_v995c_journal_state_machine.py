@@ -49,8 +49,8 @@ def _journal_and_plan(tmp_path, monkeypatch):
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.11"
-    assert RELEASE_NAME == "BingX Production Adapter Certification"
+    assert APP_VERSION == "9.9.12"
+    assert RELEASE_NAME == "GPT Trading Intelligence Shadow Layer"
 
 
 def test_transition_table_exposes_expected_execution_path() -> None:

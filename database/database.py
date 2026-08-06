@@ -516,6 +516,76 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_prompt_versions(
+                id {id_col}, prompt_version TEXT NOT NULL UNIQUE, prompt_checksum TEXT NOT NULL,
+                system_prompt TEXT NOT NULL, response_schema_json TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_user_settings(
+                telegram_id BIGINT PRIMARY KEY, mode TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_decisions(
+                id {id_col}, decision_id TEXT NOT NULL UNIQUE, idempotency_key TEXT NOT NULL UNIQUE,
+                correlation_id TEXT NOT NULL, telegram_id BIGINT, signal_id BIGINT NOT NULL,
+                symbol TEXT NOT NULL, timeframe TEXT NOT NULL, market_timestamp TEXT NOT NULL,
+                market_snapshot_checksum TEXT NOT NULL, feature_snapshot_checksum TEXT NOT NULL,
+                provider TEXT NOT NULL, model TEXT, model_version TEXT, prompt_version TEXT NOT NULL,
+                requested_mode TEXT NOT NULL, regime TEXT NOT NULL, direction TEXT NOT NULL,
+                raw_confidence DOUBLE PRECISION NOT NULL, calibrated_confidence DOUBLE PRECISION,
+                uncertainty DOUBLE PRECISION NOT NULL, recommended_action TEXT NOT NULL,
+                recommended_risk_multiplier DOUBLE PRECISION NOT NULL, abstention INTEGER NOT NULL,
+                supporting_factors_json TEXT NOT NULL, conflicting_factors_json TEXT NOT NULL,
+                invalidation_conditions_json TEXT NOT NULL, explanation TEXT NOT NULL,
+                schema_valid INTEGER NOT NULL, validation_code TEXT NOT NULL,
+                latency_ms DOUBLE PRECISION NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd NUMERIC(18,8) NOT NULL DEFAULT 0,
+                raw_response_checksum TEXT, deterministic_accepted INTEGER,
+                deterministic_action TEXT, calibration_model_version TEXT,
+                calibration_sample_size INTEGER NOT NULL DEFAULT 0,
+                calibration_reliable INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_request_claims(
+                idempotency_key TEXT PRIMARY KEY, claimed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_decision_outcomes(
+                id {id_col}, decision_id TEXT NOT NULL UNIQUE, signal_result TEXT,
+                signal_mfe DOUBLE PRECISION, signal_mae DOUBLE PRECISION,
+                direction_correct INTEGER, time_to_movement_seconds BIGINT,
+                deterministic_result TEXT, execution_result TEXT,
+                realized_pnl DOUBLE PRECISION, realized_r DOUBLE PRECISION,
+                fees DOUBLE PRECISION, slippage_pct DOUBLE PRECISION,
+                intervention_type TEXT, intervention_delta_r DOUBLE PRECISION,
+                hypothetical_result TEXT, counterfactual_result TEXT,
+                attached_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_calibration_snapshots(
+                id {id_col}, scope_key TEXT NOT NULL, model_version TEXT NOT NULL,
+                sample_size INTEGER NOT NULL, brier_score DOUBLE PRECISION,
+                expected_calibration_error DOUBLE PRECISION, reliability_status TEXT NOT NULL,
+                reliability_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(scope_key,model_version,created_at)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_provider_state(
+                provider TEXT PRIMARY KEY, state TEXT NOT NULL, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                opened_until TEXT, last_success_at TEXT, last_failure_at TEXT,
+                last_error_code TEXT, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -689,6 +759,10 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_copy_journal_expired_lease ON copy_execution_journal(status,lease_expires_at,id)",
             "CREATE INDEX IF NOT EXISTS idx_live_account_sync ON live_exchange_accounts(exchange,sync_status,last_sync_at)",
             "CREATE INDEX IF NOT EXISTS idx_live_readiness_account_time ON live_readiness_audits(account_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_decisions_user_time ON ai_decisions(telegram_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_decisions_signal ON ai_decisions(signal_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_decisions_eval ON ai_decisions(provider,model_version,prompt_version,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_outcomes_unmatched ON ai_decision_outcomes(decision_id,attached_at)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.11"
-    assert RELEASE_NAME == "BingX Production Adapter Certification"
+    assert APP_VERSION == "9.9.12"
+    assert RELEASE_NAME == "GPT Trading Intelligence Shadow Layer"
 
 
 @pytest.mark.asyncio

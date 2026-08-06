@@ -330,3 +330,13 @@
 - Added bounded Telegram webhook backpressure so overload returns a retryable response instead of accepting work into an unbounded task set.
 - Added production query indexes for due/expired execution claims, account synchronization and readiness history.
 - Documented stabilization invariants, rollback constraints, remaining debt and the staged GPT-trading readiness plan. No GPT or LIVE behavior was enabled.
+
+## v9.9.12 — GPT Trading Intelligence Shadow Layer
+
+- Added explicit `AI_OFF`, `AI_OBSERVE`, `AI_SHADOW`, `AI_ASSIST`, and fail-closed `AI_GATED` modes; `AI_SHADOW` is the default.
+- Added a provider-neutral structured HTTP contract with bounded timeouts, retries, concurrency, token/cost limits, duplicate suppression, deterministic abstention and a durable circuit breaker.
+- Added immutable, idempotent AI decisions with prompt/model identity, checksums, concise evidence, schema status, latency, usage and fixed-scale cost storage.
+- Added strict response validation for stale context, malformed JSON, unsupported fields/actions, hallucinated symbols, impossible prices, missing evidence and unsafe confidence/risk values.
+- Added separate signal-quality, deterministic-policy, execution, intervention and AI counterfactual outcome fields plus calibration, Brier score and ECE metrics.
+- Added `/ai_status`, `/ai_mode`, `/ai_decision`, `/ai_explain`, `/ai_metrics`, `/ai_cost`, `/ai_compare`, and `/ai_disable` operator commands.
+- Added a bounded asynchronous shadow worker and AI runtime diagnostics. AI cannot call exchange adapters or lifecycle mutation services and does not delay execution.

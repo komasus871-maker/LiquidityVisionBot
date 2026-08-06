@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.11
+APP_VERSION=9.9.12
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -201,3 +201,7 @@ The durable live-execution foundation adds normalized adapter capabilities, stab
 v9.9.11 certifies the existing BingX USDT-M perpetual adapter for real authenticated `LIVE_DRY_RUN` and controlled VST economic certification. Production LIVE remains fail-closed. See `V9_9_11_BINGX_PRODUCTION_ADAPTER.md`.
 
 The final v9.9.11 stabilization invariants, deployment notes, remaining constraints, and staged GPT-trading integration plan are documented in `V9_9_11_PRODUCTION_HARDENING.md`.
+
+# LiquidityVisionBot v9.9.12
+
+v9.9.12 adds a provider-neutral GPT trading intelligence layer in `AI_SHADOW` mode. It records structured advisory recommendations, evidence, uncertainty, cost, calibration and outcomes without changing deterministic admission, sizing, lifecycle, portfolio, or exchange execution. `AI_PROVIDER=disabled` is fully functional and records deterministic abstentions. See `V9_9_12_GPT_TRADING_INTELLIGENCE.md`.

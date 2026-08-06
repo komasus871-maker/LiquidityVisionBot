@@ -86,6 +86,13 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "live_retry_wait": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RETRY_WAIT'"),
             "bingx_certification_passed": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_PASSED'"),
             "bingx_certification_running": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_RUNNING'"),
+            "ai_decisions": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions"),
+            "ai_invalid_responses": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions WHERE schema_valid=0"),
+            "ai_timeouts": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions WHERE validation_code='PROVIDER_TIMEOUT'"),
+            "ai_cost_limit_blocks": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions WHERE validation_code IN ('COST_LIMIT','DAILY_REQUEST_LIMIT')"),
+            "ai_stale_context_rejects": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions WHERE validation_code='STALE_CONTEXT'"),
+            "ai_unmatched_outcomes": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions d LEFT JOIN ai_decision_outcomes o ON o.decision_id=d.decision_id WHERE o.decision_id IS NULL"),
+            "ai_stale_request_claims": _scalar(conn, "SELECT COUNT(*) FROM ai_request_claims WHERE expires_at<?", (now.isoformat(),)),
         }
         duplicate_open_plans = _scalar(conn, """
             SELECT COUNT(*) FROM (
@@ -106,6 +113,9 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             WHERE status IN ('ACTIVE','TP1','TP2')
               AND (activated_at IS NULL OR effective_stop IS NULL)
         """)
+        ai_provider_rows = [dict(row) for row in conn.execute(
+            "SELECT provider,state,consecutive_failures,opened_until,last_success_at,last_failure_at,last_error_code FROM ai_provider_state"
+        ).fetchall()]
 
     integrity = {
         "ok": duplicate_open_plans == 0 and impossible_active == 0,
@@ -136,6 +146,12 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "daily_timezone": "UTC",
         },
         "execution_mode": configured_mode().value,
+        "ai": {
+            "mode": os.getenv("AI_TRADING_MODE", "AI_SHADOW").strip().upper(),
+            "provider": os.getenv("AI_PROVIDER", "disabled").strip().lower(),
+            "max_concurrency": max(1, int(os.getenv("AI_MAX_CONCURRENCY", "2"))),
+            "provider_state": ai_provider_rows,
+        },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "environment": os.getenv("RENDER_SERVICE_NAME") or os.getenv("ENVIRONMENT", "local"),
         "database_backend": database_backend(),

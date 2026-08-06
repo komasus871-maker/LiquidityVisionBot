@@ -12,6 +12,7 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN
 from database.database import create_tables, database_backend, persistent_database, ping_database
 from handlers.admin import router as admin_router
+from handlers.ai_trading import router as ai_trading_router
 from handlers.analyze import router as analyze_router
 from handlers.copy_trading import router as copy_trading_router
 from handlers.fear import router as fear_router
@@ -34,6 +35,7 @@ from services.webhook_server import WebhookServer
 from services.trade_memory import TradeMemoryService
 from services.historical_execution_migration import HistoricalExecutionMigrationService
 from services.copy_execution_worker import CopyExecutionWorker
+from services.ai_trading import AIShadowWorker
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -44,6 +46,7 @@ logging.basicConfig(
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher()
     dp.include_router(admin_router)
+    dp.include_router(ai_trading_router)
     dp.include_router(start_router)
     dp.include_router(help_router)
     dp.include_router(price_router)
@@ -107,12 +110,14 @@ async def main() -> None:
     observation_monitor = ObservationMonitor(bot=bot)
     watch_engine = WatchEngine(bot=bot)
     copy_execution = CopyExecutionWorker()
-    workers = [tracker, observation_monitor, watch_engine, copy_execution]
+    ai_shadow = AIShadowWorker(interval_seconds=int(os.getenv("AI_SHADOW_INTERVAL", "60")))
+    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
         asyncio.create_task(watch_engine.run_forever(), name="watch-engine"),
         asyncio.create_task(copy_execution.run_forever(), name="copy-execution"),
+        asyncio.create_task(ai_shadow.run_forever(), name="ai-shadow"),
     ]
 
     mode = deployment_mode()

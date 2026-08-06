@@ -38,6 +38,36 @@ services:
         value: "30"
       - key: WEBHOOK_MAX_ACTIVE_UPDATES
         value: "100"
+      - key: AI_TRADING_MODE
+        value: AI_SHADOW
+      - key: AI_PROVIDER
+        value: disabled
+      - key: AI_MODEL
+        sync: false
+      - key: AI_MODEL_VERSION
+        sync: false
+      - key: AI_PROVIDER_ENDPOINT
+        sync: false
+      - key: AI_PROVIDER_API_KEY
+        sync: false
+      - key: AI_REQUEST_TIMEOUT_SECONDS
+        value: "8"
+      - key: AI_PROVIDER_MAX_ATTEMPTS
+        value: "2"
+      - key: AI_MAX_DAILY_REQUESTS_PER_USER
+        value: "25"
+      - key: AI_MAX_DAILY_REQUESTS
+        value: "500"
+      - key: AI_MAX_DAILY_COST_USD
+        value: "5"
+      - key: AI_MAX_TOKENS
+        value: "800"
+      - key: AI_MAX_CONCURRENCY
+        value: "2"
+      - key: AI_CONTEXT_MAX_AGE_SECONDS
+        value: "300"
+      - key: AI_CONTEXT_MAX_CHARS
+        value: "30000"
       - key: PREMIUM_STARS
         value: "199"
       - key: PREMIUM_DAYS
