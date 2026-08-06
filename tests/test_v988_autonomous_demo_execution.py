@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.8"
-    assert RELEASE_NAME == "Unified Portfolio Accounting"
+    assert APP_VERSION == "9.9.9"
+    assert RELEASE_NAME == "Provenance Migration and Unified Read Cutover"
 
 
 @pytest.mark.asyncio

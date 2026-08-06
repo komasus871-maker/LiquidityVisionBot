@@ -171,3 +171,34 @@ class ExecutionRepository:
             else:
                 rows = conn.execute("SELECT * FROM paper_execution_positions WHERE telegram_id=? AND status NOT IN ('CLOSED','CANCELLED','FAILED') ORDER BY id ASC", (telegram_id,)).fetchall()
         return [dict(row) for row in rows]
+
+    def closed_outcomes(self, telegram_id: int, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Normalized analytics outcomes without double-counting linked history."""
+        safe = max(1, min(int(limit), 5000))
+        with connect() as conn:
+            rows = conn.execute(
+                f"""SELECT p.signal_id,p.symbol,p.timeframe,p.side,p.realized_r,p.realized_pnl,
+                            p.close_reason,p.closed_at,'UNIFIED' AS provenance
+                     FROM paper_execution_positions p
+                     WHERE p.telegram_id=? AND p.status='CLOSED'
+                     UNION ALL
+                     SELECT h.signal_id,h.symbol,h.timeframe,h.side,h.realized_r,h.realized_pnl,
+                            h.legacy_status AS close_reason,h.closed_at,
+                            h.classification AS provenance
+                     FROM historical_execution_records h
+                     WHERE h.telegram_id=? AND h.linked_unified_position_id IS NULL
+                       AND h.classification='PARTIALLY_RECONSTRUCTABLE'
+                       AND h.legacy_status='CLOSED' AND h.realized_r IS NOT NULL
+                     UNION ALL
+                     SELECT p.signal_id,p.symbol,p.timeframe,p.side,p.realized_r,p.realized_pnl,
+                            p.close_reason,p.closed_at,'LEGACY_COMPAT' AS provenance
+                     FROM paper_positions p
+                     WHERE p.telegram_id=? AND p.status='CLOSED' AND p.realized_r IS NOT NULL
+                       AND NOT EXISTS (
+                           SELECT 1 FROM historical_execution_records h
+                           WHERE h.legacy_position_id=p.id
+                       )
+                     ORDER BY closed_at DESC LIMIT {safe}""",
+                (telegram_id, telegram_id, telegram_id),
+            ).fetchall()
+        return [dict(row) for row in rows]

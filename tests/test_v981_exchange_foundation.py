@@ -30,8 +30,8 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.8"
-    assert "Unified Portfolio Accounting" in RELEASE_NAME
+    assert APP_VERSION == "9.9.9"
+    assert "Provenance Migration and Unified Read Cutover" in RELEASE_NAME
 
 
 @pytest.mark.asyncio

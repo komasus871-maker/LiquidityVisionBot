@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.8
+APP_VERSION=9.9.9
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -190,3 +190,7 @@ Persistent execution journal and idempotency foundation are documented in `V9_9_
 # Unified portfolio accounting (v9.9.8)
 
 Paper portfolio accounting is derived from unified execution positions and the idempotent portfolio ledger. Set `PORTFOLIO_ACCOUNTING_SOURCE=SHADOW` (default), `UNIFIED`, or `LEGACY`. SHADOW is the safe rollout mode; UNIFIED fails closed whenever an economically open position has missing or invalid risk metadata. See `V9_9_8_UNIFIED_PORTFOLIO_ACCOUNTING.md` for formulas, migration, and rollback details.
+
+## Historical provenance migration (v9.9.9)
+
+Startup incrementally catalogs legacy paper executions in a normalized provenance model. It never fabricates orders, fills, fees, prices, risk, or lifecycle events. Analytics use unified outcomes first, truthfully reconstructable unlinked history second, and an explicit legacy compatibility path until catalog coverage completes. See `V9_9_9_PROVENANCE_MIGRATION.md`.

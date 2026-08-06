@@ -78,6 +78,8 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "execution_claimed": _scalar(conn, "SELECT COUNT(*) FROM copy_execution_journal WHERE status='EXECUTING'"),
             "unified_open_positions": _scalar(conn, "SELECT COUNT(*) FROM paper_execution_positions WHERE status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')"),
             "portfolio_ledger_entries": _scalar(conn, "SELECT COUNT(*) FROM paper_portfolio_ledger"),
+            "historical_migrated": _scalar(conn, "SELECT COUNT(*) FROM historical_execution_records"),
+            "historical_unresolved": _scalar(conn, "SELECT COUNT(*) FROM historical_execution_records WHERE migration_status='UNRESOLVED'"),
         }
         duplicate_open_plans = _scalar(conn, """
             SELECT COUNT(*) FROM (

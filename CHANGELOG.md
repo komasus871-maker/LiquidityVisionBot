@@ -1,3 +1,11 @@
+## v9.9.9 — Provenance Migration and Unified Read Cutover
+
+- Added a restart-safe, bounded historical execution catalog with explicit fully reconstructable, partially reconstructable, legacy-only, ambiguous, and invalid classifications.
+- Added stable source keys, checksums, provenance metadata, migration runs, coverage diagnostics, and an admin migration-status command.
+- Cut adaptive training reads over to a normalized repository that prioritizes unified outcomes, prevents linked legacy duplicates, and retains an explicit compatibility path while coverage is incomplete.
+- Preserved all legacy tables and prohibited synthetic orders, fills, commissions, lifecycle events, and portfolio ledger entries during migration.
+- Included the PostgreSQL-safe parity aggregate fix with unique aliases and backend-neutral row access.
+
 ## v9.9.8 — Unified Portfolio Accounting
 
 - Added one normalized unified portfolio read model for open state, remaining-risk heat, realized/unrealized PnL, fees, equity, exposure, daily loss, cooldown, realized R, and rejections.

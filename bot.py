@@ -32,6 +32,7 @@ from services.signal_tracker import SignalTracker
 from services.watch_engine import WatchEngine
 from services.webhook_server import WebhookServer
 from services.trade_memory import TradeMemoryService
+from services.historical_execution_migration import HistoricalExecutionMigrationService
 from services.copy_execution_worker import CopyExecutionWorker
 
 logging.basicConfig(
@@ -87,6 +88,10 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 async def main() -> None:
     logging.info("Creating database...")
     create_tables()
+    migration = HistoricalExecutionMigrationService().run(
+        batch_size=int(os.getenv("HISTORICAL_MIGRATION_BATCH_SIZE", "500"))
+    )
+    logging.info("Historical execution migration: %s", migration.as_dict())
     backfill = TradeMemoryService().backfill(limit=int(os.getenv("MEMORY_BACKFILL_LIMIT", "500")))
     logging.info("AI memory backfill: scanned=%s created=%s", backfill["scanned"], backfill["created"])
     db_health = ping_database()

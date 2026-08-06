@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.9.8"
-    assert RELEASE_NAME == "Unified Portfolio Accounting"
+    assert APP_VERSION == "9.9.9"
+    assert RELEASE_NAME == "Provenance Migration and Unified Read Cutover"
 
 
 def test_similarity_details_explain_groups_and_features():

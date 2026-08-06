@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 
 from aiogram import Router
@@ -8,8 +9,10 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from services.runtime_diagnostics import collect_runtime_diagnostics
+from services.historical_execution_migration import HistoricalExecutionMigrationService
 
 router = Router()
+migration_service = HistoricalExecutionMigrationService()
 
 
 def _admin_ids() -> set[int]:
@@ -83,6 +86,7 @@ async def admin_status(message: Message) -> None:
             f"Global active trades: {counts['active_trades']} · Global closed records: {counts['closed_signals']}",
             f"Watch rows with errors: {counts['watch_errors']}",
             f"Execution claimed/retry/dead: {counts.get('execution_claimed', 0)}/{counts.get('execution_retry_wait', 0)}/{counts.get('execution_dead_letter', 0)}",
+            f"Historical migrated/unresolved: {counts.get('historical_migrated', 0)}/{counts.get('historical_unresolved', 0)}",
             "",
             "🧩 <b>Lifecycle integrity</b>",
             f"Duplicate open plans: {integrity['duplicate_open_plans']}",
@@ -95,6 +99,26 @@ async def admin_status(message: Message) -> None:
             *watch_error_lines,
         ]),
         parse_mode="HTML",
+    )
+
+
+@router.message(Command("migration_status"))
+async def migration_status(message: Message) -> None:
+    if not message.from_user or message.from_user.id not in _admin_ids():
+        await message.answer("⛔ Admin command.")
+        return
+    report = migration_service.latest_report()
+    latest = report.get("latest_run") or {}
+    classes = report.get("classifications") or {}
+    await message.answer(
+        "\n".join([
+            "🧬 <b>Historical migration</b>",
+            f"Latest: <b>{html.escape(str(latest.get('status') or 'NOT_RUN'))}</b>",
+            f"Scanned/migrated/skipped: {latest.get('scanned_count', 0)}/{latest.get('migrated_count', 0)}/{latest.get('skipped_count', 0)}",
+            f"Unresolved: <b>{latest.get('unresolved_count', 0)}</b>",
+            f"Last legacy ID: {latest.get('last_legacy_position_id') or '—'}",
+            f"Coverage: <code>{html.escape(json.dumps(classes, sort_keys=True))}</code>",
+        ]), parse_mode="HTML",
     )
 
 

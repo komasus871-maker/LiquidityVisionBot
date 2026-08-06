@@ -5,6 +5,7 @@ from math import sqrt
 from typing import Any
 
 from database.database import connect
+from services.execution_repositories import ExecutionRepository
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,9 @@ class CopyTrainingService:
     PRIOR_TRADES = 12.0
     PRIOR_WIN_RATE = 0.50
     PRIOR_EXPECTANCY_R = 0.0
+
+    def __init__(self, repository: ExecutionRepository | None = None) -> None:
+        self.repository = repository or ExecutionRepository()
 
     def policy_for(self, telegram_id: int, signal: dict[str, Any]) -> CopyTrainingPolicy:
         rows = self._closed_rows(telegram_id, signal)
@@ -82,16 +86,10 @@ class CopyTrainingService:
         )
 
     def report(self, telegram_id: int) -> dict[str, Any]:
-        with connect() as conn:
-            rows = conn.execute(
-                """SELECT p.symbol,p.timeframe,p.side,s.setup_key,p.realized_r,p.realized_pnl
-                   FROM paper_positions p
-                   LEFT JOIN signals s ON s.id=p.signal_id
-                   WHERE p.telegram_id=? AND p.status='CLOSED'
-                   ORDER BY p.closed_at DESC,p.id DESC""",
-                (telegram_id,),
-            ).fetchall()
-        values = [dict(row) for row in rows]
+        values = self.repository.closed_outcomes(telegram_id)
+        setup_by_signal = self._setup_map(values)
+        for row in values:
+            row["setup_key"] = setup_by_signal.get(int(row["signal_id"])) if row.get("signal_id") is not None else ""
         realized = [float(row.get("realized_r") or 0.0) for row in values]
         wins = sum(1 for value in realized if value > 0)
         losses = sum(1 for value in realized if value < 0)
@@ -132,18 +130,32 @@ class CopyTrainingService:
         timeframe = str(signal.get("timeframe") or "").lower()
         side = str(signal.get("side") or "").upper()
         setup_key = str(signal.get("setup_key") or "")
+        rows = self.repository.closed_outcomes(telegram_id, limit=500)
+        setup_by_signal = self._setup_map(rows)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("side") or "").upper() != side:
+                continue
+            row_setup = setup_by_signal.get(int(row["signal_id"]), "") if row.get("signal_id") is not None else ""
+            if str(row.get("symbol") or "").upper() == symbol or str(row.get("timeframe") or "").lower() == timeframe or row_setup == setup_key:
+                row["setup_key"] = row_setup
+                result.append(row)
+            if len(result) >= 120:
+                break
+        return result
+
+    @staticmethod
+    def _setup_map(rows: list[dict[str, Any]]) -> dict[int, str]:
+        signal_ids = sorted({int(row["signal_id"]) for row in rows if row.get("signal_id") is not None})
+        if not signal_ids:
+            return {}
+        placeholders = ",".join("?" for _ in signal_ids)
         with connect() as conn:
-            rows = conn.execute(
-                """SELECT p.realized_r,p.symbol,p.timeframe,p.side,s.setup_key
-                   FROM paper_positions p
-                   LEFT JOIN signals s ON s.id=p.signal_id
-                   WHERE p.telegram_id=? AND p.status='CLOSED'
-                     AND p.side=?
-                     AND (p.symbol=? OR p.timeframe=? OR COALESCE(s.setup_key,'')=?)
-                   ORDER BY p.closed_at DESC,p.id DESC LIMIT 120""",
-                (telegram_id, side, symbol, timeframe, setup_key),
-            ).fetchall()
-        return [dict(row) for row in rows]
+            return {
+                int(row[0]): str(row[1] or "") for row in conn.execute(
+                    f"SELECT id,setup_key FROM signals WHERE id IN ({placeholders})", tuple(signal_ids)
+                ).fetchall()
+            }
 
     @staticmethod
     def _cohort_key(row: dict[str, Any]) -> str:

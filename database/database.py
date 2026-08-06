@@ -398,6 +398,32 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS historical_execution_records(
+                id {id_col}, source_key TEXT NOT NULL UNIQUE,
+                legacy_position_id BIGINT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
+                signal_id BIGINT, linked_unified_position_id BIGINT,
+                classification TEXT NOT NULL, migration_status TEXT NOT NULL,
+                symbol TEXT, timeframe TEXT, side TEXT, legacy_status TEXT,
+                entry_price DOUBLE PRECISION, exit_price DOUBLE PRECISION,
+                quantity DOUBLE PRECISION, notional DOUBLE PRECISION,
+                risk_amount DOUBLE PRECISION, realized_pnl DOUBLE PRECISION,
+                realized_r DOUBLE PRECISION, commission DOUBLE PRECISION,
+                opened_at TEXT, closed_at TEXT, source_created_at TEXT,
+                price_provenance TEXT NOT NULL, risk_provenance TEXT NOT NULL,
+                commission_provenance TEXT NOT NULL, provenance_json TEXT NOT NULL,
+                source_checksum TEXT NOT NULL, migrated_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS historical_migration_runs(
+                id {id_col}, run_key TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+                scanned_count INTEGER NOT NULL DEFAULT 0, migrated_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0, unresolved_count INTEGER NOT NULL DEFAULT 0,
+                classification_json TEXT NOT NULL DEFAULT '{{}}', last_legacy_position_id BIGINT,
+                started_at TEXT NOT NULL, completed_at TEXT, error TEXT
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -542,6 +568,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_position_lifecycle_position ON paper_position_lifecycle_events(position_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_portfolio_ledger_owner_time ON paper_portfolio_ledger(telegram_id,occurred_at)",
             "CREATE INDEX IF NOT EXISTS idx_portfolio_ledger_position ON paper_portfolio_ledger(position_id)",
+            "CREATE INDEX IF NOT EXISTS idx_historical_execution_owner_class ON historical_execution_records(telegram_id,classification)",
+            "CREATE INDEX IF NOT EXISTS idx_historical_execution_signal ON historical_execution_records(signal_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",
