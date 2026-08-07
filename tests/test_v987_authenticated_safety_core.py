@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.13"
-    assert RELEASE_NAME == "Structured AI Outputs"
+    assert APP_VERSION == "9.9.14"
+    assert RELEASE_NAME == "AI Provider Certification and Shadow Evaluation"
 
 
 @pytest.mark.asyncio

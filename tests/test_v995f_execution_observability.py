@@ -39,8 +39,8 @@ def _plan(telegram_id: int = 99550):
 
 
 def test_release_identity():
-    assert APP_VERSION == "9.9.13"
-    assert RELEASE_NAME == "Structured AI Outputs"
+    assert APP_VERSION == "9.9.14"
+    assert RELEASE_NAME == "AI Provider Certification and Shadow Evaluation"
 
 
 def test_execution_records_auditable_timeline(tmp_path, monkeypatch):

@@ -351,3 +351,11 @@
 - Added additive decision metadata for schema/context/request versions, output modes, downgrade reason, validation stage, pricing status, cached/reasoning tokens and provider request identity.
 - Changed missing pricing from authoritative zero to `UNPRICED`; production requests fail closed when pricing is required but unavailable.
 - Expanded Telegram and runtime diagnostics with protocol, capabilities, schema/semantic validity, downgrades, p95 latency, cost status and compatibility failures.
+## v9.9.14 — AI Provider Certification and Shadow Evaluation
+
+- Added identity-bound, expiring provider certification covering configuration, authentication, structured schema, usage, pricing, latency, request IDs and capability compatibility.
+- Added durable governance audit events and a database-backed global kill switch that blocks AI calls immediately and survives restarts.
+- Added rolling 1h/24h/7d/30d telemetry, latency percentiles, drift checks, counterfactual cohorts, abstention quality and calibration confidence intervals.
+- Added deterministic shadow-experiment assignment and additive certification, governance, drift, experiment and cost-reconciliation schema.
+- Added `/ai_provider`, `/ai_certification`, `/ai_drift`, `/ai_experiments` and admin-only `/ai_kill` diagnostics.
+- Preserved deterministic execution isolation; AI remains advisory and `AI_GATED` remains unavailable.

@@ -30,8 +30,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.13"
-    assert RELEASE_NAME == "Structured AI Outputs"
+    assert APP_VERSION == "9.9.14"
+    assert RELEASE_NAME == "AI Provider Certification and Shadow Evaluation"
 
 
 def test_planner_builds_complete_approved_plan_without_side_effects() -> None:

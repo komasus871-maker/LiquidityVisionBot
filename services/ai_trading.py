@@ -199,6 +199,19 @@ class AIContextBuilder:
         portfolio = {"open_positions": [dict(value) for value in positions], "count": len(positions)}
         history = {"similar_trades": [dict(value) for value in similar], "sample_size": len(similar)}
         safe_features = redact(features if isinstance(features, dict) else {})
+        intelligence_keys = (
+            "liquidity_sweep", "bos", "choch", "order_block", "fair_value_gap",
+            "premium_discount", "liquidation_context", "funding", "open_interest",
+            "volume_profile", "relative_volume", "atr", "volatility", "news_risk",
+        )
+        safe_features["market_intelligence"] = {
+            key: safe_features.pop(key, "UNAVAILABLE") for key in intelligence_keys
+        }
+        try:
+            observed = datetime.fromisoformat(market_timestamp.replace("Z", "+00:00"))
+            safe_features["data_freshness_seconds"] = max(0, int((datetime.now(timezone.utc) - observed).total_seconds()))
+        except (TypeError, ValueError):
+            safe_features["data_freshness_seconds"] = "UNAVAILABLE"
         return AIContext(
             telegram_id=item.get("owner_telegram_id"), signal_id=signal_id,
             symbol=str(item["symbol"]).upper(), timeframe=str(item["timeframe"]),
@@ -721,7 +734,10 @@ class AITradingService:
         self.max_attempts = max(1, min(3, int(os.getenv("AI_PROVIDER_MAX_ATTEMPTS", "2"))))
         self.max_daily_user = max(0, int(os.getenv("AI_MAX_DAILY_REQUESTS_PER_USER", "25")))
         self.max_daily_global = max(0, int(os.getenv("AI_MAX_DAILY_REQUESTS", "500")))
-        self.max_daily_cost = Decimal(os.getenv("AI_MAX_DAILY_COST_USD", "5"))
+        try:
+            self.max_daily_cost = max(Decimal("0"), Decimal(os.getenv("AI_MAX_DAILY_COST_USD", "5")))
+        except Exception:
+            self.max_daily_cost = Decimal("0")
         self.max_context_chars = max(1000, int(os.getenv("AI_CONTEXT_MAX_CHARS", "30000")))
         self.validator = AIResponseValidator(max_age_seconds=int(os.getenv("AI_CONTEXT_MAX_AGE_SECONDS", "300")))
         self.capabilities = getattr(self.provider, "capabilities", AIProviderCapabilities(
@@ -740,6 +756,33 @@ class AITradingService:
             return True
         opened_until = datetime.fromisoformat(str(row["opened_until"]).replace("Z", "+00:00"))
         return opened_until <= now
+
+    def _activation_block(self, mode: AITradingMode | None = None) -> str | None:
+        from services.ai_operations import AIConfigurationValidator, AIControlRepository, provider_identity
+        controls = AIControlRepository()
+        if bool(controls.kill_status().get("enabled")):
+            return "GLOBAL_AI_KILL_SWITCH"
+        # Injected test providers are not production transports and remain independently testable.
+        if not isinstance(self.provider, BaseHTTPAIProvider):
+            return None
+        validation = AIConfigurationValidator().validate(self.provider)
+        if not validation.valid:
+            return validation.errors[0]
+        identity = provider_identity(self.provider)
+        if controls.certification(identity["identity_checksum"]) is None:
+            return "PROVIDER_NOT_CERTIFIED"
+        state = controls.governance_state(identity["provider"], identity["identity_checksum"])
+        if state in {"SUSPENDED", "RETIRED", "UNVERIFIED"}:
+            return f"PROVIDER_{state}"
+        effective_mode = mode or configured_ai_mode()
+        permitted = {
+            AITradingMode.AI_OBSERVE: {"OBSERVING", "SHADOW_CERTIFIED", "ASSIST_CERTIFIED"},
+            AITradingMode.AI_SHADOW: {"SHADOW_CERTIFIED", "ASSIST_CERTIFIED"},
+            AITradingMode.AI_ASSIST: {"ASSIST_CERTIFIED"},
+        }
+        if state not in permitted.get(effective_mode, set()):
+            return "GOVERNANCE_MODE_NOT_CERTIFIED"
+        return None
 
     def _provider_result(self, *, success: bool, code: str | None = None) -> None:
         now = datetime.now(timezone.utc)
@@ -809,14 +852,19 @@ class AITradingService:
         prompt_chars = len(_canonical(prompt_payload))
         if prompt_chars > self.max_context_chars:
             block = "CONTEXT_TOO_LARGE"
+        block = block or self._activation_block(mode)
         input_raw = os.getenv("AI_INPUT_COST_PER_MILLION_USD", "").strip()
         output_raw = os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "").strip()
         price_version = os.getenv("AI_PRICE_VERSION", "").strip()
         priced = bool(input_raw and output_raw and price_version)
         if self.provider.name != "disabled" and not priced and _env_bool("AI_REQUIRE_PRICING_FOR_REQUESTS", True):
             block = "COST_UNPRICED"
-        input_rate = max(Decimal("0"), Decimal(input_raw or "0"))
-        output_rate = max(Decimal("0"), Decimal(output_raw or "0"))
+        try:
+            input_rate = max(Decimal("0"), Decimal(input_raw or "0"))
+            output_rate = max(Decimal("0"), Decimal(output_raw or "0"))
+        except Exception:
+            input_rate = output_rate = Decimal("0")
+            block = "PRICING_CONFIGURATION_INVALID"
         priced_prompt_chars = prompt_chars + len(SYSTEM_PROMPT) + len(_canonical(RESPONSE_SCHEMA))
         estimated_upper_cost = (
             Decimal(math.ceil(priced_prompt_chars / 4)) * input_rate + Decimal(self.max_tokens) * output_rate

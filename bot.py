@@ -36,6 +36,7 @@ from services.trade_memory import TradeMemoryService
 from services.historical_execution_migration import HistoricalExecutionMigrationService
 from services.copy_execution_worker import CopyExecutionWorker
 from services.ai_trading import AIShadowWorker
+from services.ai_operations import AIConfigurationValidator
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -99,6 +100,11 @@ async def main() -> None:
     logging.info("AI memory backfill: scanned=%s created=%s", backfill["scanned"], backfill["created"])
     db_health = ping_database()
     logging.info("Database ready: backend=%s persistent=%s latency_ms=%s", database_backend(), persistent_database(), db_health.get("latency_ms"))
+    ai_config = AIConfigurationValidator().validate()
+    if not ai_config.valid:
+        logging.error("AI provider activation blocked: errors=%s warnings=%s", ai_config.errors, ai_config.warnings)
+    else:
+        logging.info("AI provider configuration valid: warnings=%s; certification is still required", ai_config.warnings)
 
     bot = Bot(
         token=BOT_TOKEN,

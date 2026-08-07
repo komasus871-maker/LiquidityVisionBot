@@ -594,6 +594,53 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_provider_certifications(
+                id {id_col}, certification_id TEXT NOT NULL UNIQUE,
+                identity_checksum TEXT NOT NULL, provider TEXT NOT NULL, protocol TEXT NOT NULL,
+                endpoint_redacted TEXT NOT NULL, model TEXT NOT NULL, model_version TEXT NOT NULL,
+                prompt_version TEXT NOT NULL, schema_version TEXT NOT NULL,
+                context_version TEXT NOT NULL, request_format_version TEXT NOT NULL,
+                pricing_version TEXT, capability_snapshot_json TEXT NOT NULL,
+                status TEXT NOT NULL, checks_json TEXT NOT NULL, failure_code TEXT,
+                certified_at TEXT NOT NULL, expires_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_governance_events(
+                id {id_col}, provider TEXT NOT NULL, identity_checksum TEXT,
+                from_state TEXT, to_state TEXT NOT NULL, reason_code TEXT NOT NULL,
+                actor_telegram_id BIGINT, details_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_global_control(
+                control_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                reason_code TEXT NOT NULL, actor_telegram_id BIGINT, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_drift_baselines(
+                id {id_col}, identity_checksum TEXT NOT NULL, scope_key TEXT NOT NULL,
+                sample_size INTEGER NOT NULL, metrics_json TEXT NOT NULL,
+                created_at TEXT NOT NULL, UNIQUE(identity_checksum,scope_key)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_experiments(
+                id {id_col}, experiment_key TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                status TEXT NOT NULL, variants_json TEXT NOT NULL, allocation_salt TEXT NOT NULL,
+                started_at TEXT, ended_at TEXT, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_cost_reconciliations(
+                id {id_col}, provider TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
+                internal_cost_usd NUMERIC(18,8) NOT NULL, provider_cost_usd NUMERIC(18,8),
+                variance_usd NUMERIC(18,8), status TEXT NOT NULL, details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -787,6 +834,9 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_signal ON ai_decisions(signal_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_eval ON ai_decisions(provider,model_version,prompt_version,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_outcomes_unmatched ON ai_decision_outcomes(decision_id,attached_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_cert_identity_expiry ON ai_provider_certifications(identity_checksum,status,expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_governance_provider_time ON ai_governance_events(provider,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_events_owner ON watch_events(telegram_id, created_at)",

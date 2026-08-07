@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from database.database import connect
@@ -85,11 +85,139 @@ def calibration_metrics(samples: list[tuple[float, int]], buckets: int = 10) -> 
         ece += len(values) / len(normalized) * abs(confidence - accuracy)
         rows.append({"bucket": f"{low:.1f}-{high:.1f}", "count": len(values),
                      "confidence": round(confidence, 4), "accuracy": round(accuracy, 4)})
+    positives = sum(y for _, y in normalized)
+    probability = positives / len(normalized)
+    margin = 1.96 * math.sqrt(probability * (1 - probability) / len(normalized))
     return {"sample_size": len(normalized), "brier_score": round(brier, 6),
-            "expected_calibration_error": round(ece, 6), "reliability": rows}
+            "expected_calibration_error": round(ece, 6), "reliability": rows,
+            "accuracy_confidence_interval_95": [round(max(0, probability - margin), 4),
+                                                round(min(1, probability + margin), 4)]}
 
 
 class AIEvaluationService:
+    @staticmethod
+    def _percentile(values: list[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        return ordered[max(0, math.ceil(len(ordered) * percentile) - 1)]
+
+    def rolling_metrics(self, telegram_id: int | None = None) -> dict[str, Any]:
+        windows = {"1h": timedelta(hours=1), "24h": timedelta(hours=24),
+                   "7d": timedelta(days=7), "30d": timedelta(days=30)}
+        result: dict[str, Any] = {}
+        for label, delta in windows.items():
+            clauses, params = ["created_at>=?"], [(datetime.now(timezone.utc) - delta).isoformat()]
+            if telegram_id is not None:
+                clauses.append("telegram_id=?")
+                params.append(telegram_id)
+            with connect() as conn:
+                rows = [dict(row) for row in conn.execute(
+                    f"SELECT * FROM ai_decisions WHERE {' AND '.join(clauses)} ORDER BY id", tuple(params)).fetchall()]
+            count = len(rows)
+            codes = [str(row.get("validation_code") or "") for row in rows]
+            latencies = [float(row.get("latency_ms") or 0) for row in rows]
+            result[label] = {
+                "requests": count,
+                "http_success_rate": sum(not code.startswith("AI_PROVIDER_HTTP_") and code not in
+                    {"PROVIDER_TIMEOUT", "PROVIDER_TRANSPORT_ERROR", "PROVIDER_RATE_LIMIT"} for code in codes) / count if count else 0,
+                "schema_success_rate": sum(str(row.get("validation_stage")) not in
+                    {"JSON_PARSING", "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"} for row in rows) / count if count else 0,
+                "semantic_success_rate": codes.count("VALID") / count if count else 0,
+                "abstention_rate": sum(bool(row.get("abstention")) for row in rows) / count if count else 0,
+                "timeout_count": codes.count("PROVIDER_TIMEOUT"),
+                "rate_limit_count": codes.count("PROVIDER_RATE_LIMIT"),
+                "server_error_count": sum(code.startswith("AI_PROVIDER_HTTP_5") for code in codes),
+                "latency_ms": {"p50": self._percentile(latencies, .5), "p95": self._percentile(latencies, .95),
+                               "p99": self._percentile(latencies, .99)},
+                "input_tokens": sum(int(row.get("input_tokens") or 0) for row in rows),
+                "output_tokens": sum(int(row.get("output_tokens") or 0) for row in rows),
+                "cost_usd": str(sum((__import__("decimal").Decimal(str(row.get("estimated_cost_usd") or 0)) for row in rows), __import__("decimal").Decimal("0"))),
+                "request_ids_present": sum(bool(row.get("provider_request_id")) for row in rows),
+                "downgrade_count": sum(bool(row.get("downgrade_reason")) for row in rows),
+                "duplicate_suppression": max(0, len(rows) - len({row.get("idempotency_key") for row in rows})),
+            }
+        return result
+
+    def quality_report(self, telegram_id: int | None = None, minimum_samples: int = 30) -> dict[str, Any]:
+        metrics = self.metrics(telegram_id)
+        with connect() as conn:
+            where, params = ("WHERE d.telegram_id=?", (telegram_id,)) if telegram_id is not None else ("", ())
+            rows = [dict(row) for row in conn.execute(f"""SELECT d.recommended_action,d.abstention,
+                d.deterministic_accepted,o.direction_correct,o.realized_r,o.intervention_type,o.counterfactual_result
+                FROM ai_decisions d LEFT JOIN ai_decision_outcomes o ON o.decision_id=d.decision_id {where}""", params).fetchall()]
+        resolved = [row for row in rows if row.get("direction_correct") is not None and not row.get("intervention_type")]
+        accepted = [row for row in resolved if row["recommended_action"] in ACCEPT_ACTIONS]
+        rejected = [row for row in resolved if row["recommended_action"] == "REJECT"]
+        abstained = [row for row in resolved if bool(row["abstention"])]
+        def quality(group: list[dict[str, Any]]) -> dict[str, Any]:
+            r_values = [float(x["realized_r"]) for x in group if x.get("realized_r") is not None]
+            wins = [value for value in r_values if value > 0]
+            losses = [value for value in r_values if value < 0]
+            equity = peak = drawdown = 0.0
+            for value in r_values:
+                equity += value
+                peak = max(peak, equity)
+                drawdown = min(drawdown, equity - peak)
+            win_rate = sum(bool(x["direction_correct"]) for x in group) / len(group) if group else None
+            margin = 1.96 * math.sqrt(win_rate * (1 - win_rate) / len(group)) if group else None
+            return {"sample_size": len(group), "win_rate": win_rate,
+                    "win_rate_confidence_interval_95": None if margin is None else
+                    [max(0, win_rate - margin), min(1, win_rate + margin)],
+                    "expectancy_r": sum(r_values) / len(r_values) if r_values else None,
+                    "profit_factor": sum(wins) / abs(sum(losses)) if losses else None,
+                    "max_drawdown_r": drawdown if r_values else None,
+                    "status": "SUFFICIENT" if len(group) >= minimum_samples else "INSUFFICIENT_SAMPLES"}
+        counterfactual = {
+            "ai_accept": quality(accepted), "ai_reject": quality(rejected), "ai_abstain": quality(abstained),
+            "deterministic_accept": quality([x for x in resolved if bool(x.get("deterministic_accepted"))]),
+            "deterministic_reject": quality([x for x in resolved if x.get("deterministic_accepted") == 0]),
+        }
+        return {"metrics": metrics, "rolling": self.rolling_metrics(telegram_id),
+                "counterfactual": counterfactual,
+                "abstention_quality": {"sample_size": len(abstained),
+                    "correct_abstentions": sum(not bool(x["direction_correct"]) for x in abstained),
+                    "false_abstentions_or_missed_opportunities": sum(bool(x["direction_correct"]) for x in abstained),
+                    "status": "SUFFICIENT" if len(abstained) >= minimum_samples else "INSUFFICIENT_SAMPLES"},
+                "manual_interventions_excluded_from_calibration": sum(bool(x.get("intervention_type")) for x in rows),
+                "warning": "No improvement claim is valid when a cohort reports INSUFFICIENT_SAMPLES."}
+
+    def drift(self, telegram_id: int | None = None, minimum_samples: int = 30) -> dict[str, Any]:
+        rolling = self.rolling_metrics(telegram_id)
+        current, baseline = rolling["24h"], rolling["30d"]
+        scope = f"telegram:{telegram_id}" if telegram_id is not None else "global"
+        with connect() as conn:
+            saved = conn.execute("SELECT * FROM ai_drift_baselines WHERE scope_key=? ORDER BY id DESC LIMIT 1", (scope,)).fetchone()
+        if saved:
+            baseline = json.loads(saved["metrics_json"])
+        if current["requests"] < minimum_samples or baseline["requests"] < minimum_samples:
+            return {"status": "INSUFFICIENT_SAMPLES", "current_samples": current["requests"],
+                    "baseline_samples": baseline["requests"], "alerts": []}
+        alerts = []
+        for key in ("schema_success_rate", "semantic_success_rate"):
+            delta = current[key] - baseline[key]
+            if delta < -0.1:
+                alerts.append({"metric": key, "delta": round(delta, 4), "severity": "HIGH"})
+        latency_delta = current["latency_ms"]["p95"] - baseline["latency_ms"]["p95"]
+        if baseline["latency_ms"]["p95"] and latency_delta / baseline["latency_ms"]["p95"] > .5:
+            alerts.append({"metric": "p95_latency_ms", "delta": round(latency_delta, 3), "severity": "MEDIUM"})
+        return {"status": "DRIFT_DETECTED" if alerts else "STABLE", "alerts": alerts,
+                "current_samples": current["requests"], "baseline_samples": baseline["requests"]}
+
+    def capture_drift_baseline(self, identity_checksum: str, telegram_id: int | None = None,
+                               minimum_samples: int = 30) -> dict[str, Any]:
+        scope = f"telegram:{telegram_id}" if telegram_id is not None else "global"
+        baseline = self.rolling_metrics(telegram_id)["30d"]
+        status = "CAPTURED" if baseline["requests"] >= minimum_samples else "INSUFFICIENT_SAMPLES"
+        if status == "CAPTURED":
+            with connect() as conn:
+                conn.execute("""INSERT INTO ai_drift_baselines(identity_checksum,scope_key,sample_size,
+                    metrics_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(identity_checksum,scope_key)
+                    DO UPDATE SET sample_size=excluded.sample_size,metrics_json=excluded.metrics_json,
+                    created_at=excluded.created_at""", (identity_checksum, scope, baseline["requests"],
+                    json.dumps(baseline, sort_keys=True), datetime.now(timezone.utc).isoformat()))
+        return {"status": status, "scope": scope, "sample_size": baseline["requests"]}
+
     def metrics(self, telegram_id: int | None = None) -> dict[str, Any]:
         where, params = ("WHERE d.telegram_id=?", (telegram_id,)) if telegram_id is not None else ("", ())
         with connect() as conn:
