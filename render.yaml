@@ -42,6 +42,16 @@ services:
         value: AI_SHADOW
       - key: AI_PROVIDER
         value: disabled
+      - key: AI_PROVIDER_PROTOCOL
+        value: chat_completions
+      - key: AI_STRUCTURED_OUTPUT_MODE
+        value: auto
+      - key: AI_STRICT_SCHEMA_REQUIRED
+        value: "false"
+      - key: AI_ALLOW_JSON_OBJECT_FALLBACK
+        value: "true"
+      - key: AI_SCHEMA_VERSION
+        value: ai-decision-v1
       - key: AI_MODEL
         sync: false
       - key: AI_MODEL_VERSION
@@ -68,6 +78,28 @@ services:
         value: "300"
       - key: AI_CONTEXT_MAX_CHARS
         value: "30000"
+      - key: AI_PRICE_VERSION
+        sync: false
+      - key: AI_INPUT_COST_PER_MILLION_USD
+        sync: false
+      - key: AI_OUTPUT_COST_PER_MILLION_USD
+        sync: false
+      - key: AI_CACHED_INPUT_COST_PER_MILLION_USD
+        sync: false
+      - key: AI_REQUIRE_PRICING_FOR_REQUESTS
+        value: "true"
+      - key: AI_SUPPORTS_JSON_OBJECT
+        value: "true"
+      - key: AI_SUPPORTS_JSON_SCHEMA
+        value: "true"
+      - key: AI_SUPPORTS_STRICT_SCHEMA
+        value: "true"
+      - key: AI_SUPPORTS_TEMPERATURE
+        value: "true"
+      - key: AI_SUPPORTS_MAX_TOKENS
+        value: "true"
+      - key: AI_SUPPORTS_MAX_COMPLETION_TOKENS
+        value: "false"
       - key: PREMIUM_STARS
         value: "199"
       - key: PREMIUM_DAYS

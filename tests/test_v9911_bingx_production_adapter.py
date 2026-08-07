@@ -87,8 +87,8 @@ class ContractBingX(BingXSwapAdapter):
 
 
 def test_release_environment_capabilities_and_signature():
-    assert APP_VERSION == "9.9.12"
-    assert RELEASE_NAME == "GPT Trading Intelligence Shadow Layer"
+    assert APP_VERSION == "9.9.13"
+    assert RELEASE_NAME == "Structured AI Outputs"
     vst = ContractBingX(testnet=True)
     live = ContractBingX(testnet=False)
     assert vst.environment == "prod-vst" and "open-api-vst" in vst.base_url

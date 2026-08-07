@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -103,6 +104,11 @@ class AIEvaluationService:
             action = str(row["recommended_action"])
             actions[action] = actions.get(action, 0) + 1
         resolved = [row for row in rows if row.get("direction_correct") is not None]
+        schema_failure_stages = {"JSON_PARSING", "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"}
+        schema_valid_count = sum(str(row.get("validation_stage") or "") not in schema_failure_stages for row in rows)
+        semantic_valid_count = sum(str(row.get("validation_code") or "") == "VALID" for row in rows)
+        latencies = sorted(float(row["latency_ms"] or 0) for row in rows)
+        p95_index = max(0, math.ceil(len(latencies) * 0.95) - 1) if latencies else 0
         samples = [(float(row["raw_confidence"]) / 100, int(row["direction_correct"])) for row in resolved]
         calibration = calibration_metrics(samples)
         agrees = [row for row in rows if row.get("deterministic_accepted") is not None and
@@ -122,11 +128,18 @@ class AIEvaluationService:
             breakdowns[label] = values
         return {
             "decision_count": count,
-            "valid_schema_rate": sum(bool(row["schema_valid"]) for row in rows) / count if count else 0,
+            "valid_schema_rate": schema_valid_count / count if count else 0,
+            "semantic_valid_rate": semantic_valid_count / count if count else 0,
             "abstention_rate": sum(bool(row["abstention"]) for row in rows) / count if count else 0,
             "recommendations": actions,
             "average_latency_ms": sum(float(row["latency_ms"] or 0) for row in rows) / count if count else 0,
+            "p95_latency_ms": latencies[p95_index] if latencies else 0,
             "estimated_cost_usd": str(sum((__import__("decimal").Decimal(str(row["estimated_cost_usd"] or 0)) for row in rows), __import__("decimal").Decimal("0"))),
+            "cost_status": "UNPRICED" if any(str(row.get("cost_status") or "UNPRICED") == "UNPRICED" for row in rows) else "PRICED",
+            "downgrade_count": sum(bool(row.get("downgrade_reason")) for row in rows),
+            "timeout_rate": sum(row.get("validation_code") == "PROVIDER_TIMEOUT" for row in rows) / count if count else 0,
+            "rate_limit_rate": sum(row.get("validation_code") == "PROVIDER_RATE_LIMIT" for row in rows) / count if count else 0,
+            "compatibility_failures": sum(row.get("validation_code") in {"PROVIDER_CAPABILITY_MISMATCH", "MODEL_PARAMETER_UNSUPPORTED"} for row in rows),
             "agreement_rate": len(agrees) / sum(row.get("deterministic_accepted") is not None for row in rows) if any(row.get("deterministic_accepted") is not None for row in rows) else None,
             "reject_precision": sum(not bool(row["direction_correct"]) for row in reject) / len(reject) if reject else None,
             "accept_precision": sum(bool(row["direction_correct"]) for row in accept) / len(accept) if accept else None,

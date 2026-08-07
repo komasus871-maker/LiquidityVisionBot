@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.12"
-    assert RELEASE_NAME == "GPT Trading Intelligence Shadow Layer"
+    assert APP_VERSION == "9.9.13"
+    assert RELEASE_NAME == "Structured AI Outputs"
 
 
 @pytest.mark.asyncio

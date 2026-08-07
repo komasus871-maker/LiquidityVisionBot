@@ -11,7 +11,7 @@ from aiogram.types import Message
 from database.database import connect
 from services.ai_evaluation import AIEvaluationService
 from services.ai_trading import (
-    AIDecisionRepository, AITradingMode, configured_ai_mode, set_user_ai_mode,
+    AIDecisionRepository, AITradingMode, build_ai_provider, configured_ai_mode, set_user_ai_mode,
 )
 
 
@@ -33,10 +33,14 @@ def format_ai_decision(row: dict) -> str:
         f"Signal: <code>{row['signal_id']}</code> · {escape(str(row['symbol']))} {escape(str(row['timeframe']))}\n"
         f"Mode: <code>{escape(str(row['requested_mode']))}</code>\n"
         f"Provider/model: <code>{escape(str(row['provider']))} / {escape(str(row.get('model') or 'none'))}</code>\n"
+        f"Protocol: <code>{escape(str(row.get('provider_protocol') or 'legacy'))}</code>\n"
+        f"Output: <code>{escape(str(row.get('requested_output_mode') or 'legacy'))} → {escape(str(row.get('effective_output_mode') or 'legacy'))}</code>\n"
+        f"Schema: <code>{escape(str(row.get('schema_version') or 'legacy'))}</code>\n"
         f"Action: <b>{escape(str(row['recommended_action']))}</b> · risk <code>{float(row['recommended_risk_multiplier']):.2f}x</code>\n"
         f"Confidence / uncertainty: <code>{float(row['raw_confidence']):.1f} / {float(row['uncertainty']):.1f}</code>\n"
         f"Regime / direction: <code>{escape(str(row['regime']))} / {escape(str(row['direction']))}</code>\n"
-        f"Validation: <code>{escape(str(row['validation_code']))}</code>\n\n"
+        f"Validation: <code>{escape(str(row.get('validation_stage') or 'legacy'))} / {escape(str(row['validation_code']))}</code>\n"
+        f"Cost: <code>{escape(str(row.get('cost_status') or 'UNPRICED'))} · ${escape(str(row.get('estimated_cost_usd') or 0))}</code>\n\n"
         f"<b>Supports</b>\n{_items(row.get('supporting_factors_json'))}\n\n"
         f"<b>Conflicts</b>\n{_items(row.get('conflicting_factors_json'))}\n\n"
         f"Explanation: {escape(str(row['explanation']))}\n\n<i>{warning}</i>"
@@ -57,11 +61,21 @@ async def ai_status(message: Message) -> None:
     with connect() as conn:
         state = conn.execute("SELECT * FROM ai_provider_state WHERE provider=?", (os.getenv("AI_PROVIDER", "disabled"),)).fetchone()
     health = state["state"] if state else ("DISABLED" if os.getenv("AI_PROVIDER", "disabled") == "disabled" else "UNKNOWN")
+    try:
+        provider = build_ai_provider()
+        capabilities = provider.capabilities
+        protocol = provider.protocol
+        strict = capabilities.supports_json_schema and capabilities.supports_strict_schema
+    except Exception:
+        protocol, strict = "INVALID", False
     await message.answer(
         f"🤖 <b>AI intelligence status</b>\n\nMode: <code>{mode.value}</code>\n"
         f"Provider/model: <code>{escape(os.getenv('AI_PROVIDER','disabled'))} / {escape(os.getenv('AI_MODEL','unset') or 'unset')}</code>\n"
+        f"Protocol / strict schema: <code>{escape(protocol)} / {'YES' if strict else 'NO'}</code>\n"
         f"Health: <b>{escape(str(health))}</b>\nDecisions: <b>{metrics['decision_count']}</b>\n"
         f"Abstention: <code>{metrics['abstention_rate']:.1%}</code>\n"
+        f"Schema / semantic valid: <code>{metrics['valid_schema_rate']:.1%} / {metrics['semantic_valid_rate']:.1%}</code>\n"
+        f"Downgrades: <b>{metrics['downgrade_count']}</b>\n"
         f"Average latency: <code>{metrics['average_latency_ms']:.1f} ms</code>\n"
         f"Cost: <code>${escape(metrics['estimated_cost_usd'])}</code>\n"
         f"Latest: <code>{escape(str(latest['recommended_action'])) if latest else 'none'}</code>\n\n"
@@ -106,8 +120,10 @@ async def ai_metrics(message: Message) -> None:
     await message.answer(
         f"📊 <b>AI shadow metrics</b>\n\nDecisions: <b>{metrics['decision_count']}</b>\n"
         f"Valid schema: <code>{metrics['valid_schema_rate']:.1%}</code>\n"
+        f"Semantic valid: <code>{metrics['semantic_valid_rate']:.1%}</code>\n"
         f"Abstention: <code>{metrics['abstention_rate']:.1%}</code>\nDistribution: <code>{distribution}</code>\n"
         f"Agreement: <code>{metrics['agreement_rate'] if metrics['agreement_rate'] is not None else 'insufficient data'}</code>\n"
+        f"Downgrades / cost: <code>{metrics['downgrade_count']} / {escape(metrics['cost_status'])}</code>\n"
         f"Brier / ECE: <code>{calibration['brier_score']} / {calibration['expected_calibration_error']}</code>\n"
         f"Resolved calibration samples: <b>{calibration['sample_size']}</b>\n\n"
         "No improvement claim is made without sufficient out-of-sample evidence.")
@@ -116,4 +132,4 @@ async def ai_metrics(message: Message) -> None:
 @router.message(Command("ai_cost"))
 async def ai_cost(message: Message) -> None:
     metrics = AIEvaluationService().metrics(message.from_user.id)
-    await message.answer(f"AI recorded cost: <code>${escape(metrics['estimated_cost_usd'])}</code> across <b>{metrics['decision_count']}</b> decisions.")
+    await message.answer(f"AI recorded cost: <code>${escape(metrics['estimated_cost_usd'])}</code> · status <b>{escape(metrics['cost_status'])}</b> across <b>{metrics['decision_count']}</b> decisions.")

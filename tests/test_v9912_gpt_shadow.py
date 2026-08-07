@@ -16,6 +16,9 @@ def ai_db(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_MAX_DAILY_REQUESTS", "500")
     monkeypatch.setenv("AI_MAX_DAILY_REQUESTS_PER_USER", "25")
     monkeypatch.setenv("AI_MAX_DAILY_COST_USD", "5")
+    monkeypatch.setenv("AI_PRICE_VERSION", "test-prices-v1")
+    monkeypatch.setenv("AI_INPUT_COST_PER_MILLION_USD", "1")
+    monkeypatch.setenv("AI_OUTPUT_COST_PER_MILLION_USD", "2")
     monkeypatch.setattr("database.database.USE_POSTGRES", False)
     monkeypatch.setattr("database.database.DATABASE_NAME", tmp_path / "ai.db")
     from database.database import connect, create_tables
@@ -71,14 +74,14 @@ def test_context_is_scoped_and_redacted(ai_db):
 
 
 @pytest.mark.parametrize("payload,code", [
-    ("not-json", "MALFORMED_RESPONSE"),
-    (_valid(symbol="ETHUSDT"), "HALLUCINATED_SYMBOL"),
-    (_valid(reference_price=-1), "IMPOSSIBLE_PRICE"),
-    (_valid(recommended_action="BUY_NOW"), "MALFORMED_RESPONSE"),
-    (_valid(confidence=101), "CONFIDENCE_OUT_OF_RANGE"),
-    (_valid(recommended_risk_multiplier=2), "RISK_MULTIPLIER_OUT_OF_RANGE"),
-    (_valid(fabricated_indicator="yes"), "UNSUPPORTED_RESPONSE_FIELD"),
-    (_valid(supporting_factors=[]), "MISSING_REQUIRED_EVIDENCE"),
+    ("not-json", "OUTPUT_NOT_JSON"),
+    (_valid(symbol="ETHUSDT"), "UNKNOWN_SYMBOL"),
+    (_valid(reference_price=-1), "PRICE_MISMATCH"),
+    (_valid(recommended_action="BUY_NOW"), "SCHEMA_VALIDATION_FAILED"),
+    (_valid(confidence=101), "SCHEMA_VALIDATION_FAILED"),
+    (_valid(recommended_risk_multiplier=2), "RISK_MULTIPLIER_INVALID"),
+    (_valid(fabricated_indicator="yes"), "SCHEMA_VALIDATION_FAILED"),
+    (_valid(supporting_factors=[]), "ACTION_EVIDENCE_MISSING"),
 ])
 def test_strict_response_rejection(ai_db, payload, code):
     result = ai_db.AIResponseValidator().validate(payload, _context(ai_db))

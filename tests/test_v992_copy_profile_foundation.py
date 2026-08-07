@@ -28,8 +28,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.12"
-    assert RELEASE_NAME == "GPT Trading Intelligence Shadow Layer"
+    assert APP_VERSION == "9.9.13"
+    assert RELEASE_NAME == "Structured AI Outputs"
 
 
 def test_profile_validation_normalizes_future_execution_settings() -> None:

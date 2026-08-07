@@ -340,3 +340,14 @@
 - Added separate signal-quality, deterministic-policy, execution, intervention and AI counterfactual outcome fields plus calibration, Brier score and ECE metrics.
 - Added `/ai_status`, `/ai_mode`, `/ai_decision`, `/ai_explain`, `/ai_metrics`, `/ai_cost`, `/ai_compare`, and `/ai_disable` operator commands.
 - Added a bounded asynchronous shadow worker and AI runtime diagnostics. AI cannot call exchange adapters or lifecycle mutation services and does not delay execution.
+
+## v9.9.13 — Structured AI Outputs
+
+- Added explicit, diagnostic provider capabilities rather than inferring model behavior from provider names.
+- Added a strict Draft 2020-12 AI decision schema with no additional properties and sent it through provider-native strict structured-output parameters.
+- Added separate OpenAI-compatible Chat Completions and OpenAI Responses provider protocols with normalized response, usage, request-ID and cost metadata.
+- Added capability-driven `max_tokens`/`max_completion_tokens`, temperature omission, strict-schema selection and recorded JSON-object fallback.
+- Added staged output validation, semantic consistency checks, market-truth checks, and non-retryable handling of malformed or invalid model output.
+- Added additive decision metadata for schema/context/request versions, output modes, downgrade reason, validation stage, pricing status, cached/reasoning tokens and provider request identity.
+- Changed missing pricing from authoritative zero to `UNPRICED`; production requests fail closed when pricing is required but unavailable.
+- Expanded Telegram and runtime diagnostics with protocol, capabilities, schema/semantic validity, downgrades, p95 latency, cost status and compatibility failures.

@@ -9,7 +9,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
@@ -37,6 +37,31 @@ class AIAction(StrEnum):
     ACCEPT_REDUCED = "ACCEPT_REDUCED"
     ACCEPT_STANDARD = "ACCEPT_STANDARD"
     ABSTAIN = "ABSTAIN"
+
+
+class AIOutputMode(StrEnum):
+    AUTO = "auto"
+    STRICT_JSON_SCHEMA = "json_schema"
+    JSON_OBJECT = "json_object"
+    DISABLED = "disabled"
+
+
+@dataclass(frozen=True, slots=True)
+class AIProviderCapabilities:
+    supports_chat_completions: bool = False
+    supports_json_object: bool = False
+    supports_json_schema: bool = False
+    supports_strict_schema: bool = False
+    supports_temperature: bool = False
+    supports_max_tokens: bool = False
+    supports_max_completion_tokens: bool = False
+    supports_seed: bool = False
+    supports_usage_reporting: bool = False
+    supports_model_snapshot: bool = False
+    supports_request_id: bool = False
+    supports_reasoning_models: bool = False
+    supports_streaming: bool = False
+    supports_retryable_idempotent_requests: bool = False
 
 
 def configured_ai_mode(telegram_id: int | None = None) -> AITradingMode:
@@ -70,7 +95,14 @@ def set_user_ai_mode(telegram_id: int, mode: AITradingMode) -> AITradingMode:
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    def convert(item: Any) -> Any:
+        if isinstance(item, Decimal):
+            return format(item, "f")
+        if isinstance(item, datetime):
+            return item.astimezone(timezone.utc).isoformat()
+        raise TypeError(f"Unsupported context type: {type(item).__name__}")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                      allow_nan=False, default=convert)
 
 
 def checksum(value: Any) -> str:
@@ -110,6 +142,7 @@ class AIContext:
     deterministic: dict[str, Any]
     market_checksum: str
     feature_checksum: str
+    context_version: str = "ai-context-v1"
 
     def prompt_payload(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -149,6 +182,8 @@ class AIContextBuilder:
             features = {}
         market_timestamp = str(item.get("updated_at") or item.get("created_at"))
         market = {
+            "price_unit": "quote_currency_per_base_unit",
+            "percentage_unit": "percent",
             "price": item.get("current_price") or item.get("entry"),
             "entry": item.get("entry"), "stop": item.get("effective_stop") or item.get("stop"),
             "take_profits": [item.get("tp1"), item.get("tp2"), item.get("tp3")],
@@ -181,6 +216,10 @@ class AIProviderRequest:
     context: dict[str, Any]
     response_schema: dict[str, Any]
     max_tokens: int
+    requested_output_mode: AIOutputMode = AIOutputMode.AUTO
+    effective_output_mode: AIOutputMode = AIOutputMode.DISABLED
+    schema_version: str = "ai-decision-v1"
+    schema_checksum: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,12 +232,24 @@ class AIProviderResponse:
     output_tokens: int = 0
     estimated_cost_usd: Decimal = Decimal("0")
     raw_checksum: str | None = None
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    provider_request_id: str | None = None
+    provider_protocol: str = "disabled"
+    requested_output_mode: str = AIOutputMode.DISABLED.value
+    effective_output_mode: str = AIOutputMode.DISABLED.value
+    downgrade_reason: str | None = None
+    cost_status: str = "UNPRICED"
+    pricing_version: str | None = None
+    provider_usage_json: str | None = None
 
 
 class AIProvider(Protocol):
     name: str
     model: str
     model_version: str
+    protocol: str
+    capabilities: AIProviderCapabilities
 
     async def analyze(self, request: AIProviderRequest) -> AIProviderResponse: ...
     async def health(self) -> dict[str, Any]: ...
@@ -208,6 +259,8 @@ class DisabledAIProvider:
     name = "disabled"
     model = ""
     model_version = ""
+    protocol = "disabled"
+    capabilities = AIProviderCapabilities()
 
     async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
         return AIProviderResponse(None, provider=self.name)
@@ -216,12 +269,75 @@ class DisabledAIProvider:
         return {"provider": self.name, "status": "disabled"}
 
 
-class StructuredHTTPAIProvider:
-    """Configurable OpenAI-compatible structured HTTP boundary.
+class MisconfiguredAIProvider(DisabledAIProvider):
+    def __init__(self, protocol: str) -> None:
+        self.name = os.getenv("AI_PROVIDER", "misconfigured").strip().lower()
+        self.model = os.getenv("AI_MODEL", "").strip()
+        self.model_version = os.getenv("AI_MODEL_VERSION", self.model).strip()
+        self.protocol = protocol
 
-    Credentials are read only for the Authorization header and are never added
-    to request context, returned errors, logs, or persistence records.
-    """
+    async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
+        raise AIProviderError("PROVIDER_PROTOCOL_UNSUPPORTED")
+
+    async def health(self) -> dict[str, Any]:
+        return {"provider": self.name, "protocol": self.protocol, "status": "misconfigured"}
+
+
+class AIProviderError(RuntimeError):
+    def __init__(self, code: str, *, retryable: bool = False) -> None:
+        self.code, self.retryable = code, retryable
+        super().__init__(code)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, "true" if default else "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def configured_capabilities(protocol: str) -> AIProviderCapabilities:
+    chat, responses = protocol == "chat_completions", protocol == "responses"
+    return AIProviderCapabilities(
+        supports_chat_completions=chat,
+        supports_json_object=_env_bool("AI_SUPPORTS_JSON_OBJECT", chat),
+        supports_json_schema=_env_bool("AI_SUPPORTS_JSON_SCHEMA", chat or responses),
+        supports_strict_schema=_env_bool("AI_SUPPORTS_STRICT_SCHEMA", chat or responses),
+        supports_temperature=_env_bool("AI_SUPPORTS_TEMPERATURE", chat),
+        supports_max_tokens=_env_bool("AI_SUPPORTS_MAX_TOKENS", chat),
+        supports_max_completion_tokens=_env_bool("AI_SUPPORTS_MAX_COMPLETION_TOKENS", False),
+        supports_seed=_env_bool("AI_SUPPORTS_SEED", False),
+        supports_usage_reporting=_env_bool("AI_SUPPORTS_USAGE_REPORTING", True),
+        supports_model_snapshot=_env_bool("AI_SUPPORTS_MODEL_SNAPSHOT", True),
+        supports_request_id=_env_bool("AI_SUPPORTS_REQUEST_ID", True),
+        supports_reasoning_models=_env_bool("AI_SUPPORTS_REASONING_MODELS", responses),
+        supports_streaming=_env_bool("AI_SUPPORTS_STREAMING", False),
+        supports_retryable_idempotent_requests=_env_bool("AI_SUPPORTS_RETRYABLE_IDEMPOTENT_REQUESTS", True),
+    )
+
+
+def resolve_output_mode(capabilities: AIProviderCapabilities) -> tuple[AIOutputMode, AIOutputMode, str | None]:
+    raw = os.getenv("AI_STRUCTURED_OUTPUT_MODE", "auto").strip().lower()
+    try:
+        requested = AIOutputMode(raw)
+    except ValueError:
+        return AIOutputMode.DISABLED, AIOutputMode.DISABLED, "OUTPUT_MODE_INVALID"
+    strict_required = _env_bool("AI_STRICT_SCHEMA_REQUIRED", False)
+    fallback = _env_bool("AI_ALLOW_JSON_OBJECT_FALLBACK", True)
+    if requested is AIOutputMode.DISABLED:
+        return requested, AIOutputMode.DISABLED, None
+    if requested in {AIOutputMode.AUTO, AIOutputMode.STRICT_JSON_SCHEMA}:
+        if capabilities.supports_json_schema and capabilities.supports_strict_schema:
+            return requested, AIOutputMode.STRICT_JSON_SCHEMA, None
+        if requested is AIOutputMode.STRICT_JSON_SCHEMA and strict_required:
+            return requested, AIOutputMode.DISABLED, "STRICT_SCHEMA_UNSUPPORTED"
+        if fallback and capabilities.supports_json_object:
+            return requested, AIOutputMode.JSON_OBJECT, "STRICT_SCHEMA_UNSUPPORTED"
+        return requested, AIOutputMode.DISABLED, "PROVIDER_CAPABILITY_MISMATCH"
+    if requested is AIOutputMode.JSON_OBJECT and capabilities.supports_json_object:
+        return requested, AIOutputMode.JSON_OBJECT, None
+    return requested, AIOutputMode.DISABLED, "PROVIDER_CAPABILITY_MISMATCH"
+
+
+class BaseHTTPAIProvider:
+    protocol = "unknown"
 
     def __init__(self) -> None:
         self.name = os.getenv("AI_PROVIDER", "disabled").strip().lower()
@@ -229,56 +345,193 @@ class StructuredHTTPAIProvider:
         self.model_version = os.getenv("AI_MODEL_VERSION", self.model).strip()
         self.endpoint = os.getenv("AI_PROVIDER_ENDPOINT", "").strip()
         self._api_key = os.getenv("AI_PROVIDER_API_KEY", "").strip()
+        self.capabilities = configured_capabilities(self.protocol)
 
-    async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+
+    async def _post(self, body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         if not self.endpoint or not self.model or not self._api_key:
-            raise RuntimeError("AI_PROVIDER_NOT_CONFIGURED")
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": _canonical(request.context)},
-            ],
-            "response_format": {"type": "json_object"},
-            "max_tokens": request.max_tokens,
-            "temperature": 0,
-        }
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+            raise AIProviderError("AI_PROVIDER_NOT_CONFIGURED")
         timeout = aiohttp.ClientTimeout(total=max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "8"))))
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self.endpoint, json=body, headers=headers) as response:
-                if response.status >= 400:
-                    raise RuntimeError(f"AI_PROVIDER_HTTP_{response.status}")
-                data = await response.json()
-        content = data["choices"][0]["message"]["content"]
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self.endpoint, json=body, headers=self._headers()) as response:
+                    request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+                    status = response.status
+                    if status >= 400:
+                        retryable = status == 429 or status >= 500
+                        raise AIProviderError("PROVIDER_RATE_LIMIT" if status == 429 else f"AI_PROVIDER_HTTP_{status}", retryable=retryable)
+                    try:
+                        data = await response.json()
+                    except Exception as exc:
+                        raise AIProviderError("PROVIDER_RESPONSE_INVALID") from exc
+        except asyncio.TimeoutError as exc:
+            raise AIProviderError("PROVIDER_TIMEOUT", retryable=True) from exc
+        except aiohttp.ClientError as exc:
+            raise AIProviderError("PROVIDER_TRANSPORT_ERROR", retryable=True) from exc
+        if not isinstance(data, dict):
+            raise AIProviderError("PROVIDER_RESPONSE_INVALID")
+        return data, request_id
+
+    @staticmethod
+    def _usage(data: dict[str, Any]) -> tuple[int, int, int, int, str]:
         usage = data.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
         input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
-        input_rate = Decimal(os.getenv("AI_INPUT_COST_PER_MILLION_USD", "0"))
-        output_rate = Decimal(os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "0"))
-        cost = (Decimal(input_tokens) * input_rate + Decimal(output_tokens) * output_rate) / Decimal(1_000_000)
-        return AIProviderResponse(content, self.name, self.model, self.model_version,
-                                  input_tokens, output_tokens, cost, checksum(content))
+        input_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+        output_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+        cached = int(input_details.get("cached_tokens") or 0) if isinstance(input_details, dict) else 0
+        reasoning = int(output_details.get("reasoning_tokens") or 0) if isinstance(output_details, dict) else 0
+        return input_tokens, output_tokens, cached, reasoning, _canonical(usage)
+
+    @staticmethod
+    def _cost(input_tokens: int, output_tokens: int, cached_tokens: int) -> tuple[Decimal, str, str | None]:
+        price_version = os.getenv("AI_PRICE_VERSION", "").strip() or None
+        input_raw, output_raw = os.getenv("AI_INPUT_COST_PER_MILLION_USD", "").strip(), os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "").strip()
+        if not price_version or not input_raw or not output_raw:
+            return Decimal("0"), "UNPRICED", price_version
+        input_rate, output_rate = max(Decimal("0"), Decimal(input_raw)), max(Decimal("0"), Decimal(output_raw))
+        cached_rate = max(Decimal("0"), Decimal(os.getenv("AI_CACHED_INPUT_COST_PER_MILLION_USD", input_raw)))
+        uncached = max(0, input_tokens - cached_tokens)
+        cost = (Decimal(uncached) * input_rate + Decimal(cached_tokens) * cached_rate + Decimal(output_tokens) * output_rate) / Decimal(1_000_000)
+        return cost, "PRICED", price_version
 
     async def health(self) -> dict[str, Any]:
         configured = bool(self.endpoint and self.model and self._api_key)
-        return {"provider": self.name, "status": "configured" if configured else "misconfigured",
-                "model": self.model, "model_version": self.model_version}
+        return {"provider": self.name, "protocol": self.protocol,
+                "status": "configured" if configured else "misconfigured",
+                "model": self.model, "model_version": self.model_version,
+                "capabilities": asdict(self.capabilities)}
+
+
+class ChatCompletionsAIProvider(BaseHTTPAIProvider):
+    protocol = "chat_completions"
+
+    def build_request(self, request: AIProviderRequest) -> dict[str, Any]:
+        user_payload: dict[str, Any] = {"context_version": CONTEXT_VERSION, "context": request.context}
+        if request.effective_output_mode is AIOutputMode.JSON_OBJECT:
+            user_payload["response_schema_version"] = request.schema_version
+            user_payload["response_schema"] = request.response_schema
+        body: dict[str, Any] = {"model": self.model, "messages": [
+            {"role": "system", "content": request.system_prompt},
+            {"role": "user", "content": _canonical(user_payload)},
+        ]}
+        if request.effective_output_mode is AIOutputMode.STRICT_JSON_SCHEMA:
+            body["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": request.schema_version.replace("-", "_")[:64], "strict": True,
+                "schema": request.response_schema,
+            }}
+        elif request.effective_output_mode is AIOutputMode.JSON_OBJECT:
+            body["response_format"] = {"type": "json_object"}
+        else:
+            raise AIProviderError("PROVIDER_CAPABILITY_MISMATCH")
+        if self.capabilities.supports_max_completion_tokens:
+            body["max_completion_tokens"] = request.max_tokens
+        elif self.capabilities.supports_max_tokens:
+            body["max_tokens"] = request.max_tokens
+        else:
+            raise AIProviderError("MODEL_PARAMETER_UNSUPPORTED")
+        if self.capabilities.supports_temperature:
+            body["temperature"] = 0
+        if self.capabilities.supports_seed and os.getenv("AI_SEED", "").strip():
+            body["seed"] = int(os.getenv("AI_SEED", "0"))
+        return body
+
+    async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
+        data, request_id = await self._post(self.build_request(request))
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIProviderError("PROVIDER_RESPONSE_INVALID") from exc
+        if not isinstance(content, (str, dict)):
+            raise AIProviderError("PROVIDER_RESPONSE_INVALID")
+        inp, out, cached, reasoning, usage_json = self._usage(data)
+        cost, cost_status, price_version = self._cost(inp, out, cached)
+        returned_model = str(data.get("model") or self.model_version)
+        return AIProviderResponse(content, self.name, self.model, returned_model, inp, out, cost,
+            checksum(content), cached, reasoning, request_id or data.get("id"), self.protocol,
+            request.requested_output_mode.value, request.effective_output_mode.value, None,
+            cost_status, price_version, usage_json)
+
+
+class OpenAIResponsesAIProvider(BaseHTTPAIProvider):
+    protocol = "responses"
+
+    def build_request(self, request: AIProviderRequest) -> dict[str, Any]:
+        if request.effective_output_mode is not AIOutputMode.STRICT_JSON_SCHEMA:
+            raise AIProviderError("PROVIDER_CAPABILITY_MISMATCH")
+        return {"model": self.model, "instructions": request.system_prompt,
+                "input": _canonical(request.context), "max_output_tokens": request.max_tokens,
+                "text": {"format": {"type": "json_schema",
+                    "name": request.schema_version.replace("-", "_")[:64],
+                    "strict": True, "schema": request.response_schema}}}
+
+    async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
+        data, request_id = await self._post(self.build_request(request))
+        content = data.get("output_text")
+        if not isinstance(content, str):
+            try:
+                content = data["output"][0]["content"][0]["text"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise AIProviderError("PROVIDER_RESPONSE_INVALID") from exc
+        inp, out, cached, reasoning, usage_json = self._usage(data)
+        cost, cost_status, price_version = self._cost(inp, out, cached)
+        returned_model = str(data.get("model") or self.model_version)
+        return AIProviderResponse(content, self.name, self.model, returned_model, inp, out, cost,
+            checksum(content), cached, reasoning, request_id or data.get("id"), self.protocol,
+            request.requested_output_mode.value, request.effective_output_mode.value, None,
+            cost_status, price_version, usage_json)
+
+
+# Backward-compatible import name; v9.9.13 selects an explicit protocol below.
+StructuredHTTPAIProvider = ChatCompletionsAIProvider
 
 
 def build_ai_provider() -> AIProvider:
-    return DisabledAIProvider() if os.getenv("AI_PROVIDER", "disabled").strip().lower() == "disabled" else StructuredHTTPAIProvider()
+    if os.getenv("AI_PROVIDER", "disabled").strip().lower() == "disabled":
+        return DisabledAIProvider()
+    protocol = os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower()
+    if protocol == "chat_completions":
+        return ChatCompletionsAIProvider()
+    if protocol == "responses":
+        return OpenAIResponsesAIProvider()
+    return MisconfiguredAIProvider(protocol)
 
 
+SCHEMA_VERSION = os.getenv("AI_SCHEMA_VERSION", "ai-decision-v1").strip() or "ai-decision-v1"
+CONTEXT_VERSION = "ai-context-v1"
+REQUEST_FORMAT_VERSION = "ai-provider-request-v2"
+_REQUIRED_FIELDS = ["regime", "direction", "confidence", "uncertainty", "recommended_action",
+                    "recommended_risk_multiplier", "abstention", "supporting_factors",
+                    "conflicting_factors", "invalidation_conditions", "explanation"]
 RESPONSE_SCHEMA = {
-    "required": ["regime", "direction", "confidence", "uncertainty", "recommended_action",
-                 "recommended_risk_multiplier", "abstention", "supporting_factors",
-                 "conflicting_factors", "invalidation_conditions", "explanation"],
-    "actions": [item.value for item in AIAction],
-    "optional": ["symbol", "reference_price"],
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    # OpenAI strict structured outputs require every property to be present.
+    # Semantically optional fields are therefore required but nullable.
+    "required": _REQUIRED_FIELDS + ["symbol", "reference_price"],
+    "properties": {
+        "regime": {"type": "string", "minLength": 1, "maxLength": 80},
+        "direction": {"type": "string", "enum": ["LONG", "SHORT", "NEUTRAL"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+        "uncertainty": {"type": "number", "minimum": 0, "maximum": 100},
+        "recommended_action": {"type": "string", "enum": [item.value for item in AIAction]},
+        "recommended_risk_multiplier": {"type": "number", "minimum": 0, "maximum": 1},
+        "abstention": {"type": "boolean"},
+        "supporting_factors": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 20},
+        "conflicting_factors": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 20},
+        "invalidation_conditions": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 20},
+        "explanation": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "symbol": {"type": ["string", "null"], "minLength": 1, "maxLength": 40},
+        "reference_price": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    },
 }
-
-PROMPT_VERSION = "ai-shadow-v1"
+SCHEMA_CHECKSUM = checksum(RESPONSE_SCHEMA)
+PROMPT_VERSION = "ai-shadow-v2-structured"
 SYSTEM_PROMPT = """You are an advisory market-analysis component. Use only the supplied immutable snapshot.
 Return JSON matching the supplied schema. Disclose uncertainty and contradictions. Abstain when evidence is
 insufficient or stale. Never invent prices, indicators, tools, or external facts. Never issue an order command.
@@ -300,6 +553,7 @@ class ValidatedDecision:
     explanation: str
     valid: bool
     code: str
+    validation_stage: str = "DOMAIN_VALIDATION"
 
 
 class AIResponseValidator:
@@ -307,63 +561,84 @@ class AIResponseValidator:
         self.min_risk, self.max_risk = min_risk, max_risk
         self.max_age_seconds = max(1, max_age_seconds)
 
-    def fallback(self, code: str) -> ValidatedDecision:
+    def fallback(self, code: str, stage: str = "DOMAIN_VALIDATION") -> ValidatedDecision:
         return ValidatedDecision("UNKNOWN", "NEUTRAL", 0, 1, AIAction.ABSTAIN, 0, True,
-                                 (), (code,), (), f"AI abstained: {code}", False, code)
+                                 (), (code,), (), f"AI abstained: {code}", False, code, stage)
 
     def validate(self, raw: dict[str, Any] | str | None, context: AIContext) -> ValidatedDecision:
         try:
-            payload = json.loads(raw) if isinstance(raw, str) else raw
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                return self.fallback("OUTPUT_NOT_JSON", "JSON_PARSING")
             if not isinstance(payload, dict):
-                return self.fallback("MALFORMED_RESPONSE")
-            missing = [key for key in RESPONSE_SCHEMA["required"] if key not in payload]
+                return self.fallback("OUTPUT_NOT_JSON", "JSON_PARSING")
+            missing = [key for key in _REQUIRED_FIELDS if key not in payload]
             if missing:
-                return self.fallback("MISSING_REQUIRED_FIELD")
-            allowed = set(RESPONSE_SCHEMA["required"]) | set(RESPONSE_SCHEMA["optional"])
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
+            allowed = set(RESPONSE_SCHEMA["properties"])
             if set(payload) - allowed:
-                return self.fallback("UNSUPPORTED_RESPONSE_FIELD")
-            action = AIAction(str(payload["recommended_action"]).upper())
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
+            try:
+                action = AIAction(str(payload["recommended_action"]).upper())
+            except ValueError:
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             confidence, uncertainty = float(payload["confidence"]), float(payload["uncertainty"])
             risk = float(payload["recommended_risk_multiplier"])
             if not all(math.isfinite(x) for x in (confidence, uncertainty, risk)):
-                return self.fallback("INVALID_NUMERIC_VALUE")
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             if not 0 <= confidence <= 100 or not 0 <= uncertainty <= 100:
-                return self.fallback("CONFIDENCE_OUT_OF_RANGE")
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             if not self.min_risk <= risk <= self.max_risk:
-                return self.fallback("RISK_MULTIPLIER_OUT_OF_RANGE")
+                return self.fallback("RISK_MULTIPLIER_INVALID", "DOMAIN_VALIDATION")
             direction = str(payload["direction"]).upper()
             if direction not in {"LONG", "SHORT", "NEUTRAL"}:
-                return self.fallback("UNSUPPORTED_DIRECTION")
-            supplied_symbol = str(payload.get("symbol", context.symbol)).upper()
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
+            supplied_symbol = str(payload.get("symbol") or context.symbol).upper()
             if supplied_symbol != context.symbol:
-                return self.fallback("HALLUCINATED_SYMBOL")
-            if "reference_price" in payload:
+                return self.fallback("UNKNOWN_SYMBOL", "MARKET_TRUTH_VALIDATION")
+            if payload.get("reference_price") is not None:
                 reference = float(payload["reference_price"])
                 truth = float(context.market.get("price") or 0)
                 if not math.isfinite(reference) or reference <= 0 or truth <= 0 or abs(reference - truth) > max(1e-9, truth * 0.000001):
-                    return self.fallback("IMPOSSIBLE_PRICE")
+                    return self.fallback("PRICE_MISMATCH", "MARKET_TRUTH_VALIDATION")
             for key in ("supporting_factors", "conflicting_factors", "invalidation_conditions"):
                 if not isinstance(payload[key], list) or not all(isinstance(item, str) for item in payload[key]):
-                    return self.fallback("INVALID_EVIDENCE_TYPE")
+                    return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             if not isinstance(payload["abstention"], bool):
-                return self.fallback("INVALID_ABSTENTION_TYPE")
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             timestamp = datetime.fromisoformat(context.market_timestamp.replace("Z", "+00:00"))
             timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) - timestamp > timedelta(seconds=self.max_age_seconds):
-                return self.fallback("STALE_CONTEXT")
+                return self.fallback("STALE_CONTEXT", "MARKET_TRUTH_VALIDATION")
             factors = tuple(str(x)[:240] for x in payload["supporting_factors"] if str(x).strip())
             conflicts = tuple(str(x)[:240] for x in payload["conflicting_factors"] if str(x).strip())
             invalidations = tuple(str(x)[:240] for x in payload["invalidation_conditions"] if str(x).strip())
             if not factors and action in {AIAction.ACCEPT_REDUCED, AIAction.ACCEPT_STANDARD}:
-                return self.fallback("MISSING_REQUIRED_EVIDENCE")
+                return self.fallback("ACTION_EVIDENCE_MISSING", "SEMANTIC_VALIDATION")
             abstention = bool(payload["abstention"])
+            if action is AIAction.ABSTAIN and not abstention:
+                return self.fallback("ABSTENTION_CONFLICT", "SEMANTIC_VALIDATION")
+            if action in {AIAction.ACCEPT_REDUCED, AIAction.ACCEPT_STANDARD} and abstention:
+                return self.fallback("ABSTENTION_CONFLICT", "SEMANTIC_VALIDATION")
+            if direction == "NEUTRAL" and action is AIAction.ACCEPT_STANDARD:
+                return self.fallback("DIRECTION_CONFLICT", "SEMANTIC_VALIDATION")
+            expected_direction = str(context.deterministic.get("direction") or "").upper()
+            if action in {AIAction.ACCEPT_REDUCED, AIAction.ACCEPT_STANDARD} and expected_direction in {"LONG", "SHORT"} and direction != expected_direction:
+                return self.fallback("DIRECTION_CONFLICT", "SEMANTIC_VALIDATION")
+            if action is AIAction.ACCEPT_STANDARD and risk != 1:
+                return self.fallback("RISK_MULTIPLIER_INVALID", "SEMANTIC_VALIDATION")
+            if action is AIAction.ACCEPT_REDUCED and not 0 < risk < 1:
+                return self.fallback("RISK_MULTIPLIER_INVALID", "SEMANTIC_VALIDATION")
+            if action is AIAction.REJECT and risk != 0:
+                return self.fallback("RISK_MULTIPLIER_INVALID", "SEMANTIC_VALIDATION")
             if action is AIAction.ABSTAIN:
                 abstention, risk = True, 0
             return ValidatedDecision(str(payload["regime"])[:80], direction, confidence, uncertainty,
                                      action, risk, abstention, factors, conflicts, invalidations,
-                                     str(payload["explanation"])[:1000], True, "VALID")
+                                     str(payload["explanation"])[:1000], True, "VALID", "COMPLETE")
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return self.fallback("MALFORMED_RESPONSE")
+            return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
 
 
 class AIDecisionRepository:
@@ -371,9 +646,11 @@ class AIDecisionRepository:
         now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
             conn.execute("""INSERT INTO ai_prompt_versions(prompt_version,prompt_checksum,system_prompt,
-                response_schema_json,active,created_at) VALUES(?,?,?,?,1,?)
+                response_schema_json,schema_version,schema_checksum,context_version,request_format_version,
+                active,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)
                 ON CONFLICT(prompt_version) DO NOTHING""",
-                (PROMPT_VERSION, checksum(SYSTEM_PROMPT), SYSTEM_PROMPT, _canonical(RESPONSE_SCHEMA), now))
+                (PROMPT_VERSION, checksum(SYSTEM_PROMPT), SYSTEM_PROMPT, _canonical(RESPONSE_SCHEMA),
+                 SCHEMA_VERSION, SCHEMA_CHECKSUM, CONTEXT_VERSION, REQUEST_FORMAT_VERSION, now))
 
     def save(self, *, context: AIContext, response: AIProviderResponse,
              decision: ValidatedDecision, mode: AITradingMode, latency_ms: float,
@@ -391,8 +668,12 @@ class AIDecisionRepository:
                 recommended_action,recommended_risk_multiplier,abstention,supporting_factors_json,
                 conflicting_factors_json,invalidation_conditions_json,explanation,schema_valid,
                 validation_code,latency_ms,input_tokens,output_tokens,estimated_cost_usd,
-                raw_response_checksum,deterministic_accepted,deterministic_action,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                raw_response_checksum,deterministic_accepted,deterministic_action,
+                provider_protocol,schema_version,schema_checksum,context_version,request_format_version,
+                requested_output_mode,effective_output_mode,downgrade_reason,validation_stage,
+                pricing_version,cost_status,cached_tokens,reasoning_tokens,provider_request_id,
+                provider_usage_json,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(idempotency_key) DO NOTHING""", (
                 decision_id, key, f"signal:{context.signal_id}", context.telegram_id, context.signal_id,
                 context.symbol, context.timeframe, context.market_timestamp, context.market_checksum,
@@ -403,7 +684,12 @@ class AIDecisionRepository:
                 _canonical(decision.invalidations), decision.explanation, int(decision.valid), decision.code,
                 latency_ms, response.input_tokens, response.output_tokens, str(response.estimated_cost_usd),
                 response.raw_checksum, None if deterministic_accepted is None else int(deterministic_accepted),
-                "ACCEPT" if deterministic_accepted else "REJECT" if deterministic_accepted is False else None, now,
+                "ACCEPT" if deterministic_accepted else "REJECT" if deterministic_accepted is False else None,
+                response.provider_protocol, SCHEMA_VERSION, SCHEMA_CHECKSUM, CONTEXT_VERSION,
+                REQUEST_FORMAT_VERSION, response.requested_output_mode, response.effective_output_mode,
+                response.downgrade_reason, decision.validation_stage, response.pricing_version,
+                response.cost_status, response.cached_tokens, response.reasoning_tokens,
+                response.provider_request_id, response.provider_usage_json, now,
             ))
             created = cur.rowcount == 1
             row = conn.execute("SELECT * FROM ai_decisions WHERE idempotency_key=?", (key,)).fetchone()
@@ -438,6 +724,11 @@ class AITradingService:
         self.max_daily_cost = Decimal(os.getenv("AI_MAX_DAILY_COST_USD", "5"))
         self.max_context_chars = max(1000, int(os.getenv("AI_CONTEXT_MAX_CHARS", "30000")))
         self.validator = AIResponseValidator(max_age_seconds=int(os.getenv("AI_CONTEXT_MAX_AGE_SECONDS", "300")))
+        self.capabilities = getattr(self.provider, "capabilities", AIProviderCapabilities(
+            supports_json_object=True, supports_json_schema=True, supports_strict_schema=True,
+            supports_temperature=True, supports_max_tokens=True, supports_usage_reporting=True,
+            supports_retryable_idempotent_requests=True,
+        ))
         if AITradingService._semaphore is None:
             AITradingService._semaphore = asyncio.Semaphore(max(1, int(os.getenv("AI_MAX_CONCURRENCY", "2"))))
 
@@ -518,22 +809,39 @@ class AITradingService:
         prompt_chars = len(_canonical(prompt_payload))
         if prompt_chars > self.max_context_chars:
             block = "CONTEXT_TOO_LARGE"
-        input_rate = max(Decimal("0"), Decimal(os.getenv("AI_INPUT_COST_PER_MILLION_USD", "0")))
-        output_rate = max(Decimal("0"), Decimal(os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "0")))
+        input_raw = os.getenv("AI_INPUT_COST_PER_MILLION_USD", "").strip()
+        output_raw = os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "").strip()
+        price_version = os.getenv("AI_PRICE_VERSION", "").strip()
+        priced = bool(input_raw and output_raw and price_version)
+        if self.provider.name != "disabled" and not priced and _env_bool("AI_REQUIRE_PRICING_FOR_REQUESTS", True):
+            block = "COST_UNPRICED"
+        input_rate = max(Decimal("0"), Decimal(input_raw or "0"))
+        output_rate = max(Decimal("0"), Decimal(output_raw or "0"))
+        priced_prompt_chars = prompt_chars + len(SYSTEM_PROMPT) + len(_canonical(RESPONSE_SCHEMA))
         estimated_upper_cost = (
-            Decimal(math.ceil(prompt_chars / 4)) * input_rate + Decimal(self.max_tokens) * output_rate
+            Decimal(math.ceil(priced_prompt_chars / 4)) * input_rate + Decimal(self.max_tokens) * output_rate
         ) / Decimal(1_000_000)
         if cost + estimated_upper_cost > self.max_daily_cost:
             block = "COST_LIMIT"
         self.repository.register_prompt()
+        requested_output, effective_output, downgrade_reason = resolve_output_mode(self.capabilities)
+        if effective_output is AIOutputMode.DISABLED and self.provider.name != "disabled":
+            block = downgrade_reason or "PROVIDER_CAPABILITY_MISMATCH"
         started = time.perf_counter()
         response = AIProviderResponse(None, provider=self.provider.name,
-                                      model=self.provider.model, model_version=self.provider.model_version)
+                                      model=self.provider.model, model_version=self.provider.model_version,
+                                      provider_protocol=getattr(self.provider, "protocol", "injected"),
+                                      requested_output_mode=requested_output.value,
+                                      effective_output_mode=effective_output.value,
+                                      downgrade_reason=downgrade_reason,
+                                      cost_status="PRICED" if priced else "UNPRICED",
+                                      pricing_version=price_version or None)
         if block or self.provider.name == "disabled" or not self._provider_available():
             decision = self.validator.fallback(block or ("PROVIDER_DISABLED" if self.provider.name == "disabled" else "CIRCUIT_OPEN"))
         else:
             request = AIProviderRequest(SYSTEM_PROMPT, PROMPT_VERSION, prompt_payload,
-                                        RESPONSE_SCHEMA, self.max_tokens)
+                                        RESPONSE_SCHEMA, self.max_tokens, requested_output,
+                                        effective_output, SCHEMA_VERSION, SCHEMA_CHECKSUM)
             try:
                 assert self._semaphore is not None
                 last_error: Exception | None = None
@@ -543,19 +851,28 @@ class AITradingService:
                             response = await asyncio.wait_for(self.provider.analyze(request), timeout=self.timeout)
                         last_error = None
                         break
-                    except Exception as exc:
+                    except (asyncio.TimeoutError, aiohttp.ClientError, AIProviderError) as exc:
                         last_error = exc
-                        if attempt + 1 < self.max_attempts:
+                        retryable = self.capabilities.supports_retryable_idempotent_requests and (
+                            isinstance(exc, (asyncio.TimeoutError, aiohttp.ClientError)) or (
+                            isinstance(exc, AIProviderError) and exc.retryable)
+                        )
+                        if retryable and attempt + 1 < self.max_attempts:
                             await asyncio.sleep(min(0.5, 0.1 * (2 ** attempt)))
+                        else:
+                            break
                 if last_error is not None:
                     raise last_error
+                response = replace(response, downgrade_reason=downgrade_reason or response.downgrade_reason)
                 decision = self.validator.validate(response.payload, context)
                 self._provider_result(success=True)
-            except asyncio.TimeoutError:
-                decision = self.validator.fallback("PROVIDER_TIMEOUT")
+            except (asyncio.TimeoutError, AIProviderError) as exc:
+                code = exc.code if isinstance(exc, AIProviderError) else "PROVIDER_TIMEOUT"
+                stage = "HTTP_RESPONSE_SHAPE" if code == "PROVIDER_RESPONSE_INVALID" else "PROVIDER_TRANSPORT"
+                decision = self.validator.fallback(code, stage)
                 self._provider_result(success=False, code=decision.code)
             except Exception:
-                decision = self.validator.fallback("PROVIDER_FAILURE")
+                decision = self.validator.fallback("PROVIDER_FAILURE", "PROVIDER_TRANSPORT")
                 self._provider_result(success=False, code=decision.code)
         latency = (time.perf_counter() - started) * 1000
         row, _ = self.repository.save(context=context, response=response, decision=decision,

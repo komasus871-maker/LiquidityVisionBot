@@ -80,8 +80,8 @@ def request(client_id="lv-client", *, reduce_only=False):
 
 
 def test_release_and_modes_default_fail_closed(monkeypatch):
-    assert APP_VERSION == "9.9.12"
-    assert RELEASE_NAME == "GPT Trading Intelligence Shadow Layer"
+    assert APP_VERSION == "9.9.13"
+    assert RELEASE_NAME == "Structured AI Outputs"
     monkeypatch.delenv("EXECUTION_MODE", raising=False)
     assert configured_mode() is ExecutionMode.PAPER
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")

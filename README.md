@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.12
+APP_VERSION=9.9.13
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -205,3 +205,7 @@ The final v9.9.11 stabilization invariants, deployment notes, remaining constrai
 # LiquidityVisionBot v9.9.12
 
 v9.9.12 adds a provider-neutral GPT trading intelligence layer in `AI_SHADOW` mode. It records structured advisory recommendations, evidence, uncertainty, cost, calibration and outcomes without changing deterministic admission, sizing, lifecycle, portfolio, or exchange execution. `AI_PROVIDER=disabled` is fully functional and records deterministic abstentions. See `V9_9_12_GPT_TRADING_INTELLIGENCE.md`.
+
+# LiquidityVisionBot v9.9.13
+
+v9.9.13 sends the versioned AI decision JSON Schema to capable providers, adds explicit Chat Completions and OpenAI Responses protocols, capability-aware parameter selection, recorded fallback, staged validation, truthful priced/unpriced usage, and provider-quality diagnostics. The AI layer remains advisory and `AI_GATED` remains blocked. See `V9_9_13_STRUCTURED_AI_OUTPUTS.md`.

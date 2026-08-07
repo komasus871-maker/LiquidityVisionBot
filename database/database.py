@@ -519,7 +519,8 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS ai_prompt_versions(
                 id {id_col}, prompt_version TEXT NOT NULL UNIQUE, prompt_checksum TEXT NOT NULL,
                 system_prompt TEXT NOT NULL, response_schema_json TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+                schema_version TEXT, schema_checksum TEXT, context_version TEXT,
+                request_format_version TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
             )
         """)
         conn.execute("""
@@ -547,7 +548,14 @@ def create_tables() -> None:
                 raw_response_checksum TEXT, deterministic_accepted INTEGER,
                 deterministic_action TEXT, calibration_model_version TEXT,
                 calibration_sample_size INTEGER NOT NULL DEFAULT 0,
-                calibration_reliable INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+                calibration_reliable INTEGER NOT NULL DEFAULT 0,
+                provider_protocol TEXT, schema_version TEXT, schema_checksum TEXT,
+                context_version TEXT, request_format_version TEXT,
+                requested_output_mode TEXT, effective_output_mode TEXT, downgrade_reason TEXT,
+                validation_stage TEXT, pricing_version TEXT, cost_status TEXT,
+                cached_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                provider_request_id TEXT, provider_usage_json TEXT,
+                created_at TEXT NOT NULL
             )
         """)
         conn.execute("""
@@ -698,6 +706,22 @@ def create_tables() -> None:
             "certification_expires_at": "TEXT",
         }.items():
             _add_column(conn, "live_exchange_accounts", name, definition)
+        for name, definition in {
+            "schema_version": "TEXT", "schema_checksum": "TEXT", "context_version": "TEXT",
+            "request_format_version": "TEXT",
+        }.items():
+            _add_column(conn, "ai_prompt_versions", name, definition)
+        for name, definition in {
+            "provider_protocol": "TEXT", "schema_version": "TEXT", "schema_checksum": "TEXT",
+            "context_version": "TEXT", "request_format_version": "TEXT",
+            "requested_output_mode": "TEXT", "effective_output_mode": "TEXT",
+            "downgrade_reason": "TEXT", "validation_stage": "TEXT",
+            "pricing_version": "TEXT", "cost_status": "TEXT",
+            "cached_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "provider_request_id": "TEXT", "provider_usage_json": "TEXT",
+        }.items():
+            _add_column(conn, "ai_decisions", name, definition)
         _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,6 +12,7 @@ from database.database import connect, database_backend, get_runtime_states, per
 from version import APP_VERSION
 from services.execution_repositories import ExecutionRepository
 from services.live_readiness import configured_mode
+from services.ai_trading import configured_capabilities
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -149,7 +151,11 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         "ai": {
             "mode": os.getenv("AI_TRADING_MODE", "AI_SHADOW").strip().upper(),
             "provider": os.getenv("AI_PROVIDER", "disabled").strip().lower(),
+            "provider_protocol": os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower(),
+            "requested_output_mode": os.getenv("AI_STRUCTURED_OUTPUT_MODE", "auto").strip().lower(),
+            "schema_version": os.getenv("AI_SCHEMA_VERSION", "ai-decision-v1").strip(),
             "max_concurrency": max(1, int(os.getenv("AI_MAX_CONCURRENCY", "2"))),
+            "capabilities": asdict(configured_capabilities(os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower())),
             "provider_state": ai_provider_rows,
         },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},

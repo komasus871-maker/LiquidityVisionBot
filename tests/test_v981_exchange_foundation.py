@@ -30,8 +30,8 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.12"
-    assert "GPT Trading Intelligence Shadow Layer" in RELEASE_NAME
+    assert APP_VERSION == "9.9.13"
+    assert "Structured AI Outputs" in RELEASE_NAME
 
 
 @pytest.mark.asyncio
