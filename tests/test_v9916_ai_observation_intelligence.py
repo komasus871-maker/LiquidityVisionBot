@@ -165,3 +165,184 @@ async def test_intervened_ai_outcome_is_persisted_but_excluded_from_learning(obs
                            (decision["decision_id"],)).fetchone()
     assert row["intervention_type"] == "MANUAL_STOP" and row["evaluation_eligible"] == 0
     assert engine.counterfactual_report(telegram_id=11)["sample_size"] == 0
+
+
+def test_ai_startup_validation_uses_canonical_sqlite_backend(observation_db):
+    from services.ai_intelligence import AIObservationIntelligence
+
+    result = AIObservationIntelligence.startup_validate()
+
+    assert result["valid"] is True
+    assert result["missing_tables"] == []
+
+
+def test_ai_startup_validation_uses_canonical_postgresql_backend(monkeypatch):
+    from services import ai_intelligence
+
+    required = {
+        "ai_decisions", "ai_decision_intelligence", "ai_counterfactual_evaluations",
+        "ai_learning_snapshots", "ai_provider_request_events",
+    }
+
+    class Cursor:
+        def __init__(self, rows=(), rowcount=0):
+            self._rows = list(rows)
+            self.rowcount = rowcount
+
+        def fetchall(self):
+            return self._rows
+
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            self.queries.append(sql)
+            if "information_schema.tables" in sql:
+                return Cursor(({"table_name": name} for name in required))
+            return Cursor(rowcount=0)
+
+    connection = Connection()
+    monkeypatch.setattr(ai_intelligence, "database_backend", lambda: "postgresql")
+    monkeypatch.setattr(ai_intelligence, "connect", lambda: connection)
+
+    result = ai_intelligence.AIObservationIntelligence.startup_validate()
+
+    assert result["valid"] is True
+    assert result["missing_tables"] == []
+    assert any("information_schema.tables" in query for query in connection.queries)
+    assert all("sqlite_master" not in query for query in connection.queries)
+
+
+@pytest.mark.parametrize("backend", [None, "unknown"])
+def test_ai_startup_validation_fails_closed_for_unknown_backend(monkeypatch, backend):
+    from services import ai_intelligence
+
+    monkeypatch.setattr(ai_intelligence, "database_backend", lambda: backend)
+    monkeypatch.setattr(ai_intelligence, "connect",
+                        lambda: pytest.fail("database must not be queried for an unknown backend"))
+
+    result = ai_intelligence.AIObservationIntelligence.startup_validate()
+
+    assert result["valid"] is False
+    assert result["failure_reason"] == "DATABASE_BACKEND_UNDETERMINED"
+    assert result["ai_gated_execution_authority"] is False
+
+
+def test_ai_startup_validation_fails_closed_when_backend_detection_raises(monkeypatch):
+    from services import ai_intelligence
+
+    def unavailable():
+        raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(ai_intelligence, "database_backend", unavailable)
+    monkeypatch.setattr(ai_intelligence, "connect",
+                        lambda: pytest.fail("database must not be queried when detection fails"))
+
+    result = ai_intelligence.AIObservationIntelligence.startup_validate()
+
+    assert result["valid"] is False
+    assert result["failure_reason"] == "DATABASE_BACKEND_UNDETERMINED"
+    assert result["failure_detail"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_mode", ["polling", "webhook"])
+async def test_bot_startup_reaches_telegram_transport_after_ai_validation(
+        observation_db, monkeypatch, transport_mode):
+    import importlib
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("BOT_TOKEN", "123456:startup-regression-token")
+    bot_module = importlib.import_module("bot")
+    reached = {"startup": False, "polling": False, "webhook": False, "shutdown": False}
+
+    class TransportReached(Exception):
+        pass
+
+    class FakeBot:
+        def __init__(self, *args, **kwargs):
+            self.session = SimpleNamespace(close=self.close)
+
+        async def delete_webhook(self, **kwargs):
+            return True
+
+        async def close(self):
+            return None
+
+    class FakeDispatcher:
+        async def emit_startup(self, **kwargs):
+            reached["startup"] = True
+
+        async def start_polling(self, *args, **kwargs):
+            reached["polling"] = True
+
+        async def emit_shutdown(self, **kwargs):
+            reached["shutdown"] = True
+
+        def resolve_used_update_types(self):
+            return []
+
+    class Worker:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run_forever(self):
+            await asyncio.Event().wait()
+
+        def stop(self):
+            pass
+
+    class FakeWebhookServer:
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            reached["webhook"] = True
+            raise TransportReached
+
+        async def stop(self):
+            return None
+
+    class Migration:
+        def run(self, **kwargs):
+            return SimpleNamespace(as_dict=lambda: {})
+
+    class Memory:
+        def backfill(self, **kwargs):
+            return {"scanned": 0, "created": 0}
+
+    class ConfigValidator:
+        def validate(self):
+            return SimpleNamespace(valid=True, errors=[], warnings=[])
+
+    monkeypatch.setattr(bot_module, "create_tables", lambda: None)
+    monkeypatch.setattr(bot_module, "HistoricalExecutionMigrationService", Migration)
+    monkeypatch.setattr(bot_module, "TradeMemoryService", Memory)
+    monkeypatch.setattr(bot_module, "ping_database", lambda: {"latency_ms": 0})
+    monkeypatch.setattr(bot_module, "database_backend", lambda: "sqlite")
+    monkeypatch.setattr(bot_module, "persistent_database", lambda: False)
+    monkeypatch.setattr(bot_module, "AIConfigurationValidator", ConfigValidator)
+    monkeypatch.setattr(bot_module, "Bot", FakeBot)
+    monkeypatch.setattr(bot_module, "build_dispatcher", FakeDispatcher)
+    monkeypatch.setattr(bot_module, "deployment_mode", lambda: transport_mode)
+    monkeypatch.setattr(bot_module, "WebhookServer", FakeWebhookServer)
+    for name in ("SignalTracker", "ObservationMonitor", "WatchEngine", "CopyExecutionWorker",
+                 "AIShadowWorker", "ResearchWorker"):
+        monkeypatch.setattr(bot_module, name, Worker)
+
+    if transport_mode == "webhook":
+        with pytest.raises(TransportReached):
+            await bot_module.main()
+    else:
+        await bot_module.main()
+
+    assert reached["startup"] is True
+    assert reached[transport_mode] is True
+    assert reached["shutdown"] is True

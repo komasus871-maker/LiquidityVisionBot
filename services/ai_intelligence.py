@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from database.database import connect
+from database.database import connect, database_backend
 
 
 ACCEPT_ACTIONS = {"ACCEPT_REDUCED", "ACCEPT_STANDARD"}
@@ -552,9 +552,25 @@ class AIObservationIntelligence:
     def startup_validate() -> dict[str, Any]:
         required = {"ai_decisions", "ai_decision_intelligence", "ai_counterfactual_evaluations",
                     "ai_learning_snapshots", "ai_provider_request_events"}
+        try:
+            backend = database_backend()
+        except Exception as exc:
+            return {"valid": False, "missing_tables": sorted(required),
+                    "stale_request_claims_recovered": 0,
+                    "stale_certification_claims_recovered": 0,
+                    "ai_gated_execution_authority": False,
+                    "failure_reason": "DATABASE_BACKEND_UNDETERMINED",
+                    "failure_detail": type(exc).__name__}
+        if backend not in {"sqlite", "postgresql"}:
+            return {"valid": False, "missing_tables": sorted(required),
+                    "stale_request_claims_recovered": 0,
+                    "stale_certification_claims_recovered": 0,
+                    "ai_gated_execution_authority": False,
+                    "failure_reason": "DATABASE_BACKEND_UNDETERMINED",
+                    "failure_detail": str(backend)}
         now = _now()
         with connect() as conn:
-            if conn.backend == "sqlite":
+            if backend == "sqlite":
                 names = {row["name"] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             else:
