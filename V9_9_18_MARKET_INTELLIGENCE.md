@@ -36,7 +36,7 @@ Single-timeframe production analysis records the available timeframe honestly. `
 - Reversal Research: `PUMP_REVERSAL_*` and `DUMP_REVERSAL_*`, including explicit continuation risk. Re-entry is bounded, requires new evidence and never increases risk after a loss.
 - Signal Quality V2: family-level aggregation, contradiction penalties, critical caps, evidence diversity and separate data/direction/setup/entry/invalidation/target/execution confidence.
 - Ranking V3: persists Quality V2 with strongest advantages, weaknesses, contradictions and uncertainties. `/signal_rankings` explains the #1/#2 quality margin but never changes production priority or admission.
-- GPT red team: receives a bounded immutable subset and is asked to challenge evidence, timing, invalidation, target realism, context completeness and abstention. No reasoning trace is requested or persisted.
+- GPT red team: receives a bounded immutable subset and is asked to challenge evidence, timing, invalidation, target realism, context completeness and abstention. Supporting and contradictory evidence use disjoint stable IDs; explicit unique ranks cover supporting evidence only, strongest first, with a deterministic evidence-ID tie-break. No reasoning trace is requested or persisted.
 
 ## Database migration
 
@@ -70,7 +70,7 @@ Both tables and their indexes use backend-neutral SQL supported by SQLite and Po
 4. Use the Render values in `.env.example`/`render.yaml`. Public depth collection is bounded to eight relevant open symbols, five samples per symbol, fifty levels per side and a sixty-second cycle.
 5. Run the Telegram checks above.
 6. Confirm `/copy_stats`, `/positions`, `/live_readiness bingx` and existing AI diagnostics are unchanged.
-7. If AI observation is configured, run `/ai_certification run` again: the red-team prompt has a new immutable prompt identity, so an older prompt certification must not qualify it. Keep `AI_GATED` unavailable.
+7. If AI observation is configured, verify `AI_SCHEMA_VERSION=ai-decision-v3`, then deliberately run `/ai_certification run` once: the red-team prompt and evidence contract have a new immutable identity, so an older certification must not qualify it. The command is the only paid step and is never run automatically. Keep `AI_GATED` unavailable.
 
 PASS means new snapshots are present, old copy/accounting counts agree, Quality V2 says it is not a probability, no raw order book appears in the database, observer failures do not stop normal analysis, and no new execution authority exists.
 

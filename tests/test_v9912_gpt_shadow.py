@@ -48,10 +48,12 @@ def _valid(**overrides):
     payload = {
         "regime": "TREND", "direction": "LONG", "confidence": 70, "uncertainty": 30,
         "recommended_action": "ACCEPT_STANDARD", "recommended_risk_multiplier": 1,
-        "abstention": False, "supporting_factors": ["trend"], "conflicting_factors": ["volatility"],
+        "abstention": False,
+        "supporting_factors": [{"evidence_id": "trend", "statement": "trend", "strength": 90}],
+        "conflicting_factors": [{"evidence_id": "volatility", "statement": "volatility", "severity": "MEDIUM"}],
         "invalidation_conditions": ["structure break"], "explanation": "Structured evidence supports the setup.",
         "market_regimes": ["TREND"], "opportunity_quality": 75,
-        "evidence_ranking": ["trend"],
+        "evidence_ranking": [{"evidence_id": "trend", "rank": 1}],
         "uncertainty_explanation": "Volatility creates bounded uncertainty.",
         "symbol": None, "reference_price": None,
     }
@@ -85,7 +87,7 @@ def test_context_is_scoped_and_redacted(ai_db):
     (_valid(confidence=101), "SCHEMA_VALIDATION_FAILED"),
     (_valid(recommended_risk_multiplier=2), "SCHEMA_VALIDATION_FAILED"),
     (_valid(fabricated_indicator="yes"), "SCHEMA_VALIDATION_FAILED"),
-    (_valid(supporting_factors=[]), "ACTION_EVIDENCE_MISSING"),
+    (_valid(supporting_factors=[], evidence_ranking=[]), "ACTION_EVIDENCE_MISSING"),
 ])
 def test_strict_response_rejection(ai_db, payload, code):
     result = ai_db.AIResponseValidator().validate(payload, _context(ai_db))

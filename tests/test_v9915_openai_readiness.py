@@ -15,12 +15,12 @@ def _payload(**overrides):
         "regime": "CERTIFICATION", "direction": "NEUTRAL", "confidence": 25,
         "uncertainty": 75, "recommended_action": "ABSTAIN",
         "recommended_risk_multiplier": 0, "abstention": True,
-        "supporting_factors": ["bounded synthetic context"],
-        "conflicting_factors": ["not live market data"],
+        "supporting_factors": [{"evidence_id": "bounded_context", "statement": "bounded synthetic context", "strength": 100}],
+        "conflicting_factors": [{"evidence_id": "not_live_data", "statement": "not live market data", "severity": "CRITICAL"}],
         "invalidation_conditions": ["certification completes"],
         "explanation": "No trading action is appropriate for a certification fixture.",
         "market_regimes": ["CERTIFICATION"], "opportunity_quality": 0,
-        "evidence_ranking": ["bounded synthetic context"],
+        "evidence_ranking": [{"evidence_id": "bounded_context", "rank": 1}],
         "uncertainty_explanation": "Synthetic context is intentionally uncertain.",
         "symbol": None, "reference_price": None,
     }
@@ -305,6 +305,45 @@ async def test_certification_records_normalized_failure_stage(readiness_db, kind
     report = await AIProviderCertificationService(_CertificationProvider(kind)).certify()
     assert report["status"] == "FAILED"
     assert report["failure_code"] == code and report["validation_stage"] == stage
+
+
+@pytest.mark.asyncio
+async def test_certification_and_production_observation_share_semantic_validator(
+        readiness_db, monkeypatch):
+    import services.ai_trading as trading
+    from services.ai_operations import AIProviderCertificationService
+
+    seen_signal_ids = []
+    real_validate = trading.validate_provider_response
+
+    def observed_validate(response, context, validator=None):
+        seen_signal_ids.append(context.signal_id)
+        return real_validate(response, context, validator)
+
+    monkeypatch.setattr(trading, "validate_provider_response", observed_validate)
+    provider = _CertificationProvider()
+    certification = await AIProviderCertificationService(provider).certify()
+    trading.AITradingService._semaphore = None
+    observation = await trading.AITradingService(provider).analyze_signal(1501, telegram_id=7)
+
+    assert certification["status"] == "PASSED"
+    assert observation["validation_code"] == "VALID"
+    assert seen_signal_ids == [0, 1501]
+
+
+@pytest.mark.asyncio
+async def test_stale_schema_version_fails_before_any_paid_certification_request(
+        readiness_db, monkeypatch):
+    from services.ai_operations import AIProviderCertificationService
+
+    monkeypatch.setenv("AI_SCHEMA_VERSION", "ai-decision-v2")
+    provider = _CertificationProvider()
+    report = await AIProviderCertificationService(provider).certify()
+
+    assert report["status"] == "CONFIG_INVALID"
+    assert report["failure_code"] == "AI_SCHEMA_VERSION_UNSUPPORTED"
+    assert not report["checks"]["paid_provider_request"]
+    assert provider.calls == 0
 
 
 @pytest.mark.asyncio

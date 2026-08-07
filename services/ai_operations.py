@@ -121,7 +121,8 @@ def provider_identity(provider: Any) -> dict[str, Any]:
 
 class AIConfigurationValidator:
     def validate(self, provider: Any | None = None) -> AIConfigValidation:
-        from services.ai_trading import AIOutputMode, _env_bool, build_ai_provider, resolve_output_mode
+        from services.ai_trading import (AIOutputMode, CURRENT_SCHEMA_VERSION, _env_bool,
+                                         build_ai_provider, resolve_output_mode)
         provider = provider or build_ai_provider()
         if getattr(provider, "name", "disabled") == "disabled":
             return AIConfigValidation(True, (), ())
@@ -137,6 +138,9 @@ class AIConfigurationValidator:
             errors.append("PROVIDER_MODEL_MISSING")
         if not getattr(provider, "_api_key", ""):
             errors.append("PROVIDER_API_KEY_MISSING")
+        configured_schema_version = os.getenv("AI_SCHEMA_VERSION", CURRENT_SCHEMA_VERSION).strip()
+        if configured_schema_version != CURRENT_SCHEMA_VERSION:
+            errors.append("AI_SCHEMA_VERSION_UNSUPPORTED")
         if getattr(provider, "protocol", "") not in {"chat_completions", "responses"}:
             errors.append("PROVIDER_PROTOCOL_UNSUPPORTED")
         protocol = str(getattr(provider, "protocol", ""))

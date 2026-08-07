@@ -30,11 +30,13 @@ def _payload():
     return {
         "regime": "TREND", "direction": "NEUTRAL", "confidence": 50, "uncertainty": 50,
         "recommended_action": "ABSTAIN", "recommended_risk_multiplier": 0,
-        "abstention": True, "supporting_factors": ["certification"],
-        "conflicting_factors": ["synthetic context"], "invalidation_conditions": ["none"],
+        "abstention": True,
+        "supporting_factors": [{"evidence_id": "certification", "statement": "certification", "strength": 100}],
+        "conflicting_factors": [{"evidence_id": "synthetic_context", "statement": "synthetic context", "severity": "HIGH"}],
+        "invalidation_conditions": ["none"],
         "explanation": "Certification response only.",
         "market_regimes": ["CERTIFICATION"], "opportunity_quality": 0,
-        "evidence_ranking": ["certification"],
+        "evidence_ranking": [{"evidence_id": "certification", "rank": 1}],
         "uncertainty_explanation": "Synthetic context is not a market observation.",
         "symbol": None, "reference_price": None,
     }

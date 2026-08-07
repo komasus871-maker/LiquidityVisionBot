@@ -309,7 +309,7 @@ class AIProviderRequest:
     max_tokens: int
     requested_output_mode: AIOutputMode = AIOutputMode.AUTO
     effective_output_mode: AIOutputMode = AIOutputMode.DISABLED
-    schema_version: str = "ai-decision-v2"
+    schema_version: str = "ai-decision-v3"
     schema_checksum: str = ""
 
 
@@ -882,7 +882,8 @@ def build_ai_provider() -> AIProvider:
     return MisconfiguredAIProvider(protocol)
 
 
-SCHEMA_VERSION = os.getenv("AI_SCHEMA_VERSION", "ai-decision-v2").strip() or "ai-decision-v2"
+CURRENT_SCHEMA_VERSION = "ai-decision-v3"
+SCHEMA_VERSION = os.getenv("AI_SCHEMA_VERSION", CURRENT_SCHEMA_VERSION).strip() or CURRENT_SCHEMA_VERSION
 CONTEXT_VERSION = "ai-context-v2"
 REQUEST_FORMAT_VERSION = "ai-provider-request-v4"
 _REQUIRED_FIELDS = ["regime", "direction", "confidence", "uncertainty", "recommended_action",
@@ -908,26 +909,69 @@ RESPONSE_SCHEMA = {
         "recommended_action": {"type": "string", "enum": [item.value for item in AIAction]},
         "recommended_risk_multiplier": {"type": "number", "minimum": 0, "maximum": 1},
         "abstention": {"type": "boolean"},
-        "supporting_factors": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 20},
-        "conflicting_factors": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 20},
+        "supporting_factors": {
+            "type": "array", "maxItems": 20,
+            "description": "Observable supporting evidence. IDs are unique and disjoint from conflicting evidence.",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["evidence_id", "statement", "strength"],
+                "properties": {
+                    "evidence_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                                    "description": "Stable lower_snake_case evidence identifier."},
+                    "statement": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "strength": {"type": "integer", "minimum": 1, "maximum": 100,
+                                 "description": "Support strength; 100 is strongest."},
+                },
+            },
+        },
+        "conflicting_factors": {
+            "type": "array", "maxItems": 20,
+            "description": "Observable contradictory evidence, never supporting evidence.",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["evidence_id", "statement", "severity"],
+                "properties": {
+                    "evidence_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                                    "description": "Stable lower_snake_case evidence identifier."},
+                    "statement": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "severity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
+                },
+            },
+        },
         "invalidation_conditions": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 20},
         "explanation": {"type": "string", "minLength": 1, "maxLength": 1000},
         "market_regimes": {"type": "array", "items": {"type": "string", "enum": MARKET_REGIMES},
                            "minItems": 1, "maxItems": 4},
         "opportunity_quality": {"type": "number", "minimum": 0, "maximum": 100},
-        "evidence_ranking": {"type": "array", "items": {"type": "string", "maxLength": 240},
-                             "maxItems": 20},
+        "evidence_ranking": {
+            "type": "array", "maxItems": 20,
+            "description": "Complete ranking of supporting evidence only; rank 1 is strongest.",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["evidence_id", "rank"],
+                "properties": {
+                    "evidence_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "rank": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+            },
+        },
         "uncertainty_explanation": {"type": "string", "minLength": 1, "maxLength": 600},
         "symbol": {"type": ["string", "null"], "minLength": 1, "maxLength": 40},
         "reference_price": {"type": ["number", "null"], "exclusiveMinimum": 0},
     },
 }
 SCHEMA_CHECKSUM = checksum(RESPONSE_SCHEMA)
-PROMPT_VERSION = "ai-red-team-v11-structured"
+PROMPT_VERSION = "ai-red-team-v12-ranked-evidence"
 SYSTEM_PROMPT = """You are an advisory market-analysis component. Use only the supplied immutable snapshot.
 Return JSON matching the supplied schema. Disclose uncertainty and contradictions. Abstain when evidence is
 insufficient or stale. Never invent prices, indicators, tools, or external facts. Never issue an order command.
-Distinguish setup quality from deterministic portfolio admission. Rank concise observable evidence, classify all
+Distinguish setup quality from deterministic portfolio admission. Assign every evidence item a unique stable
+lower_snake_case evidence_id; IDs must be unique across both supporting_factors and conflicting_factors. Put only
+genuinely supporting evidence in supporting_factors and only contradictions in conflicting_factors. Rank every
+supporting item exactly once in evidence_ranking by evidence_id: rank 1 is strongest, ranks are unique and contiguous
+through the number of supporting items, and conflicting evidence must never be ranked. Order by descending strength;
+when strengths tie, order by evidence_id in ascending lexical order. Empty evidence_ranking is valid only when
+supporting_factors is empty. Array order itself has no meaning because explicit ranks control the ranking. Classify all
 applicable market regimes, explain uncertainty without chain-of-thought, and use supplied historical observations
 only as bounded analogies. Act primarily as a red-team analyst: identify the weakest evidence, false-signal paths,
 logical invalidation defects, unrealistic targets, late entries, incoherent market stories, missing context, and when
@@ -1007,6 +1051,12 @@ class AIResponseValidator:
         elif "integer" in accepted:
             if isinstance(value, bool) or not isinstance(value, int):
                 return False
+            if "minimum" in schema and value < schema["minimum"]:
+                return False
+            if "maximum" in schema and value > schema["maximum"]:
+                return False
+            if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
+                return False
         elif "boolean" in accepted:
             if not isinstance(value, bool):
                 return False
@@ -1043,9 +1093,9 @@ class AIResponseValidator:
                 truth = float(context.market.get("price") or 0)
                 if not math.isfinite(reference) or reference <= 0 or truth <= 0 or abs(reference - truth) > max(1e-9, truth * 0.000001):
                     return self.fallback("PRICE_MISMATCH", "MARKET_TRUTH_VALIDATION")
-            for key in ("supporting_factors", "conflicting_factors", "invalidation_conditions"):
-                if not isinstance(payload[key], list) or not all(isinstance(item, str) for item in payload[key]):
-                    return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
+            if (not isinstance(payload["invalidation_conditions"], list) or
+                    not all(isinstance(item, str) for item in payload["invalidation_conditions"])):
+                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             if not isinstance(payload["abstention"], bool):
                 return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             try:
@@ -1058,11 +1108,61 @@ class AIResponseValidator:
                 return self.fallback("STALE_CONTEXT", "MARKET_TRUTH_VALIDATION")
             if age < -timedelta(seconds=_env_int("AI_CONTEXT_MAX_FUTURE_SECONDS", 5, 0, 300)):
                 return self.fallback("FUTURE_CONTEXT", "MARKET_TRUTH_VALIDATION")
-            factors = tuple(str(x)[:240] for x in payload["supporting_factors"] if str(x).strip())
-            conflicts = tuple(str(x)[:240] for x in payload["conflicting_factors"] if str(x).strip())
+            supporting_items = payload["supporting_factors"]
+            conflicting_items = payload["conflicting_factors"]
+            ranking_items = payload["evidence_ranking"]
+            support_ids = [str(item["evidence_id"]) for item in supporting_items]
+            conflict_ids = [str(item["evidence_id"]) for item in conflicting_items]
+            ranked_ids = [str(item["evidence_id"]) for item in ranking_items]
+            ranks = [int(item["rank"]) for item in ranking_items]
+            all_ids = support_ids + conflict_ids
+            if any(evidence_id != evidence_id.strip() or
+                   not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", evidence_id) for evidence_id in all_ids):
+                return self.fallback("EVIDENCE_ID_INVALID", "SEMANTIC_VALIDATION")
+            if len(set(all_ids)) != len(all_ids):
+                return self.fallback("EVIDENCE_ID_DUPLICATE", "SEMANTIC_VALIDATION")
+            support_statements = [str(item["statement"]).strip() for item in supporting_items]
+            conflict_statements = [str(item["statement"]).strip() for item in conflicting_items]
+            if any(not statement for statement in support_statements + conflict_statements):
+                return self.fallback("EVIDENCE_STATEMENT_INVALID", "SEMANTIC_VALIDATION")
+            normalized_support = [statement.casefold() for statement in support_statements]
+            normalized_conflicts = [statement.casefold() for statement in conflict_statements]
+            if (len(set(normalized_support)) != len(normalized_support) or
+                    len(set(normalized_conflicts)) != len(normalized_conflicts)):
+                return self.fallback("EVIDENCE_STATEMENT_DUPLICATE", "SEMANTIC_VALIDATION")
+            if set(normalized_support) & set(normalized_conflicts):
+                return self.fallback("EVIDENCE_CLASSIFICATION_CONFLICT", "SEMANTIC_VALIDATION")
+            if len(set(ranks)) != len(ranks):
+                return self.fallback("EVIDENCE_RANK_DUPLICATE", "SEMANTIC_VALIDATION")
+            if len(set(ranked_ids)) != len(ranked_ids):
+                return self.fallback("EVIDENCE_RANK_REFERENCE_DUPLICATE", "SEMANTIC_VALIDATION")
+            support_by_id = {str(item["evidence_id"]): item for item in supporting_items}
+            conflict_id_set = set(conflict_ids)
+            if any(evidence_id in conflict_id_set for evidence_id in ranked_ids):
+                return self.fallback("EVIDENCE_RANK_CONFLICTING_REFERENCE", "SEMANTIC_VALIDATION")
+            if any(evidence_id not in support_by_id for evidence_id in ranked_ids):
+                return self.fallback("EVIDENCE_RANK_REFERENCE_MISSING", "SEMANTIC_VALIDATION")
+            if set(ranked_ids) != set(support_ids):
+                return self.fallback("EVIDENCE_RANKING_INCOMPLETE", "SEMANTIC_VALIDATION")
+            expected_ranks = set(range(1, len(supporting_items) + 1))
+            if set(ranks) != expected_ranks:
+                return self.fallback("EVIDENCE_RANK_OUT_OF_RANGE", "SEMANTIC_VALIDATION")
+            ranked_items = sorted(ranking_items, key=lambda item: int(item["rank"]))
+            expected_ids = [str(item["evidence_id"]) for item in sorted(
+                supporting_items,
+                key=lambda item: (-int(item["strength"]), str(item["evidence_id"])),
+            )]
+            if [str(item["evidence_id"]) for item in ranked_items] != expected_ids:
+                return self.fallback("EVIDENCE_RANK_ORDER_INVALID", "SEMANTIC_VALIDATION")
+            factors = tuple(str(support_by_id[evidence_id]["statement"]).strip()[:240]
+                            for evidence_id in sorted(support_by_id))
+            conflict_by_id = {str(item["evidence_id"]): item for item in conflicting_items}
+            conflicts = tuple(str(conflict_by_id[evidence_id]["statement"]).strip()[:240]
+                              for evidence_id in sorted(conflict_by_id))
             invalidations = tuple(str(x)[:240] for x in payload["invalidation_conditions"] if str(x).strip())
             regimes = tuple(dict.fromkeys(str(x).upper() for x in payload["market_regimes"]))
-            evidence_ranking = tuple(str(x)[:240] for x in payload["evidence_ranking"] if str(x).strip())
+            evidence_ranking = tuple(str(support_by_id[str(item["evidence_id"])]["statement"]).strip()[:240]
+                                     for item in ranked_items)
             opportunity_quality = float(payload["opportunity_quality"])
             if not regimes or any(value not in MARKET_REGIMES for value in regimes):
                 return self.fallback("REGIME_CLASSIFICATION_INVALID", "DOMAIN_VALIDATION")
@@ -1070,8 +1170,6 @@ class AIResponseValidator:
                 return self.fallback("OPPORTUNITY_QUALITY_INVALID", "DOMAIN_VALIDATION")
             if not factors and action in {AIAction.ACCEPT_REDUCED, AIAction.ACCEPT_STANDARD}:
                 return self.fallback("ACTION_EVIDENCE_MISSING", "SEMANTIC_VALIDATION")
-            if evidence_ranking and any(value not in factors for value in evidence_ranking):
-                return self.fallback("EVIDENCE_RANKING_INVALID", "SEMANTIC_VALIDATION")
             abstention = bool(payload["abstention"])
             if action is AIAction.ABSTAIN and not abstention:
                 return self.fallback("ABSTENTION_CONFLICT", "SEMANTIC_VALIDATION")

@@ -153,7 +153,7 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "provider": os.getenv("AI_PROVIDER", "disabled").strip().lower(),
             "provider_protocol": os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower(),
             "requested_output_mode": os.getenv("AI_STRUCTURED_OUTPUT_MODE", "auto").strip().lower(),
-            "schema_version": os.getenv("AI_SCHEMA_VERSION", "ai-decision-v1").strip(),
+            "schema_version": os.getenv("AI_SCHEMA_VERSION", "ai-decision-v3").strip(),
             "max_concurrency": max(1, int(os.getenv("AI_MAX_CONCURRENCY", "2"))),
             "capabilities": asdict(configured_capabilities(os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower())),
             "provider_state": ai_provider_rows,

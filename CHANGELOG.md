@@ -10,6 +10,7 @@
 - Added transparent Signal Quality V2 with family-level shrinkage and Signal Ranking V3; scores are not probabilities and do not modify production filters.
 - Added symmetric quality-threshold reporting for expectancy, missed winners, avoided losses and drawdown proxies, with minimum-sample warnings and no profitability claim.
 - Reframed GPT as a bounded red-team analyst using immutable market-intelligence facts while preserving no-chain-of-thought storage and zero execution authority.
+- Replaced ambiguous free-form AI evidence ranking with the strict `ai-decision-v3` ID/rank contract: complete unique supporting-only ranks, deterministic strength ordering and evidence-ID tie-breaking, contradiction separation, shared certification/observation validation, and precise fail-closed semantic codes.
 - Added additive, repeatable SQLite/PostgreSQL schema for immutable intelligence snapshots and bounded microstructure aggregates, plus Telegram inspection commands and concise `/trade` quality context.
 - Preserved automatic PAPER copy, unified accounting, LIVE gates, and `AI_GATED=AI_OFF`; no economic authority was added.
 
