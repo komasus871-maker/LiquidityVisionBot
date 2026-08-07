@@ -22,10 +22,11 @@ class AlphaMetrics:
 
 
 class AlphaResearchEngine:
-    """Builds leakage-safe research rows and performance summaries.
+    """Compatibility exporter and performance summaries.
 
-    It consumes completed signal rows. Features are read from the immutable
-    snapshot saved before activation; outcomes come only from lifecycle fields.
+    Persisted v9.9.16 research rows are leakage-safe. Raw historical signal
+    dictionaries remain supported for old callers but are explicitly labeled
+    ``UNVERIFIED_LEGACY_ROW`` and must not be presented as a backtest.
     """
 
     CLOSED_RESULTS = {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "MANUAL_STOP"}
@@ -40,6 +41,33 @@ class AlphaResearchEngine:
             return default
 
     def feature_row(self, signal: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._json(signal.get("snapshot_json"), {})
+        outcome = self._json(signal.get("outcome_json"), {})
+        if isinstance(snapshot, dict) and snapshot:
+            features = snapshot.get("features") if isinstance(snapshot.get("features"), dict) else {}
+            regimes = snapshot.get("regimes") if isinstance(snapshot.get("regimes"), list) else []
+            take_profits = list(snapshot.get("take_profits") or ())[:3]
+            take_profits += [None] * (3 - len(take_profits))
+            return {
+                "signal_id": snapshot.get("signal_id"), "symbol": snapshot.get("symbol"),
+                "timeframe": snapshot.get("timeframe"), "side": snapshot.get("side"),
+                "setup_key": snapshot.get("setup_family"),
+                "regime": snapshot.get("primary_regime") or (regimes[0] if regimes else "UNKNOWN"),
+                "direction_score": features.get("direction_score"),
+                "entry_quality": features.get("entry_quality"), "risk_quality": features.get("risk_quality"),
+                "readiness": features.get("execution_readiness"), "decision_action": features.get("decision_action"),
+                "trade_quality_stars": features.get("trade_quality_stars"),
+                "entry": snapshot.get("entry"), "stop": snapshot.get("stop"),
+                "tp1": take_profits[0], "tp2": take_profits[1], "tp3": take_profits[2],
+                "rr": snapshot.get("rr"), "result": outcome.get("signal_result"),
+                "realized_r": float(outcome.get("signal_r") or 0.0),
+                "mfe_pct": float(outcome.get("mfe_pct") or 0.0),
+                "mae_pct": float(outcome.get("mae_pct") or 0.0),
+                "created_at": snapshot.get("decision_at"), "activated_at": outcome.get("activated_at"),
+                "closed_at": outcome.get("closed_at"), "data_integrity_valid": True,
+                "capture_quality": signal.get("capture_quality") or "UNKNOWN",
+                "snapshot_safety": "IMMUTABLE_DECISION_SNAPSHOT",
+            }
         features = self._json(signal.get("features_json"), {})
         regime = features.get("market_regime") or features.get("regime") or {}
         if isinstance(regime, dict):
@@ -71,6 +99,8 @@ class AlphaResearchEngine:
             "activated_at": signal.get("activated_at"),
             "closed_at": signal.get("closed_at"),
             "data_integrity_valid": (signal.get("result") != "DATA_INTEGRITY_REJECTED"),
+            "capture_quality": "UNVERIFIED_LEGACY_ROW",
+            "snapshot_safety": "NOT_VERIFIED_FUTURE_SAFE",
         }
 
     def dataset(self, signals: Iterable[dict[str, Any]], *, usable_only: bool = True) -> list[dict[str, Any]]:

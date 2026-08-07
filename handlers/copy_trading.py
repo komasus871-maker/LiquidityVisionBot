@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from html import escape
 
 from aiogram import Router
@@ -20,109 +22,187 @@ outcome_service = CopyGuardrailOutcomeService()
 similarity_service = CopySimilarityService()
 
 
-def _status_text(profile: dict, stats: dict) -> str:
-    enabled = "🟢 ENABLED" if profile.get("enabled") else "🔴 DISABLED"
-    return f"""🤖 <b>Liquidity Vision Copy Execution</b>
+def _status_text(profile: dict, stats: dict, *, include_diagnostics: bool = True) -> str:
+    def values(name: str) -> str:
+        try:
+            parsed = json.loads(profile.get(name) or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = []
+        return ", ".join(escape(str(item)) for item in parsed) or "all"
 
-Status: {enabled}
-Mode: 🧪 <b>PAPER</b>
-Paper balance: <b>${float(profile['paper_balance']):,.2f}</b>
-Sizing: <b>{str(profile.get('sizing_mode') or 'RISK_PERCENT')}</b>
-Risk per trade: <b>{float(profile['risk_pct']):.2f}%</b>
-Fixed size: <b>${float(profile.get('fixed_usdt') or 0):,.2f}</b>
-Leverage: <b>{int(profile.get('leverage') or 1)}x</b>
-Auto Copy: <b>{'ON' if profile.get('auto_copy') else 'OFF'}</b>
-Max positions: <b>{int(profile['max_positions'])}</b>
-Max portfolio heat: <b>{float(profile['max_heat_r']):.2f}R</b>
-Daily loss limit: <b>{float(profile['daily_loss_pct']):.2f}%</b>
-Max slippage: <b>{float(profile['max_slippage_pct']):.2f}%</b>
-Min confidence: <b>{float(profile.get('min_confidence') or 55):.0f}%</b>
-Max notional: <b>{float(profile.get('max_notional_pct') or 35):.0f}% of equity</b>
-Symbol cooldown: <b>{int(profile.get('symbol_cooldown_min') or 30)} min</b>
+    global_on = os.getenv("COPY_EXECUTION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    active = bool(profile.get("enabled") and profile.get("auto_copy") and global_on)
+    sizing = str(profile.get("sizing_mode") or "RISK_PERCENT")
+    sizing_value = (
+        f"${float(profile.get('fixed_usdt') or 0):,.2f}" if sizing == "FIXED_USDT" else
+        f"{float(profile.get('equity_pct') or 0):.2f}% equity" if sizing == "EQUITY_PERCENT" else
+        f"{float(profile.get('copy_multiplier') or 0):.2f}x source" if sizing == "COPY_MULTIPLIER" else
+        f"{float(profile.get('risk_pct') or 0):.2f}% risk"
+    )
+    expectancy = stats.get("strategy_expectancy_r")
+    profit_factor = stats.get("strategy_profit_factor")
+    diagnostics = ""
+    if include_diagnostics:
+        diagnostics = f"""
 
-📊 <b>Paper execution</b>
-Open (legacy stats): {int(stats.get('open_count') or 0)}
+<b>Operator reconciliation diagnostics</b>
 Legacy confirmed open: {int(stats.get('legacy_confirmed_open') or stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
 Confirmed legacy active: {int(stats.get('legacy_confirmed_open') or stats.get('reconciliation_confirmed_active_legacy_count') or 0)}
 Unified open: {int(stats.get('unified_open_positions') or stats.get('reconciliation_unified_open_count') or 0)}
 Hybrid open: {int(stats.get('hybrid_open_positions') or 0)}
-Accounting authority: <b>{stats.get('accounting_authority') or 'LEGACY'}</b>
-Admission mode: <b>{stats.get('accounting_source_mode') or 'SHADOW'}</b>
-Unified symbols: {', '.join(stats.get('unified_symbols') or ()) or '—'}
-Unified gross exposure: ${float(stats.get('unified_gross_notional') or 0):,.2f}
-Unified net exposure: ${float(stats.get('unified_net_notional') or 0):+,.2f}
-Unified unrealized PnL: ${float(stats.get('unified_unrealized_pnl') or 0):+,.2f}
-Unified commissions: ${float(stats.get('unified_commission') or 0):,.2f}
-Unified realized PnL: ${float(stats.get('unified_realized_pnl') or 0):+,.2f}
-Unified net equity: ${float(stats.get('unified_equity') or profile['paper_balance']):,.2f}
-Unified daily result: ${float(stats.get('unified_daily_pnl') or 0):+,.2f}
-Unified confirmed heat: {float(stats.get('unified_confirmed_heat_r') or 0):.2f}R
-Unified unresolved risk: {int(stats.get('unified_unresolved_risk_positions') or 0)}
-Risk classes C/P/M/I: {int(stats.get('unified_risk_complete') or 0)}/{int(stats.get('unified_risk_partial') or 0)}/{int(stats.get('unified_risk_missing') or 0)}/{int(stats.get('unified_risk_invalid') or 0)}
-Cooldown source: <b>{stats.get('cooldown_source') or 'LEGACY_SHADOW'}</b>
-Parity: <b>{stats.get('parity_status') or 'UNKNOWN'}</b>
-Hybrid confirmed heat: {float(stats.get('hybrid_confirmed_heat_r') or stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
-<i>Legacy values are shadow/rollback diagnostics in v9.9.8.</i>
+Accounting authority: <b>{escape(str(stats.get('accounting_authority') or 'LEGACY'))}</b>
+Unified symbols: {escape(', '.join(stats.get('unified_symbols') or ()) or 'none')}
 Unresolved legacy: {int(stats.get('reconciliation_unresolved_legacy_count') or 0)} ({float(stats.get('reconciliation_unresolved_heat_r') or 0):.2f}R)
-Confirmed heat: {float(stats.get('reconciliation_confirmed_active_heat_r') or 0):.2f}R
-Heat source: <b>{stats.get('reconciliation_heat_source') or 'UNKNOWN'}</b>
-Stale rows closed: {int(stats.get('reconciliation_stale_legacy_closed_count') or 0)}
-Lifecycle mismatches: {int(stats.get('reconciliation_lifecycle_mismatch_count') or 0)}
-Portfolio state: <b>{stats.get('reconciliation_status') or 'UNKNOWN'}</b>
+Heat source: <b>{escape(str(stats.get('reconciliation_heat_source') or 'UNKNOWN'))}</b>
+Portfolio state: <b>{escape(str(stats.get('reconciliation_status') or 'UNKNOWN'))}</b>
 Mismatch: <b>{'YES' if stats.get('reconciliation_mismatch_detected') else 'NO'}</b>
-Closed: {int(stats.get('closed_count') or 0)}
-Rejected: {int(stats.get('rejected_count') or 0)}
-Top rejection: <b>{stats.get("top_rejection_code") or "—"}</b> ({int(stats.get("top_rejection_count") or 0)})
-Equity: <b>${float(stats.get('equity') or profile['paper_balance']):,.2f}</b>
-Today: <b>${float(stats.get('daily_pnl') or 0):+,.2f}</b>
-Total PnL: <b>${float(stats.get('realized_pnl') or 0):+,.2f}</b>
-Total realized: {float(stats.get('realized_r') or 0):+.2f}R
-Average: {float(stats.get('avg_r') or 0):+.2f}R
-Win rate: {float(stats.get('win_rate') or 0):.1f}%
+<i>Legacy values are shadow/rollback diagnostics.</i>"""
+    return f"""📋 <b>Copy Trading</b>
 
-<b>Commands</b>
-<code>/copy_enable</code> — start paper copying
-<code>/copy_disable</code> — pause new entries
-<code>/copy_risk 0.5</code> — risk per trade
-<code>/copy_size risk</code> or <code>/copy_size fixed 100</code> — sizing mode
-<code>/copy_leverage 3</code> — execution leverage
-<code>/copy_auto on</code> — arm automatic execution preference
-<code>/copy_balance 10000</code> — paper balance
-<code>/copy_limits 3 2.5 2</code> — positions, heat R, daily loss %
-<code>/copy_guard 55 35 30 0.25</code> — confidence, notional %, cooldown min, slippage %
-<code>/copy_stats</code> — execution statistics
-<code>/copy_plan</code> — latest execution plan
-<code>/copy_queue</code> — persistent execution queue
-<code>/orders</code> — unified paper orders
-<code>/fills</code> — real paper fills
-<code>/positions</code> — unified paper positions
-<code>/copy_training</code> — adaptive learning report
-<code>/copy_rejections</code> — execution rejection intelligence
-<code>/copy_guardrails</code> — rejected-signal outcome report
-<code>/copy_similar [signal_id]</code> — explainable similar-trade intelligence
-<code>/genome [signal_id]</code> — inspect Strategy Genome
-<code>/panic</code> — close paper positions and disable execution
+Automatic PAPER copy: <b>{'ACTIVE' if active else 'PAUSED'}</b>
+Profile: <b>{escape(str(profile.get('profile_name') or 'STANDARD'))}</b>
+Sizing: <b>{escape(sizing)} · {sizing_value}</b>
+Paper balance / equity: <b>${float(profile['paper_balance']):,.2f} / ${float(stats.get('equity') or profile['paper_balance']):,.2f}</b>
 
-🧭 v9.9.3 adds a deterministic Execution Planning Layer for the future automatic executor.
-🔌 Demo execution remains available through the existing exchange flow.
-🔒 LIVE execution remains fail-closed."""
+<b>Limits</b>
+Positions / heat: <b>{int(profile['max_positions'])} / {float(profile['max_heat_r']):.2f}R</b>
+Daily loss / slippage: <b>{float(profile['daily_loss_pct']):.2f}% / {float(profile['max_slippage_pct']):.2f}%</b>
+Order / portfolio exposure: <b>{float(profile.get('max_notional_pct') or 0):.0f}% / {float(profile.get('max_portfolio_exposure_pct') or 0):.0f}%</b>
+Confidence / cooldown: <b>{float(profile.get('min_confidence') or 0):.0f}% / {int(profile.get('symbol_cooldown_min') or 0)} min</b>
+
+<b>Filters</b>
+Symbols: <b>{escape(str(profile.get('symbol_policy') or 'ALL'))}</b> · allow {values('symbol_whitelist_json')} · block {values('symbol_blacklist_json')}
+Timeframes: <b>{values('timeframe_filters_json')}</b>
+Setups: <b>{values('setup_filters_json')}</b>
+Directions: <b>{values('direction_filters_json')}</b>
+Experimental: <b>{'ON' if profile.get('allow_experimental') else 'OFF'}</b>
+
+<b>Current PAPER portfolio</b>
+Open positions: <b>{int(stats.get('unified_open_positions') or 0)}</b>
+Gross exposure / heat: <b>${float(stats.get('unified_gross_notional') or 0):,.2f} / {float(stats.get('unified_confirmed_heat_r') or 0):.2f}R</b>
+Today / net equity: <b>${float(stats.get('daily_pnl') or 0):+,.2f} / ${float(stats.get('unified_equity') or profile['paper_balance']):,.2f}</b>
+
+<b>Performance separation</b>
+Eligible / accepted / rejected: <b>{int(stats.get('policy_eligible') or 0)} / {int(stats.get('policy_accepted') or 0)} / {int(stats.get('policy_rejected') or 0)}</b>
+Pure strategy W/L/BE: <b>{int(stats.get('strategy_wins') or 0)}/{int(stats.get('strategy_losses') or 0)}/{int(stats.get('strategy_breakeven') or 0)}</b>
+Expectancy / profit factor: <b>{'insufficient data' if expectancy is None else f'{float(expectancy):+.2f}R'} / {'insufficient data' if profit_factor is None else f'{float(profit_factor):.2f}'}</b>
+Actual net PnL / fees: <b>${float(stats.get('actual_net_pnl') or 0):+,.2f} / ${float(stats.get('actual_fees') or 0):,.2f}</b>
+Manual or panic closes: <b>{int(stats.get('manual_intervention_count') or 0)}</b> (kept out of pure strategy statistics)
+
+<code>/copy_profile</code> · <code>/copy_size</code> · <code>/copy_symbols</code> · <code>/copy_filters</code>
+<code>/copy_queue</code> · <code>/orders</code> · <code>/fills</code> · <code>/positions</code>
+<code>/copy_enable</code> starts automatic PAPER copy · <code>/copy_disable</code> pauses entries · <code>/panic</code> closes only your PAPER positions.
+
+LIVE remains fail-closed unless separately certified; AI has no execution authority.{diagnostics}"""
 
 
 @router.message(Command("copy"))
 async def copy_status(message: Message):
     profile = service.ensure_profile(message.from_user.id)
-    await message.answer(_status_text(profile, service.profile_stats(message.from_user.id)), parse_mode="HTML")
+    await message.answer(
+        _status_text(profile, service.profile_stats(message.from_user.id), include_diagnostics=False),
+        parse_mode="HTML",
+    )
+
+
+def _control_values(parts: list[str]) -> list[str]:
+    return [value.strip() for chunk in parts for value in chunk.split(",") if value.strip()]
+
+
+@router.message(Command("copy_profile"))
+async def copy_profile(message: Message):
+    parts = (message.text or "").split()
+    if len(parts) == 1:
+        profile = service.ensure_profile(message.from_user.id)
+        await message.answer(
+            f"Current copy profile: <b>{escape(str(profile.get('profile_name') or 'STANDARD'))}</b>\n"
+            "Use <code>/copy_profile conservative|standard|aggressive|custom</code>. "
+            "Any limit or filter override automatically marks the profile CUSTOM.", parse_mode="HTML")
+        return
+    try:
+        profile = service.select_profile(message.from_user.id, parts[1])
+    except ValueError as exc:
+        await message.answer(escape(str(exc)), parse_mode="HTML")
+        return
+    await message.answer(
+        f"✅ Profile set to <b>{escape(str(profile['profile_name']))}</b>. "
+        "This changes PAPER risk defaults only; it does not enable copying.", parse_mode="HTML")
+
+
+@router.message(Command("copy_symbols"))
+async def copy_symbols(message: Message):
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer(
+            "Use <code>/copy_symbols all</code>, <code>/copy_symbols whitelist BTCUSDT,ETHUSDT</code>, "
+            "<code>/copy_symbols blacklist DOGEUSDT</code>, or <code>/copy_symbols clear</code>.",
+            parse_mode="HTML")
+        return
+    action = parts[1].lower()
+    values = _control_values(parts[2:])
+    try:
+        if action == "all":
+            profile = service.update_profile(message.from_user.id, symbol_policy="ALL")
+        elif action == "whitelist" and values:
+            profile = service.update_profile(message.from_user.id, symbol_policy="WHITELIST",
+                                             symbol_whitelist_json=values)
+        elif action == "blacklist" and values:
+            profile = service.update_profile(message.from_user.id, symbol_blacklist_json=values)
+        elif action == "clear":
+            profile = service.update_profile(message.from_user.id, symbol_policy="ALL",
+                                             symbol_whitelist_json=[], symbol_blacklist_json=[])
+        else:
+            raise ValueError("Symbol command requires a supported action and at least one symbol")
+    except ValueError as exc:
+        await message.answer(escape(str(exc)), parse_mode="HTML")
+        return
+    await message.answer(
+        f"✅ Symbol controls updated. Policy: <b>{escape(str(profile['symbol_policy']))}</b>. "
+        "Symbols are canonicalized, so BTC-USDT and BTCUSDT cannot bypass the same rule.", parse_mode="HTML")
+
+
+@router.message(Command("copy_filters"))
+async def copy_filters(message: Message):
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer(
+            "Use <code>/copy_filters timeframe 5m,15m</code>, <code>/copy_filters setup breakout</code>, "
+            "<code>/copy_filters direction long,short</code>, <code>/copy_filters experimental on|off</code>, "
+            "or <code>/copy_filters clear</code>.", parse_mode="HTML")
+        return
+    action, values = parts[1].lower(), _control_values(parts[2:])
+    try:
+        if action == "clear":
+            profile = service.update_profile(message.from_user.id, timeframe_filters_json=[],
+                setup_filters_json=[], direction_filters_json=[], allow_experimental=0)
+        elif action == "timeframe" and values:
+            profile = service.update_profile(message.from_user.id, timeframe_filters_json=values)
+        elif action == "setup" and values:
+            profile = service.update_profile(message.from_user.id, setup_filters_json=values)
+        elif action == "direction" and values:
+            profile = service.update_profile(message.from_user.id, direction_filters_json=values)
+        elif action == "experimental" and len(values) == 1 and values[0].lower() in {"on", "off"}:
+            profile = service.update_profile(message.from_user.id,
+                                             allow_experimental=int(values[0].lower() == "on"))
+        else:
+            raise ValueError("Invalid copy filter command")
+    except ValueError as exc:
+        await message.answer(escape(str(exc)), parse_mode="HTML")
+        return
+    await message.answer(
+        f"✅ Copy filters updated under <b>{escape(str(profile['profile_name']))}</b>. "
+        "Filtered signals cannot enter the execution queue.", parse_mode="HTML")
 
 
 @router.message(Command("copy_enable"))
 async def copy_enable(message: Message):
-    profile = service.update_profile(message.from_user.id, enabled=1)
-    await message.answer("🟢 <b>Paper copy execution enabled.</b> New ACTIVE signals will be validated and copied with your risk profile.", parse_mode="HTML")
+    service.update_profile(message.from_user.id, enabled=1, auto_copy=1)
+    await message.answer("🟢 <b>Automatic PAPER copy is active.</b> New eligible signals now pass through your filters, risk limits, durable queue, order, fill, and position lifecycle.", parse_mode="HTML")
 
 
 @router.message(Command("copy_disable"))
 async def copy_disable(message: Message):
-    service.update_profile(message.from_user.id, enabled=0)
+    service.update_profile(message.from_user.id, enabled=0, auto_copy=0)
     await message.answer("⏸ <b>Copy execution paused.</b> Existing paper positions remain tracked.", parse_mode="HTML")
 
 
@@ -153,9 +233,21 @@ async def copy_size(message: Message):
             profile = service.update_profile(message.from_user.id, sizing_mode="FIXED_USDT", fixed_usdt=value)
             await message.answer(f"✅ Sizing mode set to <b>Fixed USDT</b>: <b>${float(profile['fixed_usdt']):,.2f}</b>.", parse_mode="HTML")
             return
+        if mode == "equity":
+            value = float(parts[2].replace(",", "."))
+            profile = service.update_profile(message.from_user.id, sizing_mode="EQUITY_PERCENT",
+                                             equity_pct=value)
+            await message.answer(f"✅ Sizing mode set to <b>{float(profile['equity_pct']):.2f}% of equity</b>.", parse_mode="HTML")
+            return
+        if mode == "multiplier":
+            value = float(parts[2].replace(",", "."))
+            profile = service.update_profile(message.from_user.id, sizing_mode="COPY_MULTIPLIER",
+                                             copy_multiplier=value)
+            await message.answer(f"✅ Proportional sizing set to <b>{float(profile['copy_multiplier']):.2f}x</b>. Signals without trusted source size fail closed.", parse_mode="HTML")
+            return
         raise ValueError
     except (IndexError, ValueError):
-        await message.answer("Usage: <code>/copy_size risk</code> or <code>/copy_size fixed 100</code>", parse_mode="HTML")
+        await message.answer("Use <code>/copy_size risk</code>, <code>/copy_size fixed 100</code>, <code>/copy_size equity 10</code>, or <code>/copy_size multiplier 0.5</code>.", parse_mode="HTML")
 
 
 @router.message(Command("copy_leverage"))
@@ -179,9 +271,9 @@ async def copy_auto(message: Message):
         await message.answer("Usage: <code>/copy_auto on</code> or <code>/copy_auto off</code>", parse_mode="HTML")
         return
     enabled = int(raw == "on")
-    service.update_profile(message.from_user.id, auto_copy=enabled)
-    note = "armed for the future automatic executor" if enabled else "disabled"
-    await message.answer(f"✅ Auto Copy preference is <b>{raw.upper()}</b> ({note}). LIVE execution remains fail-closed.", parse_mode="HTML")
+    service.update_profile(message.from_user.id, auto_copy=enabled, enabled=enabled)
+    note = "automatic PAPER execution is active" if enabled else "new PAPER entries are paused"
+    await message.answer(f"✅ Auto Copy is <b>{raw.upper()}</b>: {note}. LIVE remains fail-closed.", parse_mode="HTML")
 
 
 @router.message(Command("copy_balance"))
@@ -202,19 +294,41 @@ async def copy_limits(message: Message):
     try:
         parts = (message.text or "").split()
         positions, heat, daily = int(parts[1]), float(parts[2]), float(parts[3])
-        if not (1 <= positions <= 20 and 1 <= heat <= 20 and 0.5 <= daily <= 25):
+        exposure = float(parts[4]) if len(parts) > 4 else None
+        if not (1 <= positions <= 20 and .25 <= heat <= 20 and 0.1 <= daily <= 25 and
+                (exposure is None or 1 <= exposure <= 500)):
             raise ValueError
     except (IndexError, ValueError):
-        await message.answer("Usage: <code>/copy_limits 3 2.5 2</code>\n(max positions, max heat R, daily loss %)", parse_mode="HTML")
+        await message.answer("Usage: <code>/copy_limits 3 2.5 2 70</code>\n(max positions, heat R, daily loss %, optional portfolio exposure %)", parse_mode="HTML")
         return
-    service.update_profile(message.from_user.id, max_positions=positions, max_heat_r=heat, daily_loss_pct=daily)
+    updates = {"max_positions": positions, "max_heat_r": heat, "daily_loss_pct": daily}
+    if exposure is not None:
+        updates["max_portfolio_exposure_pct"] = exposure
+    service.update_profile(message.from_user.id, **updates)
     await message.answer("✅ Copy risk limits updated.", parse_mode="HTML")
 
 
 @router.message(Command("copy_stats"))
 async def copy_stats(message: Message):
     profile = service.ensure_profile(message.from_user.id)
-    await message.answer(_status_text(profile, service.profile_stats(message.from_user.id)), parse_mode="HTML")
+    await message.answer(
+        _status_text(profile, service.profile_stats(message.from_user.id), include_diagnostics=False),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("copy_diagnostics"))
+async def copy_diagnostics(message: Message):
+    raw = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", ""))
+    admins = {int(value.strip()) for value in raw.replace(";", ",").split(",") if value.strip().isdigit()}
+    if not message.from_user or message.from_user.id not in admins:
+        await message.answer("Operator diagnostics are restricted.")
+        return
+    profile = service.ensure_profile(message.from_user.id)
+    await message.answer(
+        _status_text(profile, service.profile_stats(message.from_user.id), include_diagnostics=True),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("panic"))

@@ -19,7 +19,7 @@ def _request(mode=AIOutputMode.STRICT_JSON_SCHEMA):
 
 
 def test_release_and_schema_checksum_are_stable():
-    assert APP_VERSION == "9.9.15" and RELEASE_NAME == "OpenAI Provider Certification Readiness"
+    assert APP_VERSION == "9.9.16" and RELEASE_NAME == "Production Copy Trading & Research Foundation"
     assert SCHEMA_CHECKSUM == checksum(RESPONSE_SCHEMA)
     assert RESPONSE_SCHEMA["additionalProperties"] is False
     assert set(RESPONSE_SCHEMA["required"]) <= set(RESPONSE_SCHEMA["properties"])

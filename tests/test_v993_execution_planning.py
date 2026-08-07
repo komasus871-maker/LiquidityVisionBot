@@ -30,8 +30,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.15"
-    assert RELEASE_NAME == "OpenAI Provider Certification Readiness"
+    assert APP_VERSION == "9.9.16"
+    assert RELEASE_NAME == "Production Copy Trading & Research Foundation"
 
 
 def test_planner_builds_complete_approved_plan_without_side_effects() -> None:

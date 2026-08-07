@@ -18,9 +18,9 @@ from services.execution_validator import ExecutionValidator
 class CopyExecutionPlanner:
     """Builds a deterministic, side-effect-free execution plan.
 
-    The planner is the contract between signal discovery and any future paper/demo/live
-    executor. It never places orders and therefore remains safe to call for previews,
-    queue preparation, auditing, and idempotency checks.
+    The planner is the contract between signal discovery and the configured execution
+    engine. It never places orders and therefore remains safe to call for previews,
+    durable queue preparation, auditing, and idempotency checks.
     """
 
     def __init__(self, validator: ExecutionValidator | None = None) -> None:
@@ -119,6 +119,9 @@ class CopyExecutionPlanner:
     def _profile_snapshot(profile: RiskProfile) -> dict[str, Any]:
         snapshot = asdict(profile)
         snapshot["sizing_mode"] = profile.sizing_mode.value
+        for key in ("symbol_whitelist", "symbol_blacklist", "timeframe_filters",
+                    "setup_filters", "direction_filters"):
+            snapshot[key] = list(snapshot.get(key) or ())
         return snapshot
 
     @staticmethod

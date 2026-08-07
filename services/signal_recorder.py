@@ -1,4 +1,5 @@
 from typing import Any
+import logging
 import re
 from database.signal_history import SignalHistory
 from services.premium import PremiumService
@@ -16,6 +17,15 @@ class SignalRecorder:
         self.observations = ObservationHistory()
         self.candidates = CandidateHistory()
         self.integrity = DataIntegrityEngine()
+
+    @staticmethod
+    def _capture_research(signal_id: int) -> None:
+        """Capture decision-time research without ever blocking signal production."""
+        try:
+            from services.research_engine import ResearchEngine
+            ResearchEngine().capture_signal(signal_id)
+        except Exception:
+            logging.exception("research_decision_snapshot_failed signal_id=%s", signal_id)
 
     @staticmethod
     def _setup_key(analysis: dict[str, Any]) -> str:
@@ -138,6 +148,7 @@ class SignalRecorder:
                 signal_id = self.history.refresh_duplicate(int(live_trade["id"]), payload)
                 self.observations.promote(observation_id, signal_id)
                 self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
+                self._capture_research(signal_id)
                 return signal_id
             if owner_telegram_id is None:
                 return None
@@ -178,4 +189,5 @@ class SignalRecorder:
         self.observations.promote(observation_id, signal_id)
         if owner_telegram_id is not None:
             self.candidates.resolve_market(owner_telegram_id, payload["symbol"], timeframe, promoted_signal_id=signal_id)
+        self._capture_research(signal_id)
         return signal_id

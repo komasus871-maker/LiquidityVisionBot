@@ -9,9 +9,12 @@ from database.database import connect, create_tables
 from services.alpha_research import AlphaResearchEngine
 
 
-def load_signals() -> list[dict]:
+def load_research_rows() -> list[dict]:
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM signals ORDER BY id ASC").fetchall()
+        rows = conn.execute("""SELECT r.*,o.outcome_json FROM research_signal_snapshots r
+            LEFT JOIN research_outcomes o ON o.snapshot_id=r.snapshot_id AND o.id=(
+                SELECT MAX(o2.id) FROM research_outcomes o2 WHERE o2.snapshot_id=r.snapshot_id)
+            ORDER BY r.id ASC""").fetchall()
     return [dict(row) for row in rows]
 
 
@@ -24,7 +27,7 @@ def main() -> int:
 
     create_tables()
     engine = AlphaResearchEngine()
-    rows = engine.dataset(load_signals(), usable_only=not args.include_rejected)
+    rows = engine.dataset(load_research_rows(), usable_only=not args.include_rejected)
     output = Path(args.output)
     if args.format == "jsonl":
         engine.export_jsonl(rows, output)
@@ -34,6 +37,8 @@ def main() -> int:
     summary = {
         "output": str(output),
         "rows": len(rows),
+        "source": "IMMUTABLE_RESEARCH_SNAPSHOTS",
+        "warning": "Descriptive associations are not causal evidence or a profitability guarantee.",
         "overall": asdict(engine.metrics(rows)),
         "by_timeframe": {k: asdict(v) for k, v in engine.grouped_metrics(rows, "timeframe").items()},
         "by_regime": {k: asdict(v) for k, v in engine.grouped_metrics(rows, "regime").items()},

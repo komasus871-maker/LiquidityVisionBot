@@ -19,6 +19,9 @@ def _payload(**overrides):
         "conflicting_factors": ["not live market data"],
         "invalidation_conditions": ["certification completes"],
         "explanation": "No trading action is appropriate for a certification fixture.",
+        "market_regimes": ["CERTIFICATION"], "opportunity_quality": 0,
+        "evidence_ranking": ["bounded synthetic context"],
+        "uncertainty_explanation": "Synthetic context is intentionally uncertain.",
         "symbol": None, "reference_price": None,
     }
     value.update(overrides)
@@ -127,6 +130,63 @@ def test_responses_finds_final_message_independent_of_reasoning_order(output):
     assert content == "{}" and error is None
 
 
+@pytest.mark.parametrize("data,expected,path", [
+    ({"status": "completed", "output_text": "{}"}, "{}", "responses.output_text"),
+    ({"status": "completed", "output_parsed": {"ok": True}}, {"ok": True},
+     "responses.output_parsed"),
+    ({"status": "completed", "output": [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "not retained"}]},
+        {"type": "message", "role": "assistant", "status": "completed", "content": [
+            {"type": "output_text", "text": "{\"ok\":", "annotations": []},
+            {"type": "output_text", "text": "true}", "annotations": []},
+        ]},
+    ]}, '{"ok":true}', "responses.output[].message.content[].output_text"),
+    ({"status": "completed", "output": [
+        {"type": "message", "role": "assistant", "content": [
+            {"type": "output_text", "parsed": {"ok": True}, "text": "ignored"},
+        ]},
+    ]}, {"ok": True}, "responses.output[].message.content[].parsed"),
+    ({"status": "completed", "output": [
+        {"type": "output_text", "text": "{}"},
+    ]}, "{}", "responses.output[].output_text"),
+    ({"status": "completed", "output": [
+        {"type": "message", "role": "assistant", "content": "{}"},
+    ]}, "{}", "responses.output[].message.content"),
+])
+def test_responses_documented_and_sdk_layouts_share_one_normalizer(data, expected, path):
+    from services.ai_trading import OpenAIResponsesAIProvider
+    result = OpenAIResponsesAIProvider._extract_content(data)
+    assert result.content == expected and result.code is None and result.path == path
+
+
+@pytest.mark.parametrize("reason,code", [
+    ("max_output_tokens", "RESPONSES_INCOMPLETE_MAX_OUTPUT_TOKENS"),
+    ("content_filter", "RESPONSES_INCOMPLETE_CONTENT_FILTER"),
+    ("future_reason", "RESPONSES_INCOMPLETE_UNKNOWN"),
+])
+def test_responses_incomplete_reason_is_deterministic(reason, code):
+    from services.ai_trading import OpenAIResponsesAIProvider
+    result = OpenAIResponsesAIProvider._extract_content({
+        "status": "incomplete", "incomplete_details": {"reason": reason},
+        "output": [{"type": "reasoning", "summary": []}],
+    })
+    assert result.content is None and result.code == code
+    assert result.stage == "PROVIDER_COMPLETION" and result.incomplete_reason == reason
+
+
+def test_final_assistant_item_governs_and_reasoning_is_never_extracted():
+    from services.ai_trading import OpenAIResponsesAIProvider
+    result = OpenAIResponsesAIProvider._extract_content({"output": [
+        {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "{\"old\":true}"}]},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]},
+        {"type": "message", "role": "assistant",
+         "content": [{"type": "refusal", "refusal": "cannot comply"}]},
+    ]})
+    assert result.content is None and result.code == "PROVIDER_REFUSAL"
+    assert "private" not in repr(result)
+
+
 @pytest.mark.parametrize("data,code", [
     ({"output": [{"type": "reasoning"}]}, "RESPONSES_MESSAGE_MISSING"),
     ({"output": [{"type": "message", "role": "assistant", "content": {}}]},
@@ -174,10 +234,12 @@ class _CertificationProvider:
             supports_usage_reporting=True, supports_request_id=True,
             supports_reasoning_models=True, supports_max_output_tokens=True)
         self.response_kind, self.delay, self.calls = response_kind, delay, 0
+        self.last_max_tokens = None
 
     async def analyze(self, request):
         from services.ai_trading import AIProviderResponse
         self.calls += 1
+        self.last_max_tokens = request.max_tokens
         if self.delay:
             await asyncio.sleep(self.delay)
         payload = _payload()
@@ -196,6 +258,18 @@ class _CertificationProvider:
             provider_request_id="cert-request", provider_protocol=self.protocol,
             requested_output_mode="json_schema", effective_output_mode="json_schema",
             cost_status=cost, pricing_version="test-prices-v1", usage_valid=usage_valid)
+
+
+@pytest.mark.asyncio
+async def test_terra_certification_reserves_reasoning_and_structured_output_budget(readiness_db,
+                                                                                   monkeypatch):
+    from services.ai_operations import AIProviderCertificationService
+    monkeypatch.delenv("AI_CERTIFICATION_MAX_TOKENS", raising=False)
+    provider = _CertificationProvider()
+    report = await AIProviderCertificationService(provider).certify()
+    assert report["status"] == "PASSED"
+    assert provider.last_max_tokens == 1200
+    assert report["checks"]["max_output_tokens"] == 1200
 
 
 @pytest.mark.asyncio

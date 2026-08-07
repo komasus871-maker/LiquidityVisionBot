@@ -50,6 +50,9 @@ def _valid(**overrides):
         "recommended_action": "ACCEPT_STANDARD", "recommended_risk_multiplier": 1,
         "abstention": False, "supporting_factors": ["trend"], "conflicting_factors": ["volatility"],
         "invalidation_conditions": ["structure break"], "explanation": "Structured evidence supports the setup.",
+        "market_regimes": ["TREND"], "opportunity_quality": 75,
+        "evidence_ranking": ["trend"],
+        "uncertainty_explanation": "Volatility creates bounded uncertainty.",
         "symbol": None, "reference_price": None,
     }
     payload.update(overrides)

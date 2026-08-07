@@ -311,12 +311,26 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS copy_profiles(
                 id {id_col}, telegram_id BIGINT NOT NULL UNIQUE, enabled INTEGER DEFAULT 0,
                 mode TEXT NOT NULL DEFAULT 'PAPER', exchange TEXT, risk_pct DOUBLE PRECISION DEFAULT 0.5,
+                profile_name TEXT NOT NULL DEFAULT 'STANDARD',
                 sizing_mode TEXT NOT NULL DEFAULT 'RISK_PERCENT', fixed_usdt DOUBLE PRECISION DEFAULT 0,
+                equity_pct DOUBLE PRECISION DEFAULT 10, copy_multiplier DOUBLE PRECISION DEFAULT 1,
                 leverage INTEGER DEFAULT 1, auto_copy INTEGER DEFAULT 0, max_positions INTEGER DEFAULT 3, max_heat_r DOUBLE PRECISION DEFAULT 2.5,
                 daily_loss_pct DOUBLE PRECISION DEFAULT 2.0, max_slippage_pct DOUBLE PRECISION DEFAULT 0.25,
                 paper_balance DOUBLE PRECISION DEFAULT 10000, min_confidence DOUBLE PRECISION DEFAULT 55,
                 max_notional_pct DOUBLE PRECISION DEFAULT 35, symbol_cooldown_min INTEGER DEFAULT 30,
+                max_portfolio_exposure_pct DOUBLE PRECISION DEFAULT 70,
+                symbol_policy TEXT NOT NULL DEFAULT 'ALL', symbol_whitelist_json TEXT NOT NULL DEFAULT '[]',
+                symbol_blacklist_json TEXT NOT NULL DEFAULT '[]', timeframe_filters_json TEXT NOT NULL DEFAULT '[]',
+                setup_filters_json TEXT NOT NULL DEFAULT '[]', direction_filters_json TEXT NOT NULL DEFAULT '[]',
+                allow_experimental INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS copy_profile_events(
+                id {id_col}, telegram_id BIGINT NOT NULL, event_type TEXT NOT NULL,
+                actor TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL,
+                changed_fields_json TEXT NOT NULL, created_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -677,6 +691,116 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_decision_intelligence(
+                id {id_col}, decision_id TEXT NOT NULL UNIQUE, signal_id BIGINT NOT NULL,
+                identity_checksum TEXT, deterministic_decision_json TEXT NOT NULL,
+                gpt_counterfactual_json TEXT NOT NULL, market_regimes_json TEXT NOT NULL,
+                opportunity_quality DOUBLE PRECISION NOT NULL DEFAULT 0,
+                evidence_ranking_json TEXT NOT NULL, contradictions_json TEXT NOT NULL,
+                uncertainty_explanation TEXT NOT NULL, similarity_summary_json TEXT NOT NULL,
+                cluster_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_decision_similarities(
+                id {id_col}, source_decision_id TEXT NOT NULL, similar_decision_id TEXT NOT NULL,
+                similar_signal_id BIGINT NOT NULL, similarity_score DOUBLE PRECISION NOT NULL,
+                matching_json TEXT NOT NULL, differences_json TEXT NOT NULL,
+                outcome_r DOUBLE PRECISION, created_at TEXT NOT NULL,
+                UNIQUE(source_decision_id,similar_decision_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_counterfactual_evaluations(
+                id {id_col}, decision_id TEXT NOT NULL UNIQUE, signal_id BIGINT NOT NULL,
+                identity_checksum TEXT, primary_regime TEXT NOT NULL,
+                deterministic_positive INTEGER NOT NULL, gpt_positive INTEGER NOT NULL,
+                actual_positive INTEGER NOT NULL, classification TEXT NOT NULL,
+                deterministic_correct INTEGER NOT NULL, gpt_correct INTEGER NOT NULL,
+                disagreement INTEGER NOT NULL, profitable_disagreement INTEGER NOT NULL,
+                opportunity_quality DOUBLE PRECISION NOT NULL DEFAULT 0,
+                realized_r DOUBLE PRECISION NOT NULL DEFAULT 0, intervention_type TEXT,
+                evaluation_eligible INTEGER NOT NULL DEFAULT 1, evaluated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_learning_snapshots(
+                id {id_col}, snapshot_key TEXT NOT NULL UNIQUE, identity_checksum TEXT,
+                sample_size INTEGER NOT NULL, expectancy_r DOUBLE PRECISION,
+                precision_score DOUBLE PRECISION, recall_score DOUBLE PRECISION,
+                evidence_json TEXT NOT NULL, indicators_json TEXT NOT NULL,
+                recurring_failures_json TEXT NOT NULL, regimes_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_observation_queue_snapshots(
+                id {id_col}, identity_checksum TEXT, queued INTEGER NOT NULL,
+                processed INTEGER NOT NULL, dropped INTEGER NOT NULL, failed INTEGER NOT NULL,
+                cancelled INTEGER NOT NULL DEFAULT 0, duration_ms DOUBLE PRECISION NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_provider_request_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, identity_checksum TEXT,
+                signal_id BIGINT, attempt_number INTEGER NOT NULL, status TEXT NOT NULL,
+                reason_code TEXT NOT NULL, latency_ms DOUBLE PRECISION,
+                provider_request_id TEXT, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_signal_snapshots(
+                id {id_col}, snapshot_id TEXT NOT NULL UNIQUE, signal_id BIGINT NOT NULL UNIQUE,
+                owner_telegram_id BIGINT, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+                side TEXT NOT NULL, strategy_key TEXT NOT NULL, setup_family TEXT,
+                decision_at TEXT NOT NULL, captured_at TEXT NOT NULL, capture_quality TEXT NOT NULL,
+                feature_version TEXT NOT NULL, source_checksum TEXT NOT NULL,
+                primary_regime TEXT NOT NULL, regimes_json TEXT NOT NULL,
+                confidence_bucket TEXT NOT NULL, session_key TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_outcomes(
+                id {id_col}, snapshot_id TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                outcome_checksum TEXT NOT NULL, outcome_version INTEGER NOT NULL,
+                signal_result TEXT, signal_r DOUBLE PRECISION, mfe_pct DOUBLE PRECISION,
+                mae_pct DOUBLE PRECISION, tp_progression_json TEXT NOT NULL,
+                stop_reached INTEGER NOT NULL DEFAULT 0, policy_outcomes_json TEXT NOT NULL,
+                execution_outcomes_json TEXT NOT NULL, manual_intervention INTEGER NOT NULL DEFAULT 0,
+                no_intervention_r DOUBLE PRECISION, outcome_json TEXT NOT NULL,
+                resolved_at TEXT NOT NULL, attached_at TEXT NOT NULL,
+                UNIQUE(snapshot_id,outcome_checksum)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_strategy_decisions(
+                id {id_col}, snapshot_id TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                strategy_key TEXT NOT NULL, strategy_version TEXT NOT NULL,
+                action TEXT NOT NULL, direction TEXT NOT NULL, confidence DOUBLE PRECISION NOT NULL,
+                hypothetical_entry DOUBLE PRECISION, hypothetical_stop DOUBLE PRECISION,
+                hypothetical_targets_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                decision_checksum TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(snapshot_id,strategy_key,strategy_version)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_signal_rankings(
+                id {id_col}, snapshot_id TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                rank_version TEXT NOT NULL, diagnostic_score DOUBLE PRECISION NOT NULL,
+                components_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(snapshot_id,rank_version)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS capability_entitlements(
+                id {id_col}, telegram_id BIGINT NOT NULL, capability TEXT NOT NULL,
+                enabled INTEGER NOT NULL, source TEXT NOT NULL, expires_at TEXT,
+                updated_at TEXT NOT NULL, UNIQUE(telegram_id,capability)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -731,6 +855,17 @@ def create_tables() -> None:
             "fixed_usdt": "DOUBLE PRECISION DEFAULT 0",
             "leverage": "INTEGER DEFAULT 1",
             "auto_copy": "INTEGER DEFAULT 0",
+            "profile_name": "TEXT NOT NULL DEFAULT 'STANDARD'",
+            "equity_pct": "DOUBLE PRECISION DEFAULT 10",
+            "copy_multiplier": "DOUBLE PRECISION DEFAULT 1",
+            "max_portfolio_exposure_pct": "DOUBLE PRECISION DEFAULT 70",
+            "symbol_policy": "TEXT NOT NULL DEFAULT 'ALL'",
+            "symbol_whitelist_json": "TEXT NOT NULL DEFAULT '[]'",
+            "symbol_blacklist_json": "TEXT NOT NULL DEFAULT '[]'",
+            "timeframe_filters_json": "TEXT NOT NULL DEFAULT '[]'",
+            "setup_filters_json": "TEXT NOT NULL DEFAULT '[]'",
+            "direction_filters_json": "TEXT NOT NULL DEFAULT '[]'",
+            "allow_experimental": "INTEGER NOT NULL DEFAULT 0",
         }.items():
             _add_column(conn, "copy_profiles", name, definition)
         for name, definition in {
@@ -810,6 +945,18 @@ def create_tables() -> None:
             "raw_envelope_checksum": "TEXT",
             "provider_invoked": "INTEGER NOT NULL DEFAULT 0",
             "legacy_classification": "TEXT",
+            "extraction_path": "TEXT",
+            "provider_completion_status": "TEXT",
+            "provider_incomplete_reason": "TEXT",
+            "opportunity_quality": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "regime_tags_json": "TEXT NOT NULL DEFAULT '[]'",
+            "evidence_ranking_json": "TEXT NOT NULL DEFAULT '[]'",
+            "uncertainty_explanation": "TEXT",
+            "cache_hit": "INTEGER NOT NULL DEFAULT 0",
+            "cache_source_decision_id": "TEXT",
+            "material_state_checksum": "TEXT",
+            "provider_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "retry_count": "INTEGER NOT NULL DEFAULT 0",
         }.items():
             _add_column(conn, "ai_decisions", name, definition)
         for name, definition in {
@@ -825,9 +972,27 @@ def create_tables() -> None:
             "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
             "estimated_cost_usd": "NUMERIC(18,8) NOT NULL DEFAULT 0",
             "cost_status": "TEXT", "started_at": "TEXT", "completed_at": "TEXT",
+            "extraction_path": "TEXT", "provider_completion_status": "TEXT",
+            "provider_incomplete_reason": "TEXT",
         }.items():
             _add_column(conn, "ai_provider_certifications", name, definition)
-        _add_column(conn, "ai_provider_state", "identity_checksum", "TEXT")
+        for name, definition in {
+            "identity_checksum": "TEXT", "total_requests": "INTEGER NOT NULL DEFAULT 0",
+            "total_failures": "INTEGER NOT NULL DEFAULT 0", "total_retries": "INTEGER NOT NULL DEFAULT 0",
+            "last_latency_ms": "DOUBLE PRECISION", "half_opened_at": "TEXT",
+        }.items():
+            _add_column(conn, "ai_provider_state", name, definition)
+        for name, definition in {
+            "intervention_type": "TEXT",
+            "evaluation_eligible": "INTEGER NOT NULL DEFAULT 1",
+        }.items():
+            _add_column(conn, "ai_counterfactual_evaluations", name, definition)
+        conn.execute("""UPDATE ai_counterfactual_evaluations SET evaluation_eligible=0,
+            intervention_type=(SELECT o.intervention_type FROM ai_decision_outcomes o
+                WHERE o.decision_id=ai_counterfactual_evaluations.decision_id)
+            WHERE EXISTS(SELECT 1 FROM ai_decision_outcomes o
+                WHERE o.decision_id=ai_counterfactual_evaluations.decision_id
+                  AND o.intervention_type IS NOT NULL)""")
         _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
@@ -868,6 +1033,7 @@ def create_tables() -> None:
 
         for sql in (
             "CREATE INDEX IF NOT EXISTS idx_copy_profiles_enabled ON copy_profiles(enabled,mode)",
+            "CREATE INDEX IF NOT EXISTS idx_copy_profile_events_owner_time ON copy_profile_events(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_owner_status ON paper_positions(telegram_id,status)",
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_signal ON paper_positions(signal_id)",
             "CREATE INDEX IF NOT EXISTS idx_paper_positions_genome ON paper_positions(genome_fingerprint)",
@@ -893,11 +1059,24 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_signal ON ai_decisions(signal_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_eval ON ai_decisions(provider,model_version,prompt_version,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_identity_time ON ai_decisions(provider_identity_checksum,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_decisions_material_cache ON ai_decisions(provider_identity_checksum,material_state_checksum,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_outcomes_unmatched ON ai_decision_outcomes(decision_id,attached_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cert_identity_expiry ON ai_provider_certifications(identity_checksum,status,expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_observation_identity_time ON ai_observation_events(identity_checksum,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_governance_provider_time ON ai_governance_events(provider,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_provider_state_identity ON ai_provider_state(identity_checksum)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_intelligence_identity_time ON ai_decision_intelligence(identity_checksum,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_similarity_source ON ai_decision_similarities(source_decision_id,similarity_score)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_counterfactual_identity_regime ON ai_counterfactual_evaluations(identity_checksum,primary_regime)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_learning_identity_time ON ai_learning_snapshots(identity_checksum,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_queue_identity_time ON ai_observation_queue_snapshots(identity_checksum,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_request_events_identity_time ON ai_provider_request_events(identity_checksum,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_snapshot_owner_time ON research_signal_snapshots(owner_telegram_id,decision_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_snapshot_cohort ON research_signal_snapshots(strategy_key,timeframe,side,primary_regime)",
+            "CREATE INDEX IF NOT EXISTS idx_research_outcome_snapshot_version ON research_outcomes(snapshot_id,outcome_version)",
+            "CREATE INDEX IF NOT EXISTS idx_research_strategy_key_time ON research_strategy_decisions(strategy_key,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_ranking_score ON research_signal_rankings(diagnostic_score,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_capability_entitlements_user ON capability_entitlements(telegram_id,capability)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",

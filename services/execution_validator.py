@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -7,10 +9,11 @@ from services.data_integrity import DataIntegrityEngine
 from services.execution_models import ExecutionDecision, PortfolioState, PositionSize, PositionSizingMode, RiskProfile
 from services.position_sizer import PositionSizer
 from services.copy_training import CopyTrainingPolicy
+from services.copy_controls import normalize_copy_symbol, normalize_setup, normalize_timeframe
 
 
 class ExecutionValidator:
-    """Fail-closed gateway shared by paper and future live executors."""
+    """Fail-closed gateway for PAPER planning and separately gated live preflight."""
 
     def __init__(self) -> None:
         self.integrity = DataIntegrityEngine(max_activation_deviation_pct=1.5, max_stale_minutes=5)
@@ -34,6 +37,33 @@ class ExecutionValidator:
             return ExecutionDecision(False, policy.code, policy.reason, training_sample_size=policy.sample_size)
         if str(signal.get("status")) not in {"ACTIVE", "TP1", "TP2"}:
             return ExecutionDecision(False, "SIGNAL_NOT_ACTIVE", "Signal is not executable")
+        symbol = normalize_copy_symbol(signal.get("symbol"))
+        whitelist = {normalize_copy_symbol(value) for value in profile.symbol_whitelist}
+        blacklist = {normalize_copy_symbol(value) for value in profile.symbol_blacklist}
+        if symbol in blacklist:
+            return ExecutionDecision(False, "SYMBOL_BLACKLISTED", "Symbol is blocked by the user blacklist")
+        if profile.symbol_policy == "WHITELIST" and symbol not in whitelist:
+            return ExecutionDecision(False, "SYMBOL_NOT_WHITELISTED", "Symbol is not in the user whitelist")
+        timeframe = normalize_timeframe(signal.get("timeframe"))
+        if profile.timeframe_filters and timeframe not in {
+                normalize_timeframe(value) for value in profile.timeframe_filters}:
+            return ExecutionDecision(False, "TIMEFRAME_FILTERED", "Signal timeframe is not enabled")
+        setup = normalize_setup(signal.get("setup_key"))
+        if profile.setup_filters and setup not in {normalize_setup(value) for value in profile.setup_filters}:
+            return ExecutionDecision(False, "SETUP_FILTERED", "Signal setup family is not enabled")
+        direction = str(signal.get("side") or "").upper()
+        if profile.direction_filters and direction not in {str(value).upper() for value in profile.direction_filters}:
+            return ExecutionDecision(False, "DIRECTION_FILTERED", "Signal direction is not enabled")
+        try:
+            feature_payload = json.loads(signal.get("features_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            feature_payload = {}
+        experimental = bool(signal.get("experimental") or signal.get("is_experimental") or
+                            str(signal.get("strategy_status") or "").upper() == "EXPERIMENTAL" or
+                            isinstance(feature_payload, dict) and feature_payload.get("experimental") is True)
+        if experimental and not profile.allow_experimental:
+            return ExecutionDecision(False, "EXPERIMENTAL_STRATEGY_BLOCKED",
+                                     "Experimental strategies are disabled")
         if not state.portfolio_state_resolved:
             return ExecutionDecision(
                 False,
@@ -52,7 +82,7 @@ class ExecutionValidator:
             return ExecutionDecision(False, "SYMBOL_ALREADY_OPEN", "An open copied position already exists for this symbol")
         if state.symbol_in_cooldown:
             return ExecutionDecision(False, "SYMBOL_COOLDOWN", "Symbol is still in post-trade cooldown")
-        daily_limit = max(0.0, balance * profile.daily_loss_pct / 100.0)
+        daily_limit = max(0.0, profile.paper_balance * profile.daily_loss_pct / 100.0)
         if state.daily_realized_pnl <= -daily_limit and daily_limit > 0:
             return ExecutionDecision(False, "DAILY_LOSS_LIMIT", "Daily copy-trading loss limit reached")
         confidence_raw = signal.get("dynamic_confidence") if signal.get("dynamic_confidence") is not None else signal.get("confidence")
@@ -83,10 +113,21 @@ class ExecutionValidator:
             activation = self.integrity.validate_activation(signal, price)
             if not activation.valid:
                 return ExecutionDecision(False, activation.code, activation.reason)
-            if profile.sizing_mode is PositionSizingMode.FIXED_USDT:
-                notional = float(profile.fixed_usdt)
+            if profile.sizing_mode in {PositionSizingMode.FIXED_USDT,
+                                       PositionSizingMode.EQUITY_PERCENT,
+                                       PositionSizingMode.COPY_MULTIPLIER}:
+                if profile.sizing_mode is PositionSizingMode.FIXED_USDT:
+                    notional = float(profile.fixed_usdt)
+                elif profile.sizing_mode is PositionSizingMode.EQUITY_PERCENT:
+                    notional = balance * float(profile.equity_pct) / 100.0
+                else:
+                    source_notional = signal.get("source_notional") or signal.get("copy_notional")
+                    if source_notional is None:
+                        return ExecutionDecision(False, "SOURCE_SIZE_MISSING",
+                                                 "Proportional sizing requires a trusted source notional")
+                    notional = float(source_notional) * float(profile.copy_multiplier)
                 if notional <= 0:
-                    return ExecutionDecision(False, "INVALID_FIXED_SIZE", "Fixed USDT size must be positive")
+                    return ExecutionDecision(False, "INVALID_POSITION_SIZE", "Position notional must be positive")
                 quantity = notional / price
                 stop_distance = abs(price - float(signal["stop"]))
                 size = PositionSize(
@@ -111,6 +152,34 @@ class ExecutionValidator:
                     risk_amount=size.risk_amount * scale,
                     stop_distance_pct=size.stop_distance_pct,
                 )
+            portfolio_limit = balance * profile.max_portfolio_exposure_pct / 100.0
+            remaining_exposure = max(0.0, portfolio_limit - max(0.0, state.unified_gross_notional))
+            if remaining_exposure <= 0:
+                return ExecutionDecision(False, "MAX_PORTFOLIO_EXPOSURE",
+                                         "Portfolio exposure limit reached")
+            maximum_affordable = max(0.0, balance * max(1, profile.leverage))
+            safe_notional = min(size.notional, remaining_exposure, maximum_affordable)
+            if safe_notional < size.notional:
+                scale = safe_notional / size.notional
+                size = type(size)(
+                    quantity=size.quantity * scale, notional=safe_notional,
+                    risk_amount=size.risk_amount * scale,
+                    stop_distance_pct=size.stop_distance_pct,
+                )
+            decimals = max(0, min(12, int(os.getenv("PAPER_QUANTITY_DECIMALS", "8"))))
+            factor = 10 ** decimals
+            rounded_quantity = int(size.quantity * factor) / factor
+            rounded_notional = rounded_quantity * price
+            min_notional = max(0.0, float(os.getenv("PAPER_MIN_NOTIONAL_USDT", "5")))
+            if rounded_quantity <= 0 or rounded_notional < min_notional:
+                return ExecutionDecision(False, "BELOW_MINIMUM_ORDER",
+                                         "Safe rounded size is below the paper minimum; risk was not increased")
+            stop_distance = abs(price - float(signal["stop"]))
+            size = type(size)(
+                quantity=rounded_quantity, notional=rounded_notional,
+                risk_amount=rounded_quantity * stop_distance,
+                stop_distance_pct=size.stop_distance_pct,
+            )
         except (TypeError, ValueError, KeyError) as exc:
             return ExecutionDecision(False, "SIZING_FAILED", str(exc))
         activated_at = signal.get("activated_at")

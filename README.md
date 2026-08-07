@@ -21,14 +21,14 @@ Signals are now converted into deterministic, side-effect-free execution plans b
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 
-# Liquidity Vision Intelligence v9.8.8
+# LiquidityVisionBot v9.9.16
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
 
 ### Copy Trading Profile foundation
 
-The existing per-user copy profile now supports Risk % or Fixed USDT sizing, leverage, maximum positions, and an Auto Copy preference. All sizing continues through the shared fail-closed execution validator. Auto Copy is preparatory only; LIVE execution remains disabled.
+The per-user copy product supports risk, fixed-USDT, equity-percent and trusted-source proportional sizing, named risk profiles, limits and filters. Automatic PAPER copy runs through the durable execution queue and unified lifecycle; LIVE execution remains independently fail-closed.
 
 ## v9.8.8 — Authenticated Safety Core
 
@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.15
+APP_VERSION=9.9.16
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -213,3 +213,7 @@ v9.9.14 adds expiring provider certification, governance audit events, a durable
 # LiquidityVisionBot v9.9.15
 
 v9.9.15 normalizes Chat Completions and Responses structured output before one shared validation pipeline, makes real-provider certification bounded and repeat-safe, and scopes governance evidence to the exact provider/model/prompt/schema identity. Historical disabled and unscoped decisions remain immutable and cannot qualify a current provider. The recommended observation transport is OpenAI Responses with `gpt-5.6-terra`, strict JSON Schema, low reasoning effort, external versioned pricing, one provider attempt, and `AI_GATED` still blocked. See `V9_9_15_OPENAI_PROVIDER_CERTIFICATION.md` and `OPENAI_PROVIDER_RUNBOOK.md`.
+
+# LiquidityVisionBot v9.9.16
+
+v9.9.16 completes automatic multi-user PAPER copy from signal eligibility through deterministic policy, sizing, durable queue, order/fill, unified TP/SL lifecycle, accounting and restart recovery. It adds immutable decision-time research snapshots, append-only outcomes, four versioned non-trading Strategy Lab baselines, overlapping market regimes, diagnostic rankings, descriptive cohorts, and after-cost scalping research. Responses extraction now handles reasoning-first and reordered output, message content arrays, SDK `output_text`/`output_parsed`, structured parsed parts, refusals and incomplete reasons without storing provider reasoning. See `V9_9_16_PRODUCTION_COPY_RESEARCH.md`.

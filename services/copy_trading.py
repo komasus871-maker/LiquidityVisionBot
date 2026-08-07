@@ -17,6 +17,7 @@ from services.copy_similarity import CopySimilarityService
 from services.portfolio_reconciliation import PortfolioReconciliationService
 from services.execution_repositories import ExecutionRepository, UnifiedOpenPositionState
 from services.execution_portfolio import ExecutionPortfolioEngine
+from services.copy_controls import normalize_copy_symbol
 
 
 def _now() -> str:
@@ -33,6 +34,37 @@ class CopyTradingService:
 
     TERMINAL_SIGNAL_STATUSES = {"TP3", "STOP", "BREAKEVEN", "INVALIDATED", "EXPIRED", "CLOSED"}
     OPEN_SIGNAL_STATUSES = {"ACTIVE", "TP1", "TP2"}
+    PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
+        "CONSERVATIVE": {
+            "risk_pct": 0.25, "sizing_mode": "RISK_PERCENT", "leverage": 1,
+            "max_positions": 2, "max_heat_r": 1.5, "daily_loss_pct": 1.0,
+            "max_slippage_pct": 0.15, "min_confidence": 65.0,
+            "max_notional_pct": 20.0, "max_portfolio_exposure_pct": 40.0,
+            "symbol_cooldown_min": 60,
+        },
+        "STANDARD": {
+            "risk_pct": 0.5, "sizing_mode": "RISK_PERCENT", "leverage": 2,
+            "max_positions": 3, "max_heat_r": 2.5, "daily_loss_pct": 2.0,
+            "max_slippage_pct": 0.25, "min_confidence": 55.0,
+            "max_notional_pct": 35.0, "max_portfolio_exposure_pct": 70.0,
+            "symbol_cooldown_min": 30,
+        },
+        "AGGRESSIVE": {
+            "risk_pct": 1.0, "sizing_mode": "RISK_PERCENT", "leverage": 3,
+            "max_positions": 5, "max_heat_r": 4.0, "daily_loss_pct": 4.0,
+            "max_slippage_pct": 0.4, "min_confidence": 50.0,
+            "max_notional_pct": 50.0, "max_portfolio_exposure_pct": 100.0,
+            "symbol_cooldown_min": 15,
+        },
+    }
+    CUSTOM_FIELDS = {
+        "risk_pct", "sizing_mode", "fixed_usdt", "equity_pct", "copy_multiplier",
+        "leverage", "max_positions", "max_heat_r", "daily_loss_pct", "max_slippage_pct",
+        "min_confidence", "max_notional_pct", "max_portfolio_exposure_pct",
+        "symbol_cooldown_min", "symbol_policy", "symbol_whitelist_json",
+        "symbol_blacklist_json", "timeframe_filters_json", "setup_filters_json",
+        "direction_filters_json", "allow_experimental",
+    }
 
     def __init__(self) -> None:
         self.validator = ExecutionValidator()
@@ -51,34 +83,69 @@ class CopyTradingService:
         with connect() as conn:
             conn.execute(
                 """INSERT INTO copy_profiles(
-                       telegram_id,enabled,mode,risk_pct,sizing_mode,fixed_usdt,leverage,auto_copy,max_positions,max_heat_r,daily_loss_pct,
+                       telegram_id,enabled,mode,profile_name,risk_pct,sizing_mode,fixed_usdt,equity_pct,
+                       copy_multiplier,leverage,auto_copy,max_positions,max_heat_r,daily_loss_pct,
                        max_slippage_pct,paper_balance,min_confidence,max_notional_pct,symbol_cooldown_min,
+                       max_portfolio_exposure_pct,symbol_policy,symbol_whitelist_json,symbol_blacklist_json,
+                       timeframe_filters_json,setup_filters_json,direction_filters_json,allow_experimental,
                        created_at,updated_at
-                   ) VALUES(?,0,'PAPER',0.5,'RISK_PERCENT',0,1,0,3,2.5,2.0,0.25,10000,55,35,30,?,?)
+                   ) VALUES(?,0,'PAPER','STANDARD',0.5,'RISK_PERCENT',0,10,1,2,0,3,2.5,2.0,
+                            0.25,10000,55,35,30,70,'ALL','[]','[]','[]','[]','[]',0,?,?)
                    ON CONFLICT(telegram_id) DO NOTHING""",
                 (telegram_id, now, now),
             )
             row = conn.execute("SELECT * FROM copy_profiles WHERE telegram_id=?", (telegram_id,)).fetchone()
         return dict(row)
 
-    def update_profile(self, telegram_id: int, **fields: Any) -> dict[str, Any]:
+    def update_profile(self, telegram_id: int, *, actor: str = "USER",
+                       mark_custom: bool = True, **fields: Any) -> dict[str, Any]:
         allowed = {
-            "enabled", "risk_pct", "sizing_mode", "fixed_usdt", "leverage", "auto_copy", "max_positions", "max_heat_r", "daily_loss_pct",
+            "enabled", "profile_name", "risk_pct", "sizing_mode", "fixed_usdt", "equity_pct",
+            "copy_multiplier", "leverage", "auto_copy", "max_positions", "max_heat_r", "daily_loss_pct",
             "max_slippage_pct", "paper_balance", "min_confidence", "max_notional_pct",
-            "symbol_cooldown_min",
+            "symbol_cooldown_min", "max_portfolio_exposure_pct", "symbol_policy",
+            "symbol_whitelist_json", "symbol_blacklist_json", "timeframe_filters_json",
+            "setup_filters_json", "direction_filters_json", "allow_experimental",
         }
         fields = {key: value for key, value in fields.items() if key in allowed}
+        # These flags represent one activation intent. Preserve an explicit
+        # two-field override, but prevent a single-field update from leaving a
+        # profile silently half-armed.
+        if "enabled" in fields and "auto_copy" not in fields:
+            fields["auto_copy"] = int(bool(fields["enabled"]))
+        elif "auto_copy" in fields and "enabled" not in fields:
+            fields["enabled"] = int(bool(fields["auto_copy"]))
         self.ensure_profile(telegram_id)
         current = self.ensure_profile(telegram_id)
+        if mark_custom and set(fields).intersection(self.CUSTOM_FIELDS):
+            fields["profile_name"] = "CUSTOM"
         candidate = {**current, **fields}
         normalized = self._validate_profile(candidate)
         fields = {key: normalized[key] for key in fields}
         if fields:
+            before = {key: current.get(key) for key in sorted(fields) if key != "updated_at"}
+            after = {key: fields.get(key) for key in sorted(fields) if key != "updated_at"}
             fields["updated_at"] = _now()
             assignments = ",".join(f"{key}=?" for key in fields)
             with connect() as conn:
                 conn.execute(f"UPDATE copy_profiles SET {assignments} WHERE telegram_id=?", (*fields.values(), telegram_id))
+                conn.execute("""INSERT INTO copy_profile_events(telegram_id,event_type,actor,before_json,
+                    after_json,changed_fields_json,created_at) VALUES(?,?,?,?,?,?,?)""", (
+                    telegram_id, "PROFILE_UPDATED", str(actor)[:40],
+                    json.dumps(before, sort_keys=True), json.dumps(after, sort_keys=True),
+                    json.dumps(sorted(before), sort_keys=True), fields["updated_at"]))
         return self.ensure_profile(telegram_id)
+
+    def select_profile(self, telegram_id: int, name: str, *, actor: str = "USER") -> dict[str, Any]:
+        normalized = str(name or "").strip().upper()
+        if normalized == "CUSTOM":
+            return self.update_profile(telegram_id, actor=actor, mark_custom=False,
+                                       profile_name="CUSTOM")
+        template = self.PROFILE_TEMPLATES.get(normalized)
+        if template is None:
+            raise ValueError("Unknown profile; use CONSERVATIVE, STANDARD, AGGRESSIVE, or CUSTOM")
+        return self.update_profile(telegram_id, actor=actor, mark_custom=False,
+                                   profile_name=normalized, **template)
 
 
     @staticmethod
@@ -91,23 +158,90 @@ class CopyTradingService:
             leverage_raw = normalized.get("leverage")
             positions_raw = normalized.get("max_positions")
             fixed_usdt = float(0 if fixed_raw is None else fixed_raw)
+            equity_pct = float(normalized.get("equity_pct") or 10)
+            copy_multiplier = float(normalized.get("copy_multiplier") or 1)
             leverage = int(1 if leverage_raw is None else leverage_raw)
             max_positions = int(0 if positions_raw is None else positions_raw)
+            max_heat = float(normalized.get("max_heat_r") or 2.5)
+            daily_loss = float(normalized.get("daily_loss_pct") or 2.0)
+            max_slippage = float(normalized.get("max_slippage_pct") or 0.25)
+            paper_balance = float(normalized.get("paper_balance") or 10_000)
+            min_confidence = float(normalized.get("min_confidence") or 55)
+            max_notional = float(normalized.get("max_notional_pct") or 35)
+            max_exposure = float(normalized.get("max_portfolio_exposure_pct") or 70)
+            cooldown = int(normalized.get("symbol_cooldown_min") or 30)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid copy profile value: {exc}") from exc
         if not 0.05 <= risk_pct <= 5.0:
             raise ValueError("risk_pct must be between 0.05 and 5")
         if mode is PositionSizingMode.FIXED_USDT and not 5 <= fixed_usdt <= 10_000_000:
             raise ValueError("fixed_usdt must be between 5 and 10000000 in FIXED_USDT mode")
+        if not 0.1 <= equity_pct <= 100:
+            raise ValueError("equity_pct must be between 0.1 and 100")
+        if not 0.01 <= copy_multiplier <= 10:
+            raise ValueError("copy_multiplier must be between 0.01 and 10")
         if not 1 <= leverage <= 125:
             raise ValueError("leverage must be between 1 and 125")
         if not 1 <= max_positions <= 20:
             raise ValueError("max_positions must be between 1 and 20")
+        if not 0.25 <= max_heat <= 20 or not 0.1 <= daily_loss <= 25:
+            raise ValueError("heat or daily loss limit is outside the safe range")
+        if not 0 <= max_slippage <= 5 or not 100 <= paper_balance <= 100_000_000:
+            raise ValueError("slippage or paper balance is outside the safe range")
+        if not 0 <= min_confidence <= 100 or not 1 <= max_notional <= 100:
+            raise ValueError("confidence or maximum notional is outside the safe range")
+        if not 1 <= max_exposure <= 500 or not 0 <= cooldown <= 1440:
+            raise ValueError("portfolio exposure or cooldown is outside the safe range")
+        profile_name = str(normalized.get("profile_name") or "CUSTOM").upper()
+        if profile_name not in {*CopyTradingService.PROFILE_TEMPLATES, "CUSTOM"}:
+            raise ValueError("profile_name is invalid")
+        symbol_policy = str(normalized.get("symbol_policy") or "ALL").upper()
+        if symbol_policy not in {"ALL", "WHITELIST"}:
+            raise ValueError("symbol_policy must be ALL or WHITELIST")
+        list_fields = {
+            "symbol_whitelist_json": CopyTradingService.normalize_symbol,
+            "symbol_blacklist_json": CopyTradingService.normalize_symbol,
+            "timeframe_filters_json": lambda value: str(value).strip().lower(),
+            "setup_filters_json": lambda value: " ".join(str(value).strip().lower().split()),
+            "direction_filters_json": lambda value: str(value).strip().upper(),
+        }
+        for field, normalizer in list_fields.items():
+            raw = normalized.get(field) or "[]"
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"{field} must be a JSON list") from exc
+            if not isinstance(raw, (list, tuple, set)):
+                raise ValueError(f"{field} must be a list")
+            values = sorted({normalizer(value) for value in raw if normalizer(value)})
+            if len(values) > 100:
+                raise ValueError(f"{field} exceeds 100 values")
+            normalized[field] = json.dumps(values, separators=(",", ":"))
         normalized.update(
             sizing_mode=mode.value, fixed_usdt=fixed_usdt, leverage=leverage,
-            auto_copy=int(bool(normalized.get("auto_copy"))), risk_pct=risk_pct, max_positions=max_positions,
+            equity_pct=equity_pct, copy_multiplier=copy_multiplier,
+            auto_copy=int(bool(normalized.get("auto_copy"))), risk_pct=risk_pct,
+            max_positions=max_positions, max_heat_r=max_heat, daily_loss_pct=daily_loss,
+            max_slippage_pct=max_slippage, paper_balance=paper_balance,
+            min_confidence=min_confidence, max_notional_pct=max_notional,
+            max_portfolio_exposure_pct=max_exposure, symbol_cooldown_min=cooldown,
+            profile_name=profile_name, symbol_policy=symbol_policy,
+            allow_experimental=int(bool(normalized.get("allow_experimental"))),
         )
         return normalized
+
+    @staticmethod
+    def normalize_symbol(value: Any) -> str:
+        return normalize_copy_symbol(value)
+
+    @staticmethod
+    def _json_tuple(value: Any) -> tuple[str, ...]:
+        try:
+            parsed = json.loads(value or "[]") if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = []
+        return tuple(str(item) for item in parsed) if isinstance(parsed, (list, tuple)) else ()
 
     def panic(self, telegram_id: int) -> int:
         now = _now()
@@ -122,12 +256,13 @@ class CopyTradingService:
                 price=price,
                 event_key=f"panic:{position['id']}",
                 reason="PANIC_CLOSE",
+                commission_rate=self.paper_lifecycle.DEFAULT_COMMISSION_RATE,
             )
             if result.applied:
                 closed_unified += 1
                 self._project_unified_position(result.position, event=result)
         with connect() as conn:
-            conn.execute("UPDATE copy_profiles SET enabled=0,updated_at=? WHERE telegram_id=?", (now, telegram_id))
+            conn.execute("UPDATE copy_profiles SET enabled=0,auto_copy=0,updated_at=? WHERE telegram_id=?", (now, telegram_id))
             rows = conn.execute(
                 "SELECT * FROM paper_positions WHERE telegram_id=? AND status IN ('OPEN','PARTIAL')",
                 (telegram_id,),
@@ -231,7 +366,59 @@ class CopyTradingService:
             parity_mismatches=parity["mismatches"],
             parity_expected_historical_difference=parity["expected_historical_difference"],
         )
+        result.update(self.performance_stats(telegram_id))
         return result
+
+    def performance_stats(self, telegram_id: int) -> dict[str, Any]:
+        """Separate policy, strategy and actual execution results without outcome relabeling."""
+        with connect() as conn:
+            journal = conn.execute("""SELECT COUNT(*) attempts,
+                SUM(CASE WHEN status='EXECUTED' THEN 1 ELSE 0 END) accepted,
+                SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END) rejected
+                FROM copy_execution_journal WHERE telegram_id=?""", (telegram_id,)).fetchone()
+            positions = [dict(row) for row in conn.execute("""SELECT id,status,realized_pnl,realized_r,
+                total_commission,close_reason,closed_at FROM paper_execution_positions
+                WHERE telegram_id=? ORDER BY COALESCE(closed_at,created_at),id""",
+                (telegram_id,)).fetchall()]
+            fills = conn.execute("""SELECT COUNT(*) fills,COALESCE(SUM(commission),0) fees,
+                COALESCE(AVG(slippage_pct),0) avg_slippage FROM paper_execution_fills
+                WHERE telegram_id=?""", (telegram_id,)).fetchone()
+        closed = [row for row in positions if row["status"] == "CLOSED"]
+        interventions = [row for row in closed if any(token in str(row.get("close_reason") or "").upper()
+                         for token in ("MANUAL", "PANIC"))]
+        pure = [row for row in closed if row not in interventions]
+        r_values = [float(row.get("realized_r") or 0.0) for row in pure]
+        wins = [value for value in r_values if value > 1e-12]
+        losses = [value for value in r_values if value < -1e-12]
+        equity = peak = max_drawdown = 0.0
+        for value in r_values:
+            equity += value
+            peak = max(peak, equity)
+            max_drawdown = min(max_drawdown, equity - peak)
+        gross_pnl = sum(float(row.get("realized_pnl") or 0.0) for row in closed)
+        total_fees = sum(float(row.get("total_commission") or 0.0) for row in positions)
+        return {
+            "policy_eligible": int(journal["attempts"] or 0),
+            "policy_accepted": int(journal["accepted"] or 0),
+            "policy_rejected": int(journal["rejected"] or 0),
+            "execution_opened": len(positions), "execution_closed": len(closed),
+            "strategy_closed": len(pure), "strategy_wins": len(wins),
+            "strategy_losses": len(losses), "strategy_breakeven": len(pure) - len(wins) - len(losses),
+            "strategy_win_rate": len(wins) / len(pure) * 100 if pure else 0.0,
+            "strategy_expectancy_r": sum(r_values) / len(r_values) if r_values else None,
+            "strategy_average_win_r": sum(wins) / len(wins) if wins else None,
+            "strategy_average_loss_r": sum(losses) / len(losses) if losses else None,
+            "strategy_profit_factor": sum(wins) / abs(sum(losses)) if losses else None,
+            "strategy_drawdown_proxy_r": max_drawdown if r_values else None,
+            "actual_gross_pnl": gross_pnl, "actual_fees": total_fees,
+            "actual_net_pnl": gross_pnl - total_fees,
+            "actual_fill_count": int(fills["fills"] or 0),
+            "actual_average_slippage_pct": float(fills["avg_slippage"] or 0.0),
+            "manual_intervention_count": len(interventions),
+            "manual_intervention_realized_r": sum(float(row.get("realized_r") or 0.0)
+                                                    for row in interventions),
+            "manual_counterfactual_status": "NOT_RECONSTRUCTED",
+        }
 
     @staticmethod
     def _accounting_mode() -> str:
@@ -254,13 +441,17 @@ class CopyTradingService:
             for row in rows[:safe_limit]
         ]
 
-    def sync_signal(self, signal: dict[str, Any]) -> dict[str, int]:
+    def sync_signal(self, signal: dict[str, Any], *, profiles: list[dict[str, Any]] | None = None) -> dict[str, int]:
         opened = updated = closed = rejected = skipped = 0
         status = str(signal.get("status") or "").upper()
-        with connect() as conn:
-            profiles = [dict(row) for row in conn.execute(
-                "SELECT * FROM copy_profiles WHERE enabled=1 AND mode='PAPER'"
-            ).fetchall()]
+        if profiles is None:
+            with connect() as conn:
+                profiles = [dict(row) for row in conn.execute("""SELECT p.* FROM copy_profiles p
+                    WHERE p.mode='PAPER' AND (p.enabled=1 OR EXISTS(
+                        SELECT 1 FROM paper_positions lp WHERE lp.telegram_id=p.telegram_id
+                        AND lp.status IN ('OPEN','PARTIAL')) OR EXISTS(
+                        SELECT 1 FROM paper_execution_positions up WHERE up.telegram_id=p.telegram_id
+                        AND up.status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')))""").fetchall()]
         for profile in profiles:
             telegram_id = int(profile["telegram_id"])
             existing = self._get_position(telegram_id, int(signal["id"]))
@@ -268,6 +459,15 @@ class CopyTradingService:
                 telegram_id, int(signal["id"])
             )
             if status in self.OPEN_SIGNAL_STATUSES and existing is None:
+                owner = signal.get("owner_telegram_id")
+                if owner not in {None, 0, "0"} and int(owner) != telegram_id and unified is None:
+                    # User-owned analysis is private. Global/master signals use
+                    # a null (or legacy zero) owner and may fan out by profile.
+                    skipped += 1
+                    continue
+                if not bool(profile.get("enabled")) or not bool(profile.get("auto_copy")):
+                    skipped += 1
+                    continue
                 if unified and str(unified.get("status")) not in {"CLOSED", "CANCELLED", "FAILED"}:
                     result = self._sync_unified_existing(unified, signal)
                 else:
@@ -300,13 +500,30 @@ class CopyTradingService:
     def sync_all(self) -> dict[str, int]:
         totals = {"opened": 0, "updated": 0, "closed": 0, "rejected": 0, "skipped": 0}
         with connect() as conn:
-            signals = [dict(row) for row in conn.execute(
+            recent = [dict(row) for row in conn.execute(
                 """SELECT * FROM signals
                    WHERE status IN ('ACTIVE','TP1','TP2','TP3','STOP','BREAKEVEN','INVALIDATED','EXPIRED')
                    ORDER BY id DESC LIMIT 500"""
             ).fetchall()]
+            # The bounded recent scan must never strand an older economically
+            # open PAPER position. Include every signal currently referenced by
+            # either lifecycle authority, then deduplicate by signal ID.
+            position_signals = [dict(row) for row in conn.execute("""SELECT DISTINCT s.*
+                FROM signals s LEFT JOIN paper_execution_positions up ON up.signal_id=s.id
+                LEFT JOIN paper_positions lp ON lp.signal_id=s.id
+                WHERE up.status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')
+                   OR lp.status IN ('OPEN','PARTIAL')""").fetchall()]
+            profiles = [dict(row) for row in conn.execute("""SELECT p.* FROM copy_profiles p
+                WHERE p.mode='PAPER' AND (p.enabled=1 OR EXISTS(
+                    SELECT 1 FROM paper_positions lp WHERE lp.telegram_id=p.telegram_id
+                    AND lp.status IN ('OPEN','PARTIAL')) OR EXISTS(
+                    SELECT 1 FROM paper_execution_positions up WHERE up.telegram_id=p.telegram_id
+                        AND up.status IN ('OPEN','PARTIALLY_FILLED','PARTIALLY_CLOSED')))""").fetchall()]
+        signals_by_id = {int(signal["id"]): signal for signal in recent}
+        signals_by_id.update({int(signal["id"]): signal for signal in position_signals})
+        signals = sorted(signals_by_id.values(), key=lambda item: int(item["id"]), reverse=True)
         for signal in signals:
-            result = self.sync_signal(signal)
+            result = self.sync_signal(signal, profiles=profiles)
             for key in totals:
                 totals[key] += result[key]
         return totals
@@ -334,6 +551,8 @@ class CopyTradingService:
             risk_pct=float(profile["risk_pct"]),
             sizing_mode=PositionSizingMode(str(profile.get("sizing_mode") or "RISK_PERCENT")),
             fixed_usdt=float(profile.get("fixed_usdt") or 0),
+            equity_pct=float(profile.get("equity_pct") or 10),
+            copy_multiplier=float(profile.get("copy_multiplier") or 1),
             leverage=int(profile.get("leverage") or 1),
             auto_copy=bool(profile.get("auto_copy")),
             max_positions=int(profile["max_positions"]),
@@ -344,6 +563,14 @@ class CopyTradingService:
             min_confidence=float(profile.get("min_confidence") or 55.0),
             max_notional_pct=float(profile.get("max_notional_pct") or 35.0),
             symbol_cooldown_min=int(profile.get("symbol_cooldown_min") or 30),
+            max_portfolio_exposure_pct=float(profile.get("max_portfolio_exposure_pct") or 70),
+            symbol_policy=str(profile.get("symbol_policy") or "ALL"),
+            symbol_whitelist=CopyTradingService._json_tuple(profile.get("symbol_whitelist_json")),
+            symbol_blacklist=CopyTradingService._json_tuple(profile.get("symbol_blacklist_json")),
+            timeframe_filters=CopyTradingService._json_tuple(profile.get("timeframe_filters_json")),
+            setup_filters=CopyTradingService._json_tuple(profile.get("setup_filters_json")),
+            direction_filters=CopyTradingService._json_tuple(profile.get("direction_filters_json")),
+            allow_experimental=bool(profile.get("allow_experimental")),
         )
 
     def _position_identity_state(self, telegram_id: int) -> tuple[UnifiedOpenPositionState, set[int], int]:
@@ -512,6 +739,8 @@ class CopyTradingService:
         return True
 
     def _open(self, telegram_id: int, profile: dict[str, Any], signal: dict[str, Any]) -> str:
+        if os.getenv("COPY_EXECUTION_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+            return "SKIPPED"
         risk_profile = self._risk_profile(profile)
         state = self._portfolio_state(telegram_id, str(signal["symbol"]), risk_profile.symbol_cooldown_min)
         stats = self.profile_stats(telegram_id)
@@ -524,6 +753,7 @@ class CopyTradingService:
             balance=equity,
             portfolio=state,
             training_policy=training_policy,
+            require_auto_copy=True,
         )
         result = self.execution_queue.engine.execute(plan)
         now = _now()
@@ -596,6 +826,7 @@ class CopyTradingService:
             price=price,
             event_key=event_key,
             reason=str(signal.get("result") or signal_status),
+            commission_rate=self.paper_lifecycle.DEFAULT_COMMISSION_RATE,
         )
         self._project_unified_position(result.position, signal=signal, event=result)
         if not result.applied:

@@ -17,6 +17,7 @@ from services.ai_operations import (
     AIConfigurationValidator, AIControlRepository, AIGovernanceState, AIProviderCertificationService,
     promotion_evidence, provider_identity,
 )
+from services.ai_intelligence import AIObservationIntelligence
 
 
 router = Router()
@@ -39,6 +40,14 @@ def _items(raw: str | None, limit: int = 4) -> str:
     return "\n".join(f"• {escape(str(value))}" for value in values[:limit]) or "• none recorded"
 
 
+def _values(raw: str | None) -> list:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def format_ai_decision(row: dict) -> str:
     warning = "Raw AI confidence is advisory, not a calibrated probability."
     return (
@@ -51,11 +60,14 @@ def format_ai_decision(row: dict) -> str:
         f"Schema: <code>{escape(str(row.get('schema_version') or 'legacy'))}</code>\n"
         f"Action: <b>{escape(str(row['recommended_action']))}</b> · risk <code>{float(row['recommended_risk_multiplier']):.2f}x</code>\n"
         f"Confidence / uncertainty: <code>{float(row['raw_confidence']):.1f} / {float(row['uncertainty']):.1f}</code>\n"
+        f"Opportunity quality: <code>{float(row.get('opportunity_quality') or 0):.1f}</code>\n"
         f"Regime / direction: <code>{escape(str(row['regime']))} / {escape(str(row['direction']))}</code>\n"
+        f"Regime tags: <code>{escape(', '.join(str(value) for value in _values(row.get('regime_tags_json'))) or 'UNKNOWN')}</code>\n"
         f"Validation: <code>{escape(str(row.get('validation_stage') or 'legacy'))} / {escape(str(row['validation_code']))}</code>\n"
         f"Cost: <code>{escape(str(row.get('cost_status') or 'UNPRICED'))} · ${escape(str(row.get('estimated_cost_usd') or 0))}</code>\n\n"
         f"<b>Supports</b>\n{_items(row.get('supporting_factors_json'))}\n\n"
         f"<b>Conflicts</b>\n{_items(row.get('conflicting_factors_json'))}\n\n"
+        f"Uncertainty: {escape(str(row.get('uncertainty_explanation') or 'not recorded'))}\n"
         f"Explanation: {escape(str(row['explanation']))}\n\n<i>{warning}</i>"
     )
 
@@ -146,7 +158,7 @@ async def ai_mode(message: Message) -> None:
         await message.answer("Unknown AI mode. Use AI_OFF, AI_OBSERVE, AI_SHADOW, or AI_ASSIST.")
         return
     effective = set_user_ai_mode(message.from_user.id, requested)
-    suffix = " AI_GATED is fail-closed in v9.9.15." if requested is AITradingMode.AI_GATED else ""
+    suffix = " AI_GATED is fail-closed in v9.9.16." if requested is AITradingMode.AI_GATED else ""
     await message.answer(f"AI mode set to <code>{effective.value}</code>.{suffix}")
 
 
@@ -193,6 +205,132 @@ async def ai_metrics(message: Message) -> None:
         f"{quality['counterfactual']['ai_reject']['sample_size']} / {quality['counterfactual']['ai_abstain']['sample_size']}</code>\n\n"
         f"<b>GLOBAL HISTORY</b> decisions / cost: <code>{global_metrics['decision_count']} / ${escape(global_metrics['estimated_cost_usd'])}</code>\n\n"
         "No improvement claim is made without sufficient out-of-sample evidence.")
+
+
+def _metric(value, *, percent: bool = False) -> str:
+    if value is None:
+        return "insufficient data"
+    return f"{float(value):.1%}" if percent else f"{float(value):.4f}"
+
+
+@router.message(Command("ai_dashboard"))
+async def ai_dashboard(message: Message) -> None:
+    identity = provider_identity(build_ai_provider())
+    report = AIObservationIntelligence().dashboard(identity["identity_checksum"], message.from_user.id)
+    counter = report["counterfactual"]
+    health = report["health"]
+    queue = health.get("queue") or {}
+    await message.answer(
+        f"📡 <b>AI observation dashboard</b>\n\n"
+        f"Identity: <code>{identity['identity_checksum'][:16]}</code>\n"
+        f"Decisions / provider calls: <code>{report['decisions']} / {report['provider_requests']}</code>\n"
+        f"Valid / cache hit ratio: <code>{report['valid_rate']:.1%} / {report['cache_hit_ratio']:.1%}</code>\n"
+        f"Resolved counterfactuals: <code>{counter['sample_size']}</code>\n"
+        f"GPT expectancy / precision / recall: <code>{_metric(counter['gpt_expectancy_r'])} / "
+        f"{_metric(counter['precision'], percent=True)} / {_metric(counter['recall'], percent=True)}</code>\n"
+        f"Recent provider failures / retries / cancellations: <code>{health['failures']} / {health['retries']} / {health['cancellations']}</code>\n"
+        f"Provider p95: <code>{health['p95_latency_ms']:.1f} ms</code>\n"
+        f"Last queue queued / dropped / failed: <code>{queue.get('queued', 0)} / {queue.get('dropped', 0)} / {queue.get('failed', 0)}</code>\n\n"
+        "All observations are advisory and have zero execution authority.")
+
+
+@router.message(Command("ai_history"))
+async def ai_history(message: Message) -> None:
+    parts = (message.text or "").split()
+    limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
+    rows = AIObservationIntelligence.history(message.from_user.id, limit)
+    lines = []
+    for row in rows:
+        outcome = row.get("classification") or "OPEN"
+        tags = ",".join(str(value) for value in _values(row.get("market_regimes_json") or row.get("regime_tags_json")))
+        lines.append(
+            f"• <code>{row['signal_id']}</code> {escape(str(row['symbol']))} {escape(str(row['timeframe']))} · "
+            f"<b>{escape(str(row['recommended_action']))}</b> · Q {float(row.get('opportunity_quality') or 0):.0f} · "
+            f"{escape(tags or str(row.get('regime') or 'UNKNOWN'))} · {escape(str(outcome))}")
+    await message.answer("🧾 <b>AI observation history</b>\n\n" + ("\n".join(lines) if lines else "No observations found."))
+
+
+@router.message(Command("ai_regimes"))
+async def ai_regimes(message: Message) -> None:
+    identity = provider_identity(build_ai_provider())
+    report = AIObservationIntelligence().regime_report(identity["identity_checksum"], message.from_user.id)
+    lines = [
+        f"• {escape(name)}: samples <code>{data['samples']}</code> · accuracy <code>{data['accuracy']:.1%}</code> · "
+        f"expectancy <code>{data['expectancy_r']:.3f}R</code> · FP/FN <code>{data['false_positives']}/{data['false_negatives']}</code>"
+        for name, data in sorted(report["regimes"].items())
+    ]
+    await message.answer("🧭 <b>AI regime intelligence</b>\n\n" +
+                         ("\n".join(lines) if lines else "No resolved regime samples yet."))
+
+
+@router.message(Command("ai_similarity"))
+async def ai_similarity(message: Message) -> None:
+    signal_id = _signal_id(message)
+    if signal_id is None:
+        await message.answer("Use <code>/ai_similarity &lt;signal_id&gt;</code>.")
+        return
+    rows = AIObservationIntelligence.similarities(signal_id, message.from_user.id)
+    lines = [
+        f"• signal <code>{row['similar_signal_id']}</code> · score <code>{float(row['similarity_score']):.1f}%</code> · "
+        f"outcome <code>{_metric(row.get('outcome_r'))}R</code>"
+        for row in rows
+    ]
+    await message.answer(f"🧩 <b>Similar observations for {signal_id}</b>\n\n" +
+                         ("\n".join(lines) if lines else "No sufficiently similar history found."))
+
+
+@router.message(Command("ai_learning"))
+async def ai_learning(message: Message) -> None:
+    identity = provider_identity(build_ai_provider())
+    report = AIObservationIntelligence.latest_learning(identity["identity_checksum"])
+    if not report:
+        await message.answer("No advisory learning snapshot exists yet.")
+        return
+    evidence = report.get("evidence_json") or []
+    failures = report.get("recurring_failures_json") or []
+    evidence_lines = "\n".join(
+        f"• {escape(str(item['factor']))}: <code>{item['samples']} / {float(item['expectancy_r']):.3f}R</code>"
+        for item in evidence[:5]) or "• insufficient samples"
+    failure_lines = "\n".join(
+        f"• {escape(str(item['factor']))}: <code>{float(item['expectancy_r']):.3f}R</code>"
+        for item in failures[:5]) or "• none established"
+    await message.answer(
+        f"🧠 <b>Advisory learning</b>\n\nSamples: <code>{report['sample_size']}</code>\n"
+        f"Snapshot: <code>{escape(str(report['snapshot_key'])[:16])}</code>\n\n"
+        f"<b>Repeated evidence</b>\n{evidence_lines}\n\n<b>Recurring failures</b>\n{failure_lines}\n\n"
+        "Learning changes future observation context only; it cannot change deterministic execution.")
+
+
+@router.message(Command("ai_statistics"))
+@router.message(Command("ai_counterfactual"))
+async def ai_counterfactual(message: Message) -> None:
+    identity = provider_identity(build_ai_provider())
+    report = AIObservationIntelligence().counterfactual_report(identity["identity_checksum"], message.from_user.id)
+    await message.answer(
+        f"⚖️ <b>AI counterfactual statistics</b>\n\nSamples / status: <code>{report['sample_size']} / {report['status']}</code>\n"
+        f"Precision / recall: <code>{_metric(report['precision'], percent=True)} / {_metric(report['recall'], percent=True)}</code>\n"
+        f"False positives / negatives: <code>{report['false_positives']} / {report['false_negatives']}</code>\n"
+        f"GPT / deterministic expectancy: <code>{_metric(report['gpt_expectancy_r'])}R / {_metric(report['deterministic_expectancy_r'])}R</code>\n"
+        f"Abstention quality: <code>{_metric(report['abstention_quality'], percent=True)}</code>\n"
+        f"Disagreements / profitability: <code>{report['disagreement_count']} / {_metric(report['disagreement_profitability_r'])}R</code>\n"
+        f"Opportunity quality, profitable / unprofitable: <code>{_metric(report['opportunity_quality_positive'])} / {_metric(report['opportunity_quality_negative'])}</code>\n\n"
+        "No performance claim is made while samples are insufficient.")
+
+
+@router.message(Command("ai_provider_health"))
+async def ai_provider_health(message: Message) -> None:
+    identity = provider_identity(build_ai_provider())
+    report = AIObservationIntelligence().provider_health(identity["identity_checksum"])
+    state = report.get("circuit") or {}
+    queue = report.get("queue") or {}
+    await message.answer(
+        f"🩺 <b>AI provider health</b>\n\nCircuit: <code>{escape(str(state.get('state') or 'UNKNOWN'))}</code>\n"
+        f"Consecutive / total failures: <code>{state.get('consecutive_failures', 0)} / {state.get('total_failures', 0)}</code>\n"
+        f"Total requests / retries: <code>{state.get('total_requests', 0)} / {state.get('total_retries', 0)}</code>\n"
+        f"Recent events / failures / cancellations: <code>{report['recent_events']} / {report['failures']} / {report['cancellations']}</code>\n"
+        f"p95 latency: <code>{report['p95_latency_ms']:.1f} ms</code>\n"
+        f"Queue processed / dropped / failed: <code>{queue.get('processed', 0)} / {queue.get('dropped', 0)} / {queue.get('failed', 0)}</code>\n"
+        f"Last error: <code>{escape(str(state.get('last_error_code') or 'none'))}</code>")
 
 
 @router.message(Command("ai_cost"))
@@ -244,6 +382,8 @@ async def ai_certification(message: Message) -> None:
             f"Started/completed: <code>{escape(str(row.get('started_at') or 'never'))} / {escape(str(row.get('completed_at') or 'never'))}</code>\n"
             f"Expires: <code>{escape(str(row.get('expires_at') or 'none'))}</code>\n"
             f"Validation: <code>{escape(str(row.get('validation_stage') or 'none'))} / {escape(str(row.get('validation_code') or 'none'))}</code>\n"
+            f"Completion / extraction: <code>{escape(str(row.get('provider_completion_status') or 'none'))} / {escape(str(row.get('extraction_path') or 'none'))}</code>\n"
+            f"Incomplete reason: <code>{escape(str(row.get('provider_incomplete_reason') or 'none'))}</code>\n"
             "Run <code>/ai_certification run</code> to make one paid provider request.")
         return
     action = parts[1].lower()
@@ -259,6 +399,9 @@ async def ai_certification(message: Message) -> None:
             f"Certification: <b>{report['status']}</b>\n"
             f"Failure: <code>{escape(report['failure_code'] or 'none')}</code>\n"
             f"Stage: <code>{escape(report.get('validation_stage') or 'none')}</code>\n"
+            f"Completion: <code>{escape(str(report['checks'].get('completion_status') or 'none'))}</code>\n"
+            f"Extraction: <code>{escape(str(report['checks'].get('extraction_path') or 'none'))}</code>\n"
+            f"Incomplete reason: <code>{escape(str(report['checks'].get('incomplete_reason') or 'none'))}</code>\n"
             f"Request ID available: <b>{'YES' if report['checks'].get('request_id_available') else 'NO'}</b>\n"
             f"Usage/cost: <code>{'PASS' if report['checks'].get('usage_reporting') else 'FAIL'} / {'PASS' if report['checks'].get('cost_parsed') else 'FAIL'}</code>\n"
             f"Expires: <code>{escape(str(report['expires_at'] or 'none'))}</code>")

@@ -11,7 +11,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: APP_VERSION
-        value: 9.9.15
+        value: 9.9.16
       - key: BOT_MODE
         value: webhook
       - key: BOT_TOKEN
@@ -40,6 +40,32 @@ services:
         value: "30"
       - key: WEBHOOK_MAX_ACTIVE_UPDATES
         value: "100"
+      - key: COPY_EXECUTION_ENABLED
+        value: "true"
+      - key: COPY_EXECUTION_INTERVAL
+        value: "60"
+      - key: COPY_EXECUTION_LEASE_SECONDS
+        value: "180"
+      - key: PAPER_MIN_NOTIONAL_USDT
+        value: "5"
+      - key: PAPER_QUANTITY_DECIMALS
+        value: "8"
+      - key: RESEARCH_INTERVAL_SECONDS
+        value: "300"
+      - key: RESEARCH_BATCH_LIMIT
+        value: "200"
+      - key: RESEARCH_MIN_SAMPLES
+        value: "20"
+      - key: SCALPING_MIN_SAMPLES
+        value: "100"
+      - key: SCALPING_TAKER_FEE_PCT
+        value: "0.05"
+      - key: SCALPING_SPREAD_PCT
+        value: "0.02"
+      - key: SCALPING_SLIPPAGE_PCT
+        value: "0.03"
+      - key: SCALPING_LATENCY_PENALTY_PCT
+        value: "0.01"
       - key: AI_TRADING_MODE
         value: AI_OFF
       - key: AI_PROVIDER
@@ -53,7 +79,7 @@ services:
       - key: AI_ALLOW_JSON_OBJECT_FALLBACK
         value: "false"
       - key: AI_SCHEMA_VERSION
-        value: ai-decision-v1
+        value: ai-decision-v2
       - key: AI_MODEL
         value: gpt-5.6-terra
       - key: AI_MODEL_VERSION
@@ -63,7 +89,7 @@ services:
       - key: AI_PROVIDER_API_KEY
         sync: false
       - key: AI_REQUEST_TIMEOUT_SECONDS
-        value: "15"
+        value: "45"
       - key: AI_PROVIDER_MAX_RESPONSE_BYTES
         value: "1000000"
       - key: AI_PROVIDER_MAX_ATTEMPTS
@@ -75,7 +101,7 @@ services:
       - key: AI_MAX_DAILY_COST_USD
         value: "2"
       - key: AI_MAX_TOKENS
-        value: "600"
+        value: "1200"
       - key: AI_MAX_CONCURRENCY
         value: "1"
       - key: AI_OBSERVE_QUEUE_DEPTH
@@ -88,6 +114,14 @@ services:
         value: "300"
       - key: AI_CONTEXT_MAX_CHARS
         value: "30000"
+      - key: AI_CIRCUIT_BREAKER_FAILURES
+        value: "5"
+      - key: AI_CIRCUIT_BREAKER_SECONDS
+        value: "300"
+      - key: AI_OBSERVATION_CACHE_ENABLED
+        value: "true"
+      - key: AI_OBSERVATION_CACHE_TTL_SECONDS
+        value: "180"
       - key: AI_PRICE_VERSION
         value: openai-gpt-5.6-terra-standard-2026-08-07
       - key: AI_INPUT_COST_PER_MILLION_USD
@@ -125,7 +159,7 @@ services:
       - key: AI_REASONING_EFFORT
         value: low
       - key: AI_CERTIFICATION_MAX_TOKENS
-        value: "192"
+        value: "1200"
       - key: AI_CERTIFICATION_TTL_HOURS
         value: "24"
       - key: AI_CERTIFICATION_REPEAT_SUPPRESSION_SECONDS

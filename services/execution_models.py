@@ -15,6 +15,8 @@ class ExecutionMode(str, Enum):
 class PositionSizingMode(str, Enum):
     RISK_PERCENT = "RISK_PERCENT"
     FIXED_USDT = "FIXED_USDT"
+    EQUITY_PERCENT = "EQUITY_PERCENT"
+    COPY_MULTIPLIER = "COPY_MULTIPLIER"
 
 
 class ExecutionPlanStatus(str, Enum):
@@ -39,6 +41,8 @@ class RiskProfile:
     risk_pct: float = 0.5
     sizing_mode: PositionSizingMode = PositionSizingMode.RISK_PERCENT
     fixed_usdt: float = 0.0
+    equity_pct: float = 10.0
+    copy_multiplier: float = 1.0
     leverage: int = 1
     auto_copy: bool = False
     max_positions: int = 3
@@ -49,6 +53,14 @@ class RiskProfile:
     min_confidence: float = 55.0
     max_notional_pct: float = 35.0
     symbol_cooldown_min: int = 30
+    max_portfolio_exposure_pct: float = 70.0
+    symbol_policy: str = "ALL"
+    symbol_whitelist: tuple[str, ...] = ()
+    symbol_blacklist: tuple[str, ...] = ()
+    timeframe_filters: tuple[str, ...] = ()
+    setup_filters: tuple[str, ...] = ()
+    direction_filters: tuple[str, ...] = ()
+    allow_experimental: bool = False
 
 
 @dataclass(frozen=True)

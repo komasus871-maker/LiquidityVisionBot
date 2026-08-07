@@ -145,10 +145,10 @@
 
 ## 9.9.3 — Copy Execution Planning Layer
 
-- Added a deterministic, side-effect-free `CopyExecutionPlanner` as the contract between signals and future executors.
+- Added a deterministic, side-effect-free `CopyExecutionPlanner`; v9.9.16 now uses this contract for automatic PAPER execution.
 - Plans now carry sizing, leverage, entry, SL/TP, risk, profile snapshot, validation outcome, and stable idempotency metadata.
 - Integrated existing paper-copy opening flow with the planner while preserving current behavior and guardrails.
-- Added fail-closed `AUTO_COPY_DISABLED` support for future automatic execution paths.
+- Added fail-closed `AUTO_COPY_DISABLED` support, retained by the automatic PAPER execution path completed in v9.9.16.
 - Added v9.9.3 regression tests and release documentation; no LIVE order execution was enabled.
 
 ## 9.9.2 — Copy Trading Profile Foundation
@@ -371,3 +371,16 @@
 - Added bounded observation depth, queue-drop and duplicate-suppression audits, identity-scoped Telegram diagnostics, and Responses-first safe deployment defaults.
 - Added GPT-5.6 cache-write token normalization and externally versioned 1.25x cache-write pricing so cost limits cannot silently omit prompt-cache writes.
 - Preserved zero AI execution authority and kept `AI_GATED` unreachable.
+## v9.9.16 â€” Production Copy Trading & Research Foundation
+
+- Completed automatic PAPER copy from signal eligibility through per-user configuration, deterministic validation/sizing, durable execution queue, order/fill, unified position lifecycle, accounting projection and restart recovery.
+- Added Conservative, Standard, Aggressive and Custom profiles; fixed, risk, equity-percent and fail-closed trusted-source proportional sizing; symbol/timeframe/setup/direction filters; portfolio exposure and daily-loss controls.
+- Made copy activation atomic, preserved lifecycle tracking after disable, kept panic user-scoped, separated manual/panic outcomes from pure strategy metrics and retained operator-only reconciliation diagnostics.
+- Applied PAPER taker commission to automatic TP/SL/partial/panic exits so ledger fees and actual net PnL include both sides without altering price-path realized R.
+- Added immutable decision-time research snapshots, append-only versioned terminal outcomes, descriptive cohort metrics, overlapping deterministic regimes, transparent diagnostic rankings and explicit late-backfill quality labels.
+- Added four versioned SHADOW Strategy Lab baselines over identical snapshots and verified they have no order or execution authority.
+- Added realistic 1m/3m/5m after-cost research using explicit fee, spread, slippage and latency assumptions with minimum-sample gates and no profitability claims.
+- Added centralized capability metadata, a lease-protected bounded research worker, restart-safe backfill, Telegram research dashboards and additive PostgreSQL/SQLite schema.
+- Bound AI similarity and adaptive-learning indicators to immutable decision-time research snapshots; persisted manual/intervened counterfactuals but excluded them from headline learning metrics.
+- Hardened OpenAI Responses extraction for reasoning-first/reordered output, assistant message arrays, SDK aggregates, native parsed structured output, refusals and normalized incomplete reasons. No reasoning traces are persisted.
+- Preserved `AI_GATED` as `AI_OFF`, preserved LIVE fail-closed behavior and made no automatic paid provider request.

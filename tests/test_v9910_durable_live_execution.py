@@ -80,8 +80,8 @@ def request(client_id="lv-client", *, reduce_only=False):
 
 
 def test_release_and_modes_default_fail_closed(monkeypatch):
-    assert APP_VERSION == "9.9.15"
-    assert RELEASE_NAME == "OpenAI Provider Certification Readiness"
+    assert APP_VERSION == "9.9.16"
+    assert RELEASE_NAME == "Production Copy Trading & Research Foundation"
     monkeypatch.delenv("EXECUTION_MODE", raising=False)
     assert configured_mode() is ExecutionMode.PAPER
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")

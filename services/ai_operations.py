@@ -201,8 +201,11 @@ class AIConfigurationValidator:
             ("AI_OBSERVE_QUEUE_DEPTH", Decimal("1"), Decimal("1000")),
             ("AI_OBSERVE_DROP_AUDIT_LIMIT", Decimal("1"), Decimal("100")),
             ("AI_SHADOW_INTERVAL", Decimal("30"), Decimal("3600")),
+            ("AI_CIRCUIT_BREAKER_FAILURES", Decimal("1"), Decimal("100")),
+            ("AI_CIRCUIT_BREAKER_SECONDS", Decimal("30"), Decimal("86400")),
+            ("AI_OBSERVATION_CACHE_TTL_SECONDS", Decimal("0"), Decimal("3600")),
             ("AI_PROVIDER_MAX_ATTEMPTS", Decimal("1"), Decimal("3")),
-            ("AI_CERTIFICATION_MAX_TOKENS", Decimal("64"), Decimal("256")),
+            ("AI_CERTIFICATION_MAX_TOKENS", Decimal("256"), Decimal("4096")),
             ("AI_CERTIFICATION_TTL_HOURS", Decimal("1"), Decimal("720")),
             ("AI_CERTIFICATION_REPEAT_SUPPRESSION_SECONDS", Decimal("15"), Decimal("600")),
         )
@@ -339,7 +342,7 @@ class AIProviderCertificationService:
     def _claim(self, identity_checksum: str, certification_id: str) -> bool:
         now = _now()
         try:
-            timeout = max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "15")))
+            timeout = max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "45")))
         except ValueError:
             timeout = 15.0
         suppress = _bounded_int("AI_CERTIFICATION_REPEAT_SUPPRESSION_SECONDS", 60, 15, 600)
@@ -418,7 +421,7 @@ class AIProviderCertificationService:
         if initial_status == AICertificationState.RUNNING.value:
             requested, effective, reason = resolve_output_mode(self.provider.capabilities)
             context = self._synthetic_context()
-            certification_tokens = _bounded_int("AI_CERTIFICATION_MAX_TOKENS", 192, 64, 256)
+            certification_tokens = _bounded_int("AI_CERTIFICATION_MAX_TOKENS", 1200, 256, 4096)
             request = AIProviderRequest(
                 SYSTEM_PROMPT, PROMPT_VERSION, context.prompt_payload(),
                 RESPONSE_SCHEMA, certification_tokens, requested,
@@ -427,7 +430,7 @@ class AIProviderCertificationService:
                 checks["paid_provider_request"] = True
                 response = await asyncio.wait_for(
                     self.provider.analyze(request),
-                    timeout=max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "15"))),
+                    timeout=max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "45"))),
                 )
                 decision = validate_provider_response(response, context, AIResponseValidator(
                     max_age_seconds=max(60, _bounded_int("AI_CONTEXT_MAX_AGE_SECONDS", 300, 1, 86400))))
@@ -449,6 +452,9 @@ class AIProviderCertificationService:
                     "usage_reporting": usage_ok, "cost_parsed": pricing_ok,
                     "capability_compatibility": effective is not AIOutputMode.DISABLED,
                     "downgrade": reason, "max_output_tokens": certification_tokens,
+                    "extraction_path": response.extraction_path,
+                    "completion_status": response.provider_completion_status,
+                    "incomplete_reason": response.provider_incomplete_reason,
                 })
                 if not protocol_ok:
                     failure, validation_stage = "CERTIFICATION_PROTOCOL_MISMATCH", "PROTOCOL_VALIDATION"
@@ -482,7 +488,7 @@ class AIProviderCertificationService:
                 status = AICertificationState.FAILED.value
         checks["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
         try:
-            checks["timeout_seconds"] = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "15"))
+            checks["timeout_seconds"] = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "45"))
         except ValueError:
             checks["timeout_seconds"] = None
         completed_at = _now()
@@ -491,16 +497,21 @@ class AIProviderCertificationService:
             "cached_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0,
             "estimated_cost_usd": Decimal("0"),
             "cost_status": "UNPRICED",
+            "extraction_path": "none", "provider_completion_status": None,
+            "provider_incomplete_reason": None,
         })()
         with connect() as conn:
             conn.execute("""UPDATE ai_provider_certifications SET status=?,checks_json=?,failure_code=?,
                 validation_stage=?,validation_code=?,provider_request_id=?,returned_model_version=?,
-                raw_envelope_checksum=?,latency_ms=?,input_tokens=?,
+                raw_envelope_checksum=?,extraction_path=?,provider_completion_status=?,
+                provider_incomplete_reason=?,latency_ms=?,input_tokens=?,
                 output_tokens=?,cached_tokens=?,cache_write_tokens=?,reasoning_tokens=?,estimated_cost_usd=?,cost_status=?,
                 completed_at=?,certified_at=?,expires_at=? WHERE certification_id=?""", (
                 status, _canonical(checks), failure, validation_stage, failure or "VALID",
                 response_values.provider_request_id, getattr(response_values, "model_version", None),
-                getattr(response_values, "raw_envelope_checksum", None), checks["latency_ms"], response_values.input_tokens,
+                getattr(response_values, "raw_envelope_checksum", None), response_values.extraction_path,
+                response_values.provider_completion_status, response_values.provider_incomplete_reason,
+                checks["latency_ms"], response_values.input_tokens,
                 response_values.output_tokens, response_values.cached_tokens,
                 response_values.cache_write_tokens, response_values.reasoning_tokens,
                 str(response_values.estimated_cost_usd), response_values.cost_status,

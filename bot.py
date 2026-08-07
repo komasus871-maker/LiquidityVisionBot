@@ -26,6 +26,7 @@ from handlers.news import router as news_router
 from handlers.premium import router as premium_router
 from handlers.price import router as price_router
 from handlers.profile import router as profile_router
+from handlers.research import router as research_router
 from handlers.scanner import router as scanner_router
 from handlers.start import router as start_router
 from services.observation_monitor import ObservationMonitor
@@ -37,6 +38,8 @@ from services.historical_execution_migration import HistoricalExecutionMigration
 from services.copy_execution_worker import CopyExecutionWorker
 from services.ai_trading import AIShadowWorker, configured_ai_interval
 from services.ai_operations import AIConfigurationValidator
+from services.ai_intelligence import AIObservationIntelligence
+from services.research_worker import ResearchWorker
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -53,6 +56,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(price_router)
     dp.include_router(analyze_router)
     dp.include_router(copy_trading_router)
+    dp.include_router(research_router)
     dp.include_router(exchanges_router)
     dp.include_router(profile_router)
     dp.include_router(scanner_router)
@@ -101,6 +105,11 @@ async def main() -> None:
     db_health = ping_database()
     logging.info("Database ready: backend=%s persistent=%s latency_ms=%s", database_backend(), persistent_database(), db_health.get("latency_ms"))
     ai_config = AIConfigurationValidator().validate()
+    ai_startup = AIObservationIntelligence.startup_validate()
+    if not ai_startup["valid"]:
+        logging.error("AI observation startup validation failed: %s", ai_startup)
+    else:
+        logging.info("AI observation startup validation: %s", ai_startup)
     if not ai_config.valid:
         logging.error("AI provider activation blocked: errors=%s warnings=%s", ai_config.errors, ai_config.warnings)
     else:
@@ -117,13 +126,15 @@ async def main() -> None:
     watch_engine = WatchEngine(bot=bot)
     copy_execution = CopyExecutionWorker()
     ai_shadow = AIShadowWorker(interval_seconds=configured_ai_interval())
-    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow]
+    research = ResearchWorker()
+    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
         asyncio.create_task(watch_engine.run_forever(), name="watch-engine"),
         asyncio.create_task(copy_execution.run_forever(), name="copy-execution"),
         asyncio.create_task(ai_shadow.run_forever(), name="ai-shadow"),
+        asyncio.create_task(research.run_forever(), name="research-engine"),
     ]
 
     mode = deployment_mode()
@@ -140,6 +151,8 @@ async def main() -> None:
                 observation_result = await observation_monitor.check_once()
                 tracker_result = await tracker.check_once()
                 copy_result = await copy_execution.check_once()
+                ai_result = await ai_shadow.check_once()
+                research_result = await research.check_once()
                 return {
                     "database_backend": database_backend(),
                     "persistent_database": persistent_database(),
@@ -147,6 +160,8 @@ async def main() -> None:
                     "observation_monitor": observation_result,
                     "signal_tracker": tracker_result,
                     "copy_execution": copy_result,
+                    "ai_observation": ai_result,
+                    "research_engine": research_result,
                 }
 
             webhook_server = WebhookServer(

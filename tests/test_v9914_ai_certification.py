@@ -33,6 +33,9 @@ def _payload():
         "abstention": True, "supporting_factors": ["certification"],
         "conflicting_factors": ["synthetic context"], "invalidation_conditions": ["none"],
         "explanation": "Certification response only.",
+        "market_regimes": ["CERTIFICATION"], "opportunity_quality": 0,
+        "evidence_ranking": ["certification"],
+        "uncertainty_explanation": "Synthetic context is not a market observation.",
         "symbol": None, "reference_price": None,
     }
 
