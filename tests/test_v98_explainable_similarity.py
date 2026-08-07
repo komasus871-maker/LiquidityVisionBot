@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "9.9.16"
-    assert RELEASE_NAME == "Production Copy Trading & Research Foundation"
+    assert APP_VERSION == "9.9.17"
+    assert RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
 
 
 def test_similarity_details_explain_groups_and_features():

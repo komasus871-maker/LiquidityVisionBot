@@ -11,6 +11,8 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "ADVANCED_ANALYTICS": {"available": True, "mode": "OBSERVE", "description": "Cohort and outcome analytics"},
     "AI_ANALYSIS": {"available": True, "mode": "ADVISORY", "description": "Non-authoritative AI observation"},
     "STRATEGY_LAB": {"available": True, "mode": "SHADOW", "description": "Non-trading strategy comparison"},
+    "EDGE_DISCOVERY": {"available": True, "mode": "RESEARCH_ONLY", "description": "Leakage-controlled descriptive edge discovery"},
+    "FORWARD_VALIDATION": {"available": True, "mode": "RESEARCH_ONLY", "description": "Frozen hypothesis forward cohorts"},
     "SCALPING_RESEARCH": {"available": True, "mode": "PAPER_SHADOW", "description": "After-cost 1m/3m/5m research"},
     "ADVANCED_RISK_PROFILES": {"available": True, "mode": "PAPER", "description": "Configurable deterministic PAPER risk"},
 }

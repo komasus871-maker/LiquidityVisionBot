@@ -1,3 +1,16 @@
+## v9.9.17 — Edge Discovery & Trading Intelligence Engine
+
+- Added versioned normalized research features with explicit missing values and quality classes for trustworthy decision-time, reconstructed, late-backfill, incomplete and contaminated data.
+- Separated pure market, deterministic policy, execution and human-intervention outcomes; manual exits no longer label the underlying setup as a loss.
+- Added conservative statistical summaries, deterministic bootstrap intervals, sample tiers, controlled feature comparisons, bounded 2/3-feature mining and research-only negative-edge candidates.
+- Added an interpretable regularized-logit quality model with strictly chronological walk-forward folds, calibration, degradation and reproducible provenance.
+- Added immutable frozen hypotheses, append-only forward evaluations and explicit forward-testing/confirmed/rejected lifecycle states without automatic production promotion.
+- Added the naive baseline, regime-specialized strategy evidence, shadow dynamic strategy selection and transparent historical/regime/calibration/overlap/cost ranking components.
+- Added cost-aware scalping families, confidence calibration, portfolio clustering, RR reachability and path-honest exit research.
+- Added new concise Edge Discovery, feature, hypothesis, forward-test, RR, exit, confidence and portfolio Telegram research views.
+- Corrected the strict AI certification output-token range to 128–4096 so integer value 192 is valid; paid certification remains manual.
+- Preserved automatic PAPER copy, unified accounting, OpenAI Responses extraction, AI_GATED=AI_OFF, and fail-closed LIVE behavior.
+
 ## v9.9.9 — Provenance Migration and Unified Read Cutover
 
 - Added a restart-safe, bounded historical execution catalog with explicit fully reconstructable, partially reconstructable, legacy-only, ambiguous, and invalid classifications.

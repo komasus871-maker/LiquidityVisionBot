@@ -794,6 +794,69 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_feature_vectors(
+                id {id_col}, snapshot_id TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                feature_version TEXT NOT NULL, vector_checksum TEXT NOT NULL,
+                data_quality TEXT NOT NULL, missing_features_json TEXT NOT NULL,
+                vector_json TEXT NOT NULL, normalized_at TEXT NOT NULL,
+                UNIQUE(snapshot_id,feature_version)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_findings(
+                id {id_col}, finding_id TEXT NOT NULL UNIQUE, finding_type TEXT NOT NULL,
+                feature_version TEXT NOT NULL, algorithm_version TEXT NOT NULL,
+                filter_json TEXT NOT NULL, comparator_json TEXT NOT NULL,
+                evidence_state TEXT NOT NULL, sample_size INTEGER NOT NULL,
+                baseline_sample_size INTEGER NOT NULL, metrics_json TEXT NOT NULL,
+                dataset_start TEXT, dataset_cutoff TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_hypotheses(
+                id {id_col}, hypothesis_id TEXT NOT NULL UNIQUE,
+                definition_checksum TEXT NOT NULL UNIQUE, finding_id TEXT,
+                hypothesis_text TEXT NOT NULL, lifecycle_state TEXT NOT NULL,
+                lifecycle_history_json TEXT NOT NULL,
+                evidence_state TEXT NOT NULL, feature_version TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL, filter_json TEXT NOT NULL,
+                comparator_json TEXT NOT NULL, discovery_metrics_json TEXT NOT NULL,
+                discovery_start TEXT, discovery_cutoff TEXT NOT NULL,
+                frozen_at TEXT NOT NULL, forward_start_at TEXT NOT NULL,
+                minimum_forward_samples INTEGER NOT NULL,
+                latest_forward_metrics_json TEXT NOT NULL DEFAULT '{{}}',
+                last_evaluated_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_hypothesis_evaluations(
+                id {id_col}, hypothesis_id TEXT NOT NULL, evaluation_checksum TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL, evidence_state TEXT NOT NULL,
+                sample_size INTEGER NOT NULL, baseline_sample_size INTEGER NOT NULL,
+                metrics_json TEXT NOT NULL, evaluation_cutoff TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL, UNIQUE(hypothesis_id,evaluation_checksum)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_model_runs(
+                id {id_col}, run_id TEXT NOT NULL UNIQUE, model_version TEXT NOT NULL,
+                feature_version TEXT NOT NULL, target_definition TEXT NOT NULL,
+                training_start TEXT, training_cutoff TEXT, validation_start TEXT,
+                validation_cutoff TEXT, training_samples INTEGER NOT NULL,
+                validation_samples INTEGER NOT NULL, coefficients_json TEXT NOT NULL,
+                metrics_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS research_strategy_recommendations(
+                id {id_col}, snapshot_id TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                selector_version TEXT NOT NULL, regime_key TEXT NOT NULL,
+                rankings_json TEXT NOT NULL, recommendation_checksum TEXT NOT NULL,
+                created_at TEXT NOT NULL, UNIQUE(snapshot_id,selector_version)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS capability_entitlements(
                 id {id_col}, telegram_id BIGINT NOT NULL, capability TEXT NOT NULL,
                 enabled INTEGER NOT NULL, source TEXT NOT NULL, expires_at TEXT,
@@ -987,6 +1050,7 @@ def create_tables() -> None:
             "evaluation_eligible": "INTEGER NOT NULL DEFAULT 1",
         }.items():
             _add_column(conn, "ai_counterfactual_evaluations", name, definition)
+        _add_column(conn, "research_hypotheses", "lifecycle_history_json", "TEXT NOT NULL DEFAULT '[]'")
         conn.execute("""UPDATE ai_counterfactual_evaluations SET evaluation_eligible=0,
             intervention_type=(SELECT o.intervention_type FROM ai_decision_outcomes o
                 WHERE o.decision_id=ai_counterfactual_evaluations.decision_id)
@@ -1076,6 +1140,12 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_research_outcome_snapshot_version ON research_outcomes(snapshot_id,outcome_version)",
             "CREATE INDEX IF NOT EXISTS idx_research_strategy_key_time ON research_strategy_decisions(strategy_key,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_research_ranking_score ON research_signal_rankings(diagnostic_score,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_vector_quality ON research_feature_vectors(data_quality,normalized_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_findings_type_cutoff ON research_findings(finding_type,dataset_cutoff)",
+            "CREATE INDEX IF NOT EXISTS idx_research_hypotheses_state ON research_hypotheses(lifecycle_state,updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_research_hypothesis_eval ON research_hypothesis_evaluations(hypothesis_id,evaluation_cutoff)",
+            "CREATE INDEX IF NOT EXISTS idx_research_model_time ON research_model_runs(model_version,validation_cutoff)",
+            "CREATE INDEX IF NOT EXISTS idx_research_selector_regime ON research_strategy_recommendations(regime_key,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_capability_entitlements_user ON capability_entitlements(telegram_id,capability)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",

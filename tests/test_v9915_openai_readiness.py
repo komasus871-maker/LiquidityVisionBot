@@ -273,6 +273,27 @@ async def test_terra_certification_reserves_reasoning_and_structured_output_budg
 
 
 @pytest.mark.asyncio
+async def test_certification_accepts_192_output_tokens_without_weakening_bounds(readiness_db,
+                                                                                monkeypatch):
+    from services.ai_operations import AIConfigurationValidator, AIProviderCertificationService
+    monkeypatch.setenv("AI_CERTIFICATION_MAX_TOKENS", "192")
+    provider = _CertificationProvider()
+    validation = AIConfigurationValidator().validate(provider)
+    report = await AIProviderCertificationService(provider).certify()
+    assert validation.valid
+    assert report["status"] == "PASSED"
+    assert provider.last_max_tokens == 192
+
+
+@pytest.mark.parametrize("value", ["127", "192.5", "4097", "invalid"])
+def test_certification_output_token_validation_remains_strict(readiness_db, monkeypatch, value):
+    from services.ai_operations import AIConfigurationValidator
+    monkeypatch.setenv("AI_CERTIFICATION_MAX_TOKENS", value)
+    validation = AIConfigurationValidator().validate(_CertificationProvider())
+    assert "AI_CERTIFICATION_MAX_TOKENS_INVALID" in validation.errors
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind,code,stage", [
     ("schema", "SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION"),
     ("semantic", "DIRECTION_CONFLICT", "SEMANTIC_VALIDATION"),

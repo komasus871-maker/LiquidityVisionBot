@@ -70,7 +70,7 @@ def test_snapshot_is_immutable_future_safe_and_runs_shadow_strategies(research_d
         orders = conn.execute("SELECT COUNT(*) n FROM paper_execution_orders").fetchone()["n"]
         outcome = conn.execute("SELECT * FROM research_outcomes WHERE signal_id=1801").fetchone()
     assert {row["strategy_key"] for row in decisions} == {
-        "LIQUIDITY_SMC", "TREND_FOLLOWING", "BREAKOUT", "MEAN_REVERSION"
+        "NAIVE_ELIGIBLE", "LIQUIDITY_SMC", "TREND_FOLLOWING", "BREAKOUT", "MEAN_REVERSION"
     }
     assert rankings == 1 and orders == 0
     assert outcome["signal_r"] == 3 and outcome["mfe_pct"] == 7

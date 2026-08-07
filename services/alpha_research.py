@@ -48,6 +48,8 @@ class AlphaResearchEngine:
             regimes = snapshot.get("regimes") if isinstance(snapshot.get("regimes"), list) else []
             take_profits = list(snapshot.get("take_profits") or ())[:3]
             take_profits += [None] * (3 - len(take_profits))
+            normalized = self._json(signal.get("vector_json"), {})
+            missing = self._json(signal.get("missing_features_json"), [])
             return {
                 "signal_id": snapshot.get("signal_id"), "symbol": snapshot.get("symbol"),
                 "timeframe": snapshot.get("timeframe"), "side": snapshot.get("side"),
@@ -67,6 +69,11 @@ class AlphaResearchEngine:
                 "closed_at": outcome.get("closed_at"), "data_integrity_valid": True,
                 "capture_quality": signal.get("capture_quality") or "UNKNOWN",
                 "snapshot_safety": "IMMUTABLE_DECISION_SNAPSHOT",
+                "normalized_feature_version": signal.get("normalized_feature_version"),
+                "normalized_data_quality": signal.get("data_quality"),
+                "missing_decision_features_json": json.dumps(missing, sort_keys=True),
+                "decision_features_json": json.dumps(normalized or features, sort_keys=True, default=str),
+                "later_outcome_json": json.dumps(outcome, sort_keys=True, default=str),
             }
         features = self._json(signal.get("features_json"), {})
         regime = features.get("market_regime") or features.get("regime") or {}

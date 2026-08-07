@@ -49,8 +49,8 @@ def _journal_and_plan(tmp_path, monkeypatch):
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.16"
-    assert RELEASE_NAME == "Production Copy Trading & Research Foundation"
+    assert APP_VERSION == "9.9.17"
+    assert RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
 
 
 def test_transition_table_exposes_expected_execution_path() -> None:

@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "9.9.16"
-    assert RELEASE_NAME == "Production Copy Trading & Research Foundation"
+    assert APP_VERSION == "9.9.17"
+    assert RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
 
 
 @pytest.mark.asyncio

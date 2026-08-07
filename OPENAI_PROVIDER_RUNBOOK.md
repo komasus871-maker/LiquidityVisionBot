@@ -5,7 +5,7 @@
 Keep `AI_PROVIDER=disabled` and `AI_TRADING_MODE=AI_OFF` for the migration deployment. Add `AI_PROVIDER_API_KEY` only as a Render secret.
 
 ```env
-APP_VERSION=9.9.16
+APP_VERSION=9.9.17
 AI_TRADING_MODE=AI_OFF
 AI_PROVIDER=openai
 AI_PROVIDER_PROTOCOL=responses

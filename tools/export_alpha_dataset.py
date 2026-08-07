@@ -11,7 +11,11 @@ from services.alpha_research import AlphaResearchEngine
 
 def load_research_rows() -> list[dict]:
     with connect() as conn:
-        rows = conn.execute("""SELECT r.*,o.outcome_json FROM research_signal_snapshots r
+        rows = conn.execute("""SELECT r.*,f.feature_version normalized_feature_version,
+            f.data_quality,f.missing_features_json,f.vector_json,o.outcome_json
+            FROM research_signal_snapshots r
+            LEFT JOIN research_feature_vectors f ON f.snapshot_id=r.snapshot_id AND
+                f.id=(SELECT MAX(f2.id) FROM research_feature_vectors f2 WHERE f2.snapshot_id=r.snapshot_id)
             LEFT JOIN research_outcomes o ON o.snapshot_id=r.snapshot_id AND o.id=(
                 SELECT MAX(o2.id) FROM research_outcomes o2 WHERE o2.snapshot_id=r.snapshot_id)
             ORDER BY r.id ASC""").fetchall()
@@ -38,6 +42,7 @@ def main() -> int:
         "output": str(output),
         "rows": len(rows),
         "source": "IMMUTABLE_RESEARCH_SNAPSHOTS",
+        "feature_boundary": "decision_features_json contains decision-time data; later_outcome_json contains post-decision labels",
         "warning": "Descriptive associations are not causal evidence or a profitability guarantee.",
         "overall": asdict(engine.metrics(rows)),
         "by_timeframe": {k: asdict(v) for k, v in engine.grouped_metrics(rows, "timeframe").items()},

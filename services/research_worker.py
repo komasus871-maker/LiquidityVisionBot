@@ -7,6 +7,7 @@ import socket
 import uuid
 
 from database.database import acquire_lease, release_lease, runtime_finished, runtime_started
+from services.edge_discovery import EdgeDiscoveryEngine
 from services.research_engine import ResearchEngine
 
 
@@ -24,6 +25,7 @@ class ResearchWorker:
         self.batch_limit = max(10, min(int(os.getenv("RESEARCH_BATCH_LIMIT", "200")), 1000))
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.engine = ResearchEngine()
+        self.edge_engine = EdgeDiscoveryEngine()
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -37,10 +39,22 @@ class ResearchWorker:
             runtime_started(self.worker_name)
             try:
                 result = self.engine.run_cycle(self.batch_limit)
+                edge_errors = 0
+                try:
+                    result.update(self.edge_engine.run_cycle(
+                        self.batch_limit,
+                        refresh_analysis=bool(result.get("outcomes_attached")),
+                    ))
+                except Exception as exc:
+                    edge_errors = 1
+                    result["edge_errors"] = edge_errors
+                    result["edge_error_code"] = type(exc).__name__
+                    logging.exception("Edge discovery projection failed; base research cycle retained")
                 runtime_finished(
                     self.worker_name,
-                    processed=int(result["captured"]) + int(result["outcomes_attached"]),
-                    errors=0,
+                    processed=sum(int(value) for key, value in result.items()
+                                  if key not in {"edge_errors"} and isinstance(value, int)),
+                    errors=edge_errors,
                     details=result,
                 )
                 return {"skipped": False, **result}

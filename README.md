@@ -21,7 +21,7 @@ Signals are now converted into deterministic, side-effect-free execution plans b
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 
-# LiquidityVisionBot v9.9.16
+# LiquidityVisionBot v9.9.17
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.16
+APP_VERSION=9.9.17
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -217,3 +217,7 @@ v9.9.15 normalizes Chat Completions and Responses structured output before one s
 # LiquidityVisionBot v9.9.16
 
 v9.9.16 completes automatic multi-user PAPER copy from signal eligibility through deterministic policy, sizing, durable queue, order/fill, unified TP/SL lifecycle, accounting and restart recovery. It adds immutable decision-time research snapshots, append-only outcomes, four versioned non-trading Strategy Lab baselines, overlapping market regimes, diagnostic rankings, descriptive cohorts, and after-cost scalping research. Responses extraction now handles reasoning-first and reordered output, message content arrays, SDK `output_text`/`output_parsed`, structured parsed parts, refusals and incomplete reasons without storing provider reasoning. See `V9_9_16_PRODUCTION_COPY_RESEARCH.md`.
+
+# LiquidityVisionBot v9.9.17
+
+v9.9.17 adds a leakage-controlled Edge Discovery engine over immutable decision-time snapshots: versioned normalized features, clean market/policy/execution/intervention outcomes, conservative sample tiers, reproducible bootstrap intervals, controlled feature comparisons, bounded combination mining, negative-edge candidates, chronological walk-forward evaluation, frozen hypotheses and genuine forward cohorts. Strategy selection, signal ranking, scalping, RR, exit, portfolio and AI comparisons remain research-only and have no execution authority. See `V9_9_17_EDGE_DISCOVERY.md` and `RESEARCH_RUNBOOK.md`.

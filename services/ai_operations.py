@@ -205,7 +205,7 @@ class AIConfigurationValidator:
             ("AI_CIRCUIT_BREAKER_SECONDS", Decimal("30"), Decimal("86400")),
             ("AI_OBSERVATION_CACHE_TTL_SECONDS", Decimal("0"), Decimal("3600")),
             ("AI_PROVIDER_MAX_ATTEMPTS", Decimal("1"), Decimal("3")),
-            ("AI_CERTIFICATION_MAX_TOKENS", Decimal("256"), Decimal("4096")),
+            ("AI_CERTIFICATION_MAX_TOKENS", Decimal("128"), Decimal("4096")),
             ("AI_CERTIFICATION_TTL_HOURS", Decimal("1"), Decimal("720")),
             ("AI_CERTIFICATION_REPEAT_SUPPRESSION_SECONDS", Decimal("15"), Decimal("600")),
         )
@@ -421,7 +421,7 @@ class AIProviderCertificationService:
         if initial_status == AICertificationState.RUNNING.value:
             requested, effective, reason = resolve_output_mode(self.provider.capabilities)
             context = self._synthetic_context()
-            certification_tokens = _bounded_int("AI_CERTIFICATION_MAX_TOKENS", 1200, 256, 4096)
+            certification_tokens = _bounded_int("AI_CERTIFICATION_MAX_TOKENS", 1200, 128, 4096)
             request = AIProviderRequest(
                 SYSTEM_PROMPT, PROMPT_VERSION, context.prompt_payload(),
                 RESPONSE_SCHEMA, certification_tokens, requested,

@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.16"
-RELEASE_NAME = "Production Copy Trading & Research Foundation"
+APP_VERSION = "9.9.17"
+RELEASE_NAME = "Edge Discovery & Trading Intelligence Engine"

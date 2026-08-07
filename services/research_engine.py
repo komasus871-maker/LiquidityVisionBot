@@ -16,13 +16,15 @@ from database.database import connect
 FEATURE_VERSION = "research-features-v1"
 RANK_VERSION = "research-rank-v1"
 STRATEGY_VERSIONS = {
+    "NAIVE_ELIGIBLE": "naive-eligible-v1",
     "LIQUIDITY_SMC": "liquidity-smc-v1",
     "TREND_FOLLOWING": "trend-following-v1",
     "BREAKOUT": "breakout-v1",
     "MEAN_REVERSION": "mean-reversion-v1",
 }
 TERMINAL = {"TP3", "STOP", "BREAKEVEN", "MANUAL_STOP", "INVALIDATED", "EXPIRED", "CLOSED"}
-MANUAL_REASONS = {"MANUAL", "MANUAL_CLOSE", "MANUAL_STOP", "PANIC", "PANIC_CLOSE"}
+MANUAL_REASONS = {"MANUAL", "MANUAL_CLOSE", "MANUAL_STOP", "PANIC", "PANIC_CLOSE",
+                  "EARLY_EXIT", "EARLY_CLOSE"}
 
 
 def _canonical(value: Any) -> str:
@@ -206,7 +208,9 @@ class ResearchEngine:
         bos = _text(_value(features, "bos", "structure"))
         evidence: list[str] = []
         action = "WAIT"
-        if strategy == "LIQUIDITY_SMC":
+        if strategy == "NAIVE_ELIGIBLE":
+            action, evidence = "ACCEPT", ["unfiltered eligible-signal baseline"]
+        elif strategy == "LIQUIDITY_SMC":
             action, evidence = "ACCEPT", ["production signal passed deterministic signal creation"]
         elif strategy == "TREND_FOLLOWING":
             aligned = (side == "LONG" and "TREND_UP" in regimes) or (side == "SHORT" and "TREND_DOWN" in regimes)
@@ -317,16 +321,59 @@ class ResearchEngine:
             }
             policy["policy_r"] = signal_r if accepted and not signal_manual else None
             policy["outcome_basis"] = "SIGNAL_POLICY_COUNTERFACTUAL" if accepted else "NOT_EXECUTED"
+        reached_level = max(({"TP1": 1, "TP2": 2, "TP3": 3}.get(value, 0)
+                             for value in (status, result.upper())), default=0)
         progression = {key: any(str(row["event_type"]).upper() == key for row in event_rows)
-                       or status == key or result.upper() == key for key in ("TP1", "TP2", "TP3")}
+                       or reached_level >= level
+                       for key, level in (("TP1", 1), ("TP2", 2), ("TP3", 3))}
+        snapshot = _loads(snapshot_row.get("snapshot_json"), {})
+        entry, stop = _number(snapshot.get("entry")), _number(snapshot.get("stop"))
+        risk_pct = abs(entry - stop) / abs(entry) * 100 if entry and stop is not None else 0.0
+        mfe_pct = _number(signal.get("max_profit_pct"))
+        mae_pct = _number(signal.get("max_drawdown_pct"))
+        pure_market = {
+            "eligible": not signal_manual,
+            "exclusion_reason": result.upper() if signal_manual else None,
+            "signal_result": result if not signal_manual else None,
+            "signal_r": signal_r if not signal_manual else None,
+            "mfe_pct": mfe_pct, "mae_pct": mae_pct,
+            "max_favorable_r": mfe_pct / risk_pct if risk_pct > 0 else None,
+            "max_adverse_r": abs(mae_pct) / risk_pct if risk_pct > 0 else None,
+            "tp1_reached": progression["TP1"], "tp2_reached": progression["TP2"],
+            "tp3_reached": progression["TP3"],
+            "stop_touched": result.upper() == "STOP" or status == "STOP",
+            "time_to_mfe_seconds": None, "time_to_mae_seconds": None,
+            "ordered_price_path_available": False,
+        }
+        deterministic_policy = {
+            "theoretical_signal_r": signal_r if not signal_manual else None,
+            "policy_outcomes": policy_rows,
+            "partials_observed": any(progression.values()),
+            "breakeven_observed": result.upper() == "BREAKEVEN" or status == "BREAKEVEN",
+            "trailing_observed": any("TRAIL" in str(row.get("event_type") or "").upper()
+                                     for row in event_rows),
+        }
+        execution_layer = {"positions": executions,
+                           "realized_pnl": sum(_number(row.get("realized_pnl")) for row in executions),
+                           "realized_r": sum(_number(row.get("realized_r")) for row in executions),
+                           "fees": sum(_number(row.get("fees")) for row in executions),
+                           "average_slippage_pct": (sum(_number(row.get("average_slippage_pct"))
+                                                          for row in executions) / len(executions)
+                                                     if executions else None)}
+        human_intervention = {
+            "signal_intervention": signal_manual,
+            "execution_interventions": [row for row in executions if row["manual_intervention"]],
+            "intervention_delta_r": None,
+        }
         outcome = {
             "signal_id": signal_id, "signal_result": result, "signal_r": signal_r,
-            "mfe_pct": _number(signal.get("max_profit_pct")),
-            "mae_pct": _number(signal.get("max_drawdown_pct")),
+            "mfe_pct": mfe_pct, "mae_pct": mae_pct,
             "tp_progression": progression, "stop_reached": result.upper() == "STOP" or status == "STOP",
             "activated_at": signal.get("activated_at"), "closed_at": signal.get("closed_at"),
             "policy_outcomes": policy_rows, "execution_outcomes": executions,
             "manual_intervention": manual or signal_manual, "no_intervention_r": no_intervention,
+            "pure_market": pure_market, "deterministic_policy": deterministic_policy,
+            "execution": execution_layer, "human_intervention": human_intervention,
         }
         outcome_checksum = _checksum(outcome)
         now = datetime.now(timezone.utc).isoformat()
@@ -377,10 +424,16 @@ class ResearchEngine:
 
     @staticmethod
     def metrics(rows: list[dict[str, Any]], minimum_samples: int = 20) -> dict[str, Any]:
+        def pure(row: dict[str, Any]) -> tuple[bool, Any]:
+            outcome = row.get("outcome") or {}
+            layer = outcome.get("pure_market") if isinstance(outcome.get("pure_market"), dict) else None
+            if layer is not None:
+                return bool(layer.get("eligible")), layer.get("signal_r")
+            return not bool(outcome.get("manual_intervention")), outcome.get("signal_r")
+
         resolved = [row for row in rows if row.get("capture_quality") == "DECISION_TIME"
-                    and row.get("outcome") and row["outcome"].get("signal_r") is not None
-                    and not row["outcome"].get("manual_intervention")]
-        rs = [_number(row["outcome"]["signal_r"]) for row in resolved]
+                    and row.get("outcome") and pure(row)[0] and pure(row)[1] is not None]
+        rs = [_number(pure(row)[1]) for row in resolved]
         wins, losses = [r for r in rs if r > 0], [r for r in rs if r < 0]
         equity = peak = drawdown = 0.0
         for value in rs:
@@ -397,7 +450,10 @@ class ResearchEngine:
             "average_mfe_pct": sum(_number(row["outcome"].get("mfe_pct")) for row in resolved) / count if count else None,
             "average_mae_pct": sum(_number(row["outcome"].get("mae_pct")) for row in resolved) / count if count else None,
             "drawdown_proxy_r": drawdown if count else None,
-            "manual_excluded": sum(bool(row.get("outcome", {}).get("manual_intervention")) for row in rows),
+            "manual_excluded": sum(not pure(row)[0] for row in rows if row.get("outcome")),
+            "execution_interventions_retained": sum(bool(
+                (row.get("outcome") or {}).get("human_intervention", {}).get("execution_interventions"))
+                for row in resolved),
             "late_backfill_excluded": sum(row.get("capture_quality") != "DECISION_TIME" for row in rows),
             "status": "SUFFICIENT" if count >= minimum_samples else "INSUFFICIENT_SAMPLES",
             "minimum_samples": minimum_samples,
@@ -445,8 +501,12 @@ class ResearchEngine:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
             outcome = _loads(row.get("outcome_json"), {})
-            if not outcome or outcome.get("signal_r") is None or outcome.get("manual_intervention"):
+            pure = outcome.get("pure_market") if isinstance(outcome.get("pure_market"), dict) else None
+            eligible = bool(pure.get("eligible")) if pure is not None else not outcome.get("manual_intervention")
+            signal_r = pure.get("signal_r") if pure is not None else outcome.get("signal_r")
+            if not outcome or signal_r is None or not eligible:
                 continue
+            outcome = {**outcome, "signal_r": signal_r}
             row["outcome"] = outcome
             grouped[row["strategy_key"]].append(row)
         result = []
@@ -474,14 +534,19 @@ class ResearchEngine:
                 "claim": "NO_CAUSAL_OR_PROFITABILITY_CLAIM"}
 
     def rankings(self, telegram_id: int | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        rows = []
         with connect() as conn:
-            rows = conn.execute("""SELECT k.*,r.symbol,r.timeframe,r.side,r.primary_regime
-                FROM research_signal_rankings k JOIN research_signal_snapshots r ON r.snapshot_id=k.snapshot_id
-                WHERE k.rank_version=? AND r.capture_quality='DECISION_TIME'
-                    AND (? IS NULL OR r.owner_telegram_id IS NULL OR r.owner_telegram_id=0
-                         OR r.owner_telegram_id=?)
-                ORDER BY k.diagnostic_score DESC,k.id DESC LIMIT ?""",
-                (RANK_VERSION, telegram_id, telegram_id, max(1, min(int(limit), 50)))).fetchall()
+            for rank_version in ("research-rank-v2", RANK_VERSION):
+                rows = conn.execute("""SELECT k.*,r.symbol,r.timeframe,r.side,r.primary_regime
+                    FROM research_signal_rankings k JOIN research_signal_snapshots r ON r.snapshot_id=k.snapshot_id
+                    WHERE k.rank_version=? AND r.capture_quality='DECISION_TIME'
+                        AND (? IS NULL OR r.owner_telegram_id IS NULL OR r.owner_telegram_id=0
+                             OR r.owner_telegram_id=?)
+                    ORDER BY k.diagnostic_score DESC,k.id DESC LIMIT ?""",
+                    (rank_version, telegram_id, telegram_id, safe_limit)).fetchall()
+                if rows:
+                    break
         return [dict(row) for row in rows]
 
     def scalping_report(self, telegram_id: int | None = None) -> dict[str, Any]:

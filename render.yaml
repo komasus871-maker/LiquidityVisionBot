@@ -11,7 +11,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: APP_VERSION
-        value: 9.9.16
+        value: 9.9.17
       - key: BOT_MODE
         value: webhook
       - key: BOT_TOKEN
@@ -56,8 +56,44 @@ services:
         value: "200"
       - key: RESEARCH_MIN_SAMPLES
         value: "20"
+      - key: EDGE_MIN_SAMPLES
+        value: "20"
+      - key: EDGE_MODERATE_SAMPLES
+        value: "50"
+      - key: EDGE_HIGH_SAMPLES
+        value: "100"
+      - key: EDGE_BOOTSTRAP_SAMPLES
+        value: "500"
+      - key: EDGE_BOOTSTRAP_MAX_N
+        value: "500"
+      - key: EDGE_COMBINATION_MIN_SAMPLES
+        value: "20"
+      - key: EDGE_COMBINATION_MIN_SUPPORT
+        value: "0.05"
+      - key: EDGE_MAX_COMBINATIONS
+        value: "120"
+      - key: EDGE_MAX_NEW_HYPOTHESES
+        value: "10"
+      - key: EDGE_FORWARD_MIN_SAMPLES
+        value: "30"
+      - key: EDGE_HYPOTHESIS_STALE_DAYS
+        value: "90"
+      - key: EDGE_WALK_FORWARD_MIN_TRAIN
+        value: "60"
+      - key: EDGE_WALK_FORWARD_VALIDATION_SIZE
+        value: "20"
+      - key: EDGE_HISTORY_LIMIT
+        value: "5000"
+      - key: EDGE_AI_COMPARISON_LIMIT
+        value: "500"
+      - key: EDGE_RANK_OVERLAP_MINUTES
+        value: "60"
+      - key: RESEARCH_ESTIMATED_EXECUTION_COST_PCT
+        value: "0.19"
       - key: SCALPING_MIN_SAMPLES
         value: "100"
+      - key: SCALPING_MIN_GROSS_COST_MULTIPLE
+        value: "1.5"
       - key: SCALPING_TAKER_FEE_PCT
         value: "0.05"
       - key: SCALPING_SPREAD_PCT
