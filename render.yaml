@@ -10,6 +10,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
+      - key: APP_VERSION
+        value: 9.9.15
       - key: BOT_MODE
         value: webhook
       - key: BOT_TOKEN
@@ -39,67 +41,105 @@ services:
       - key: WEBHOOK_MAX_ACTIVE_UPDATES
         value: "100"
       - key: AI_TRADING_MODE
-        value: AI_SHADOW
+        value: AI_OFF
       - key: AI_PROVIDER
         value: disabled
       - key: AI_PROVIDER_PROTOCOL
-        value: chat_completions
+        value: responses
       - key: AI_STRUCTURED_OUTPUT_MODE
-        value: auto
+        value: json_schema
       - key: AI_STRICT_SCHEMA_REQUIRED
-        value: "false"
-      - key: AI_ALLOW_JSON_OBJECT_FALLBACK
         value: "true"
+      - key: AI_ALLOW_JSON_OBJECT_FALLBACK
+        value: "false"
       - key: AI_SCHEMA_VERSION
         value: ai-decision-v1
       - key: AI_MODEL
-        sync: false
+        value: gpt-5.6-terra
       - key: AI_MODEL_VERSION
-        sync: false
+        value: gpt-5.6-terra
       - key: AI_PROVIDER_ENDPOINT
-        sync: false
+        value: https://api.openai.com/v1/responses
       - key: AI_PROVIDER_API_KEY
         sync: false
       - key: AI_REQUEST_TIMEOUT_SECONDS
-        value: "8"
+        value: "15"
+      - key: AI_PROVIDER_MAX_RESPONSE_BYTES
+        value: "1000000"
       - key: AI_PROVIDER_MAX_ATTEMPTS
-        value: "2"
+        value: "1"
       - key: AI_MAX_DAILY_REQUESTS_PER_USER
-        value: "25"
+        value: "10"
       - key: AI_MAX_DAILY_REQUESTS
-        value: "500"
+        value: "100"
       - key: AI_MAX_DAILY_COST_USD
-        value: "5"
-      - key: AI_MAX_TOKENS
-        value: "800"
-      - key: AI_MAX_CONCURRENCY
         value: "2"
+      - key: AI_MAX_TOKENS
+        value: "600"
+      - key: AI_MAX_CONCURRENCY
+        value: "1"
+      - key: AI_OBSERVE_QUEUE_DEPTH
+        value: "10"
+      - key: AI_OBSERVE_DROP_AUDIT_LIMIT
+        value: "25"
+      - key: AI_SHADOW_INTERVAL
+        value: "60"
       - key: AI_CONTEXT_MAX_AGE_SECONDS
         value: "300"
       - key: AI_CONTEXT_MAX_CHARS
         value: "30000"
       - key: AI_PRICE_VERSION
-        sync: false
+        value: openai-gpt-5.6-terra-standard-2026-08-07
       - key: AI_INPUT_COST_PER_MILLION_USD
-        sync: false
+        value: "2.50"
       - key: AI_OUTPUT_COST_PER_MILLION_USD
-        sync: false
+        value: "15.00"
       - key: AI_CACHED_INPUT_COST_PER_MILLION_USD
-        sync: false
+        value: "0.25"
+      - key: AI_CACHE_WRITE_COST_PER_MILLION_USD
+        value: "3.125"
       - key: AI_REQUIRE_PRICING_FOR_REQUESTS
         value: "true"
       - key: AI_SUPPORTS_JSON_OBJECT
-        value: "true"
+        value: "false"
       - key: AI_SUPPORTS_JSON_SCHEMA
         value: "true"
       - key: AI_SUPPORTS_STRICT_SCHEMA
         value: "true"
       - key: AI_SUPPORTS_TEMPERATURE
-        value: "true"
+        value: "false"
       - key: AI_SUPPORTS_MAX_TOKENS
-        value: "true"
+        value: "false"
       - key: AI_SUPPORTS_MAX_COMPLETION_TOKENS
         value: "false"
+      - key: AI_SUPPORTS_MAX_OUTPUT_TOKENS
+        value: "true"
+      - key: AI_SUPPORTS_USAGE_REPORTING
+        value: "true"
+      - key: AI_SUPPORTS_REQUEST_ID
+        value: "true"
+      - key: AI_SUPPORTS_REASONING_MODELS
+        value: "true"
+      - key: AI_SUPPORTS_RETRYABLE_IDEMPOTENT_REQUESTS
+        value: "false"
+      - key: AI_REASONING_EFFORT
+        value: low
+      - key: AI_CERTIFICATION_MAX_TOKENS
+        value: "192"
+      - key: AI_CERTIFICATION_TTL_HOURS
+        value: "24"
+      - key: AI_CERTIFICATION_REPEAT_SUPPRESSION_SECONDS
+        value: "60"
+      - key: AI_PROMOTION_MIN_SHADOW_DECISIONS
+        value: "30"
+      - key: AI_PROMOTION_MIN_ASSIST_DECISIONS
+        value: "100"
+      - key: AI_PROMOTION_MIN_SCHEMA_VALID_RATE
+        value: "0.99"
+      - key: AI_PROMOTION_MIN_SEMANTIC_VALID_RATE
+        value: "0.95"
+      - key: AI_PROMOTION_MAX_TRANSPORT_FAILURE_RATE
+        value: "0.05"
       - key: PREMIUM_STARS
         value: "199"
       - key: PREMIUM_DAYS

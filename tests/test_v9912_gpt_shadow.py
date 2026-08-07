@@ -50,6 +50,7 @@ def _valid(**overrides):
         "recommended_action": "ACCEPT_STANDARD", "recommended_risk_multiplier": 1,
         "abstention": False, "supporting_factors": ["trend"], "conflicting_factors": ["volatility"],
         "invalidation_conditions": ["structure break"], "explanation": "Structured evidence supports the setup.",
+        "symbol": None, "reference_price": None,
     }
     payload.update(overrides)
     return payload
@@ -74,12 +75,12 @@ def test_context_is_scoped_and_redacted(ai_db):
 
 
 @pytest.mark.parametrize("payload,code", [
-    ("not-json", "OUTPUT_NOT_JSON"),
+    ("not-json", "NORMALIZED_PAYLOAD_MISSING"),
     (_valid(symbol="ETHUSDT"), "UNKNOWN_SYMBOL"),
-    (_valid(reference_price=-1), "PRICE_MISMATCH"),
+    (_valid(reference_price=101), "PRICE_MISMATCH"),
     (_valid(recommended_action="BUY_NOW"), "SCHEMA_VALIDATION_FAILED"),
     (_valid(confidence=101), "SCHEMA_VALIDATION_FAILED"),
-    (_valid(recommended_risk_multiplier=2), "RISK_MULTIPLIER_INVALID"),
+    (_valid(recommended_risk_multiplier=2), "SCHEMA_VALIDATION_FAILED"),
     (_valid(fabricated_indicator="yes"), "SCHEMA_VALIDATION_FAILED"),
     (_valid(supporting_factors=[]), "ACTION_EVIDENCE_MISSING"),
 ])

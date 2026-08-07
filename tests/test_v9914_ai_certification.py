@@ -19,6 +19,8 @@ def operations_db(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_MODEL", "gpt-test")
     monkeypatch.setenv("AI_PRICE_VERSION", "test-v1")
     monkeypatch.setenv("AI_INPUT_COST_PER_MILLION_USD", "1")
+    monkeypatch.setenv("AI_CACHED_INPUT_COST_PER_MILLION_USD", "0.5")
+    monkeypatch.setenv("AI_CACHE_WRITE_COST_PER_MILLION_USD", "1.25")
     monkeypatch.setenv("AI_OUTPUT_COST_PER_MILLION_USD", "2")
     from database.database import create_tables
     create_tables()
@@ -56,11 +58,13 @@ async def test_successful_certification_is_persisted_and_expires(operations_db):
         endpoint, _api_key = "https://api.openai.com/v1/responses", "secret"
         model, model_version = "gpt-test", "gpt-test-2026"
         capabilities = AIProviderCapabilities(supports_json_schema=True, supports_strict_schema=True,
-            supports_usage_reporting=True, supports_request_id=True, supports_max_tokens=True)
+            supports_usage_reporting=True, supports_request_id=True, supports_max_output_tokens=True)
         async def analyze(self, request):
             return AIProviderResponse(_payload(), self.name, self.model, self.model_version,
                 100, 25, Decimal("0.00015"), provider_request_id="req-cert",
-                provider_protocol=self.protocol, cost_status="PRICED", pricing_version="test-v1")
+                provider_protocol=self.protocol, requested_output_mode="json_schema",
+                effective_output_mode="json_schema", cost_status="PRICED",
+                pricing_version="test-v1", usage_valid=True)
 
     provider = Provider()
     report = await AIProviderCertificationService(provider).certify(7)
@@ -78,7 +82,7 @@ async def test_certification_failure_is_fail_closed(operations_db):
         endpoint, _api_key = "https://api.openai.com/v1/responses", "secret"
         model = model_version = "gpt-test"
         capabilities = AIProviderCapabilities(supports_json_schema=True, supports_strict_schema=True,
-            supports_usage_reporting=True)
+            supports_usage_reporting=True, supports_max_output_tokens=True)
         async def analyze(self, request):
             raise AIProviderError("AI_PROVIDER_HTTP_401")
 
@@ -97,7 +101,7 @@ async def test_certification_timeout_is_bounded(operations_db, monkeypatch):
         endpoint, _api_key = "https://api.openai.com/v1/responses", "secret"
         model = model_version = "gpt-test"
         capabilities = AIProviderCapabilities(supports_json_schema=True, supports_strict_schema=True,
-            supports_usage_reporting=True)
+            supports_usage_reporting=True, supports_max_output_tokens=True)
         async def analyze(self, request):
             await asyncio.sleep(2)
 
@@ -130,7 +134,9 @@ async def test_governance_state_enforces_mode_promotion(operations_db):
         async def analyze(self, request):
             return AIProviderResponse(_payload(), self.name, self.model, self.model_version,
                 10, 10, Decimal("0.00003"), provider_request_id="req-mode",
-                provider_protocol=self.protocol, cost_status="PRICED", pricing_version="test-v1")
+                provider_protocol=self.protocol, requested_output_mode="json_schema",
+                effective_output_mode="json_schema", cost_status="PRICED",
+                pricing_version="test-v1", usage_valid=True)
 
     provider = Provider()
     report = await AIProviderCertificationService(provider).certify()

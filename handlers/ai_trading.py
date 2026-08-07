@@ -15,7 +15,7 @@ from services.ai_trading import (
 )
 from services.ai_operations import (
     AIConfigurationValidator, AIControlRepository, AIGovernanceState, AIProviderCertificationService,
-    provider_identity,
+    promotion_evidence, provider_identity,
 )
 
 
@@ -65,17 +65,51 @@ def _signal_id(message: Message) -> int | None:
     return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
 
 
+def _provider_snapshot(telegram_id: int | None = None) -> dict:
+    provider = build_ai_provider()
+    identity = provider_identity(provider)
+    validation = AIConfigurationValidator().validate(provider)
+    controls = AIControlRepository()
+    certification = controls.certification_state(provider, validation)
+    current = AIEvaluationService().metrics(telegram_id, identity["identity_checksum"])
+    global_history = AIEvaluationService().metrics(telegram_id)
+    governance = controls.governance_state(identity["provider"], identity["identity_checksum"])
+    blockers = list(validation.errors)
+    if certification["state"] != "PASSED":
+        blockers.append(f"CERTIFICATION_{certification['state']}")
+    if controls.kill_status().get("enabled"):
+        blockers.append("GLOBAL_AI_KILL_SWITCH")
+    try:
+        if current["decision_count"] < int(os.getenv("AI_PROMOTION_MIN_SHADOW_DECISIONS", "30")):
+            blockers.append("CURRENT_IDENTITY_SAMPLE_MINIMUM")
+        if current["valid_schema_rate"] < float(os.getenv("AI_PROMOTION_MIN_SCHEMA_VALID_RATE", "0.99")):
+            blockers.append("SCHEMA_VALID_RATE_BELOW_MINIMUM")
+        if current["semantic_valid_rate"] < float(os.getenv("AI_PROMOTION_MIN_SEMANTIC_VALID_RATE", "0.95")):
+            blockers.append("SEMANTIC_VALID_RATE_BELOW_MINIMUM")
+        if current["transport_failure_rate"] > float(os.getenv("AI_PROMOTION_MAX_TRANSPORT_FAILURE_RATE", "0.05")):
+            blockers.append("TRANSPORT_FAILURE_RATE_ABOVE_MAXIMUM")
+    except ValueError:
+        blockers.append("PROMOTION_THRESHOLD_CONFIG_INVALID")
+    return {"provider": provider, "identity": identity, "validation": validation,
+            "certification": certification, "current": current, "global": global_history,
+            "governance": governance, "blockers": list(dict.fromkeys(blockers))}
+
+
 @router.message(Command("ai_status"))
 async def ai_status(message: Message) -> None:
     user_id = message.from_user.id
     mode = configured_ai_mode(user_id)
-    metrics = AIEvaluationService().metrics(user_id)
+    snapshot = _provider_snapshot(user_id)
+    metrics, global_metrics = snapshot["current"], snapshot["global"]
+    identity = snapshot["identity"]
     latest = AIDecisionRepository().latest(telegram_id=user_id)
+    state_key = f"{snapshot['provider'].name}:{identity['identity_checksum']}"
     with connect() as conn:
-        state = conn.execute("SELECT * FROM ai_provider_state WHERE provider=?", (os.getenv("AI_PROVIDER", "disabled"),)).fetchone()
+        state = conn.execute("SELECT * FROM ai_provider_state WHERE provider=? AND identity_checksum=?",
+            (state_key, identity["identity_checksum"])).fetchone()
     health = state["state"] if state else ("DISABLED" if os.getenv("AI_PROVIDER", "disabled") == "disabled" else "UNKNOWN")
     try:
-        provider = build_ai_provider()
+        provider = snapshot["provider"]
         capabilities = provider.capabilities
         protocol = provider.protocol
         strict = capabilities.supports_json_schema and capabilities.supports_strict_schema
@@ -85,12 +119,17 @@ async def ai_status(message: Message) -> None:
         f"🤖 <b>AI intelligence status</b>\n\nMode: <code>{mode.value}</code>\n"
         f"Provider/model: <code>{escape(os.getenv('AI_PROVIDER','disabled'))} / {escape(os.getenv('AI_MODEL','unset') or 'unset')}</code>\n"
         f"Protocol / strict schema: <code>{escape(protocol)} / {'YES' if strict else 'NO'}</code>\n"
-        f"Health: <b>{escape(str(health))}</b>\nDecisions: <b>{metrics['decision_count']}</b>\n"
+        f"Identity: <code>{identity['identity_checksum'][:16]}</code>\n"
+        f"Certification / governance: <b>{snapshot['certification']['state']} / {snapshot['governance']}</b>\n"
+        f"Health: <b>{escape(str(health))}</b>\nCurrent identity decisions: <b>{metrics['decision_count']}</b>\n"
+        f"Global history decisions: <b>{global_metrics['decision_count']}</b>\n"
         f"Abstention: <code>{metrics['abstention_rate']:.1%}</code>\n"
         f"Schema / semantic valid: <code>{metrics['valid_schema_rate']:.1%} / {metrics['semantic_valid_rate']:.1%}</code>\n"
         f"Downgrades: <b>{metrics['downgrade_count']}</b>\n"
         f"Average latency: <code>{metrics['average_latency_ms']:.1f} ms</code>\n"
         f"Cost: <code>${escape(metrics['estimated_cost_usd'])}</code>\n"
+        f"Request IDs available: <b>{'YES' if metrics['request_ids_available'] else 'NO'}</b>\n"
+        f"Activation blockers: <code>{escape(', '.join(snapshot['blockers']) or 'none')}</code>\n"
         f"Latest: <code>{escape(str(latest['recommended_action'])) if latest else 'none'}</code>\n\n"
         "AI is advisory and cannot place, modify, or close orders.")
 
@@ -107,7 +146,7 @@ async def ai_mode(message: Message) -> None:
         await message.answer("Unknown AI mode. Use AI_OFF, AI_OBSERVE, AI_SHADOW, or AI_ASSIST.")
         return
     effective = set_user_ai_mode(message.from_user.id, requested)
-    suffix = " AI_GATED is fail-closed in v9.9.14." if requested is AITradingMode.AI_GATED else ""
+    suffix = " AI_GATED is fail-closed in v9.9.15." if requested is AITradingMode.AI_GATED else ""
     await message.answer(f"AI mode set to <code>{effective.value}</code>.{suffix}")
 
 
@@ -128,13 +167,18 @@ async def ai_decision(message: Message) -> None:
 @router.message(Command("ai_compare"))
 @router.message(Command("ai_quality"))
 async def ai_metrics(message: Message) -> None:
-    quality = AIEvaluationService().quality_report(message.from_user.id)
+    snapshot = _provider_snapshot(message.from_user.id)
+    identity = snapshot["identity"]
+    quality = AIEvaluationService().quality_report(
+        message.from_user.id, identity_checksum=identity["identity_checksum"])
     metrics = quality["metrics"]
+    global_metrics = snapshot["global"]
     calibration = metrics["calibration"]
     window = quality["rolling"]["24h"]
     distribution = ", ".join(f"{escape(k)}={v}" for k, v in sorted(metrics["recommendations"].items())) or "none"
     await message.answer(
-        f"📊 <b>AI shadow metrics</b>\n\nDecisions: <b>{metrics['decision_count']}</b>\n"
+        f"📊 <b>AI shadow metrics</b>\n\n<b>CURRENT PROVIDER IDENTITY</b> <code>{identity['identity_checksum'][:16]}</code>\n"
+        f"Decisions: <b>{metrics['decision_count']}</b>\n"
         f"Valid schema: <code>{metrics['valid_schema_rate']:.1%}</code>\n"
         f"Semantic valid: <code>{metrics['semantic_valid_rate']:.1%}</code>\n"
         f"Abstention: <code>{metrics['abstention_rate']:.1%}</code>\nDistribution: <code>{distribution}</code>\n"
@@ -143,33 +187,44 @@ async def ai_metrics(message: Message) -> None:
         f"Brier / ECE: <code>{calibration['brier_score']} / {calibration['expected_calibration_error']}</code>\n"
         f"Resolved calibration samples: <b>{calibration['sample_size']}</b>\n"
         f"24h requests / p95: <code>{window['requests']} / {window['latency_ms']['p95']:.1f} ms</code>\n"
+        f"Transport failures / timeouts / 429 / 5xx: <code>{metrics['transport_failure_count']} / {metrics['timeout_count']} / {metrics['rate_limit_count']} / {metrics['server_error_count']}</code>\n"
+        f"Duplicates / queue drops: <code>{metrics['duplicates_suppressed']} / {metrics['queue_drops']}</code>\n"
         f"Accept / reject / abstain cohorts: <code>{quality['counterfactual']['ai_accept']['sample_size']} / "
         f"{quality['counterfactual']['ai_reject']['sample_size']} / {quality['counterfactual']['ai_abstain']['sample_size']}</code>\n\n"
+        f"<b>GLOBAL HISTORY</b> decisions / cost: <code>{global_metrics['decision_count']} / ${escape(global_metrics['estimated_cost_usd'])}</code>\n\n"
         "No improvement claim is made without sufficient out-of-sample evidence.")
 
 
 @router.message(Command("ai_cost"))
 async def ai_cost(message: Message) -> None:
-    metrics = AIEvaluationService().metrics(message.from_user.id)
-    await message.answer(f"AI recorded cost: <code>${escape(metrics['estimated_cost_usd'])}</code> · status <b>{escape(metrics['cost_status'])}</b> across <b>{metrics['decision_count']}</b> decisions.")
+    snapshot = _provider_snapshot(message.from_user.id)
+    metrics, global_metrics = snapshot["current"], snapshot["global"]
+    await message.answer(
+        f"<b>CURRENT PROVIDER IDENTITY</b> <code>{snapshot['identity']['identity_checksum'][:16]}</code>\n"
+        f"Tokens input / cached / cache-write / output / reasoning: <code>{metrics['input_tokens']} / {metrics['cached_tokens']} / {metrics['cache_write_tokens']} / {metrics['output_tokens']} / {metrics['reasoning_tokens']}</code>\n"
+        f"Cost: <code>${escape(metrics['estimated_cost_usd'])}</code> · status <b>{escape(metrics['cost_status'])}</b> · requests <b>{metrics['decision_count']}</b>\n\n"
+        f"<b>GLOBAL HISTORY</b>\nCost: <code>${escape(global_metrics['estimated_cost_usd'])}</code> · requests <b>{global_metrics['decision_count']}</b>")
 
 
 @router.message(Command("ai_provider"))
 async def ai_provider(message: Message) -> None:
-    provider = build_ai_provider()
-    identity = provider_identity(provider)
-    validation = AIConfigurationValidator().validate(provider)
+    snapshot = _provider_snapshot()
+    identity, validation = snapshot["identity"], snapshot["validation"]
+    certification, metrics = snapshot["certification"], snapshot["current"]
     controls = AIControlRepository()
-    certification = controls.certification(identity["identity_checksum"])
-    governance = controls.governance_state(identity["provider"], identity["identity_checksum"])
     kill = controls.kill_status()
+    row = certification.get("row") or {}
     await message.answer(
         f"🤖 <b>AI provider</b>\n\nProvider / protocol: <code>{escape(identity['provider'])} / {escape(identity['protocol'])}</code>\n"
         f"Endpoint: <code>{escape(identity['endpoint'])}</code>\nModel: <code>{escape(identity['model'])}</code>\n"
         f"Identity: <code>{identity['identity_checksum'][:16]}</code>\nConfiguration: <b>{'VALID' if validation.valid else 'INVALID'}</b>\n"
-        f"Certification: <b>{'VALID' if certification else 'MISSING_OR_EXPIRED'}</b>\nGovernance: <b>{governance}</b>\n"
+        f"Output / reasoning: <code>{identity['effective_output_mode']} / {identity['reasoning_effort'] or 'none'}</code>\n"
+        f"Certification: <b>{certification['state']}</b> · expiry <code>{escape(str(row.get('expires_at') or 'none'))}</code>\n"
+        f"Governance: <b>{snapshot['governance']}</b>\n"
+        f"Current identity decisions / schema / semantic: <code>{metrics['decision_count']} / {metrics['valid_schema_rate']:.1%} / {metrics['semantic_valid_rate']:.1%}</code>\n"
+        f"Current cost / request IDs: <code>${escape(metrics['estimated_cost_usd'])} / {'YES' if metrics['request_ids_available'] else 'NO'}</code>\n"
         f"Global kill switch: <b>{'ON' if kill['enabled'] else 'OFF'}</b>\n"
-        f"Errors: <code>{escape(', '.join(validation.errors) or 'none')}</code>\n\nAI remains advisory-only.")
+        f"Activation/promotion blockers: <code>{escape(', '.join(snapshot['blockers']) or 'none')}</code>\n\nAI remains advisory-only.")
 
 
 @router.message(Command("ai_certification"))
@@ -181,13 +236,32 @@ async def ai_certification(message: Message) -> None:
     provider = build_ai_provider()
     identity = provider_identity(provider)
     if len(parts) < 2:
-        row = AIControlRepository().certification(identity["identity_checksum"])
-        await message.answer("Certification: " + (f"<b>VALID</b> until <code>{escape(row['expires_at'])}</code>" if row else "<b>MISSING_OR_EXPIRED</b>\nRun <code>/ai_certification run</code>."))
+        summary = AIControlRepository().certification_state(provider)
+        row = summary.get("row") or {}
+        await message.answer(
+            f"Certification: <b>{summary['state']}</b>\n"
+            f"Identity: <code>{identity['identity_checksum'][:16]}</code>\n"
+            f"Started/completed: <code>{escape(str(row.get('started_at') or 'never'))} / {escape(str(row.get('completed_at') or 'never'))}</code>\n"
+            f"Expires: <code>{escape(str(row.get('expires_at') or 'none'))}</code>\n"
+            f"Validation: <code>{escape(str(row.get('validation_stage') or 'none'))} / {escape(str(row.get('validation_code') or 'none'))}</code>\n"
+            "Run <code>/ai_certification run</code> to make one paid provider request.")
         return
     action = parts[1].lower()
     if action == "run":
+        await message.answer("⚠️ If configuration is valid, certification now contacts the real provider, makes one bounded request, and incurs API usage. Repeated runs are temporarily suppressed.")
         report = await AIProviderCertificationService(provider).certify(message.from_user.id)
-        await message.answer(f"Certification: <b>{report['status']}</b>\nFailure: <code>{escape(report['failure_code'] or 'none')}</code>\nExpires: <code>{escape(report['expires_at'])}</code>")
+        if report.get("duplicate_suppressed"):
+            await message.answer(
+                f"Certification: <b>{report['status']}</b>\nFailure: <code>{escape(report['failure_code'])}</code>\n"
+                "No provider request was made and no additional API charge was incurred.")
+            return
+        await message.answer(
+            f"Certification: <b>{report['status']}</b>\n"
+            f"Failure: <code>{escape(report['failure_code'] or 'none')}</code>\n"
+            f"Stage: <code>{escape(report.get('validation_stage') or 'none')}</code>\n"
+            f"Request ID available: <b>{'YES' if report['checks'].get('request_id_available') else 'NO'}</b>\n"
+            f"Usage/cost: <code>{'PASS' if report['checks'].get('usage_reporting') else 'FAIL'} / {'PASS' if report['checks'].get('cost_parsed') else 'FAIL'}</code>\n"
+            f"Expires: <code>{escape(str(report['expires_at'] or 'none'))}</code>")
         return
     controls = AIControlRepository()
     certification = controls.certification(identity["identity_checksum"])
@@ -201,19 +275,16 @@ async def ai_certification(message: Message) -> None:
         if not certification:
             await message.answer("Promotion blocked: <code>VALID_CERTIFICATION_REQUIRED</code>")
             return
-        metrics = AIEvaluationService().metrics()
         target = AIGovernanceState.SHADOW_CERTIFIED if parts[2].lower() == "shadow" else AIGovernanceState.ASSIST_CERTIFIED
-        minimum = 30 if target is AIGovernanceState.SHADOW_CERTIFIED else 100
-        eligible = metrics["decision_count"] >= minimum and metrics["semantic_valid_rate"] >= .95 and metrics["valid_schema_rate"] >= .99
-        if target is AIGovernanceState.ASSIST_CERTIFIED:
-            eligible = eligible and metrics["calibration"]["sample_size"] >= 100
-        if not eligible:
-            await message.answer(f"Promotion blocked: <code>INSUFFICIENT_CERTIFICATION_EVIDENCE</code> ({metrics['decision_count']}/{minimum} decisions).")
+        evidence = promotion_evidence(provider, target)
+        if not evidence["eligible"]:
+            await message.answer(
+                f"Promotion blocked: <code>{escape(', '.join(evidence['blockers']))}</code>\n"
+                f"Current identity decisions: <code>{evidence['metrics']['decision_count']}</code>.")
             return
         controls.transition(identity["provider"], identity["identity_checksum"], target,
                             "EVIDENCE_REVIEW_PASSED", message.from_user.id,
-                            {"decision_count": metrics["decision_count"], "semantic_valid_rate": metrics["semantic_valid_rate"],
-                             "valid_schema_rate": metrics["valid_schema_rate"], "calibration_samples": metrics["calibration"]["sample_size"]})
+                            evidence["evidence"])
         await message.answer(f"Provider promoted to <b>{target.value}</b>.")
         return
     await message.answer("Use <code>/ai_certification run|promote shadow|promote assist|suspend|retire</code>.")
@@ -230,7 +301,9 @@ async def ai_drift(message: Message) -> None:
         captured = AIEvaluationService().capture_drift_baseline(identity["identity_checksum"], message.from_user.id)
         await message.answer(f"AI drift baseline: <b>{captured['status']}</b> · samples <code>{captured['sample_size']}</code>")
         return
-    report = AIEvaluationService().drift(message.from_user.id)
+    identity = provider_identity(build_ai_provider())
+    report = AIEvaluationService().drift(
+        message.from_user.id, identity_checksum=identity["identity_checksum"])
     alerts = ", ".join(item["metric"] for item in report["alerts"]) or "none"
     await message.answer(f"AI drift: <b>{report['status']}</b>\n24h / baseline samples: <code>{report['current_samples']} / {report['baseline_samples']}</code>\nAlerts: <code>{escape(alerts)}</code>")
 

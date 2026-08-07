@@ -19,7 +19,7 @@ def _request(mode=AIOutputMode.STRICT_JSON_SCHEMA):
 
 
 def test_release_and_schema_checksum_are_stable():
-    assert APP_VERSION == "9.9.14" and RELEASE_NAME == "AI Provider Certification and Shadow Evaluation"
+    assert APP_VERSION == "9.9.15" and RELEASE_NAME == "OpenAI Provider Certification Readiness"
     assert SCHEMA_CHECKSUM == checksum(RESPONSE_SCHEMA)
     assert RESPONSE_SCHEMA["additionalProperties"] is False
     assert set(RESPONSE_SCHEMA["required"]) <= set(RESPONSE_SCHEMA["properties"])
@@ -134,7 +134,7 @@ async def test_responses_output_and_usage_normalization(monkeypatch):
             }}, None)
 
     result = await Provider().analyze(_request())
-    assert result.payload == "{}" and result.provider_request_id == "resp-id"
+    assert result.payload == {} and result.structured_text == "{}" and result.provider_request_id == "resp-id"
     assert result.input_tokens == 10 and result.output_tokens == 5
     assert result.cost_status == "UNPRICED"
 
@@ -148,6 +148,5 @@ async def test_malformed_outer_response_is_normalized(monkeypatch):
         async def _post(self, body):
             return ({"choices": []}, None)
 
-    with pytest.raises(AIProviderError) as error:
-        await Provider().analyze(_request())
-    assert error.value.code == "PROVIDER_RESPONSE_INVALID" and not error.value.retryable
+    result = await Provider().analyze(_request())
+    assert not result.extraction_valid and result.extraction_code == "CHAT_CHOICES_MISSING"

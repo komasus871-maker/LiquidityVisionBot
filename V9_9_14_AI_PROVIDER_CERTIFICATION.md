@@ -1,5 +1,7 @@
 # LiquidityVisionBot v9.9.14 — AI Provider Certification and Shadow Evaluation
 
+> Historical release document. v9.9.15 supersedes the provider parsing, certification-state, identity scope, pricing example, and rollout procedure. Use `OPENAI_PROVIDER_RUNBOOK.md` for production.
+
 ## Production activation
 
 AI is advisory-only. Start with `AI_PROVIDER=disabled` and `AI_TRADING_MODE=AI_OFF`, deploy the additive migration, then configure the provider. A non-disabled production HTTP provider cannot be invoked until its exact identity has a passing, unexpired certification. Identity includes provider, protocol, redacted full endpoint, model and model version, prompt/schema/context/request versions, pricing version and declared capabilities.

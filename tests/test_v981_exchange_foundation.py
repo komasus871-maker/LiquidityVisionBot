@@ -30,7 +30,7 @@ class StubBinance(BinanceUsdmAdapter):
 
 @pytest.mark.asyncio
 async def test_release_metadata() -> None:
-    assert APP_VERSION == "9.9.14"
+    assert APP_VERSION == "9.9.15"
     assert "AI Provider Certification" in RELEASE_NAME
 
 

@@ -49,8 +49,8 @@ def _journal_and_plan(tmp_path, monkeypatch):
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.14"
-    assert RELEASE_NAME == "AI Provider Certification and Shadow Evaluation"
+    assert APP_VERSION == "9.9.15"
+    assert RELEASE_NAME == "OpenAI Provider Certification Readiness"
 
 
 def test_transition_table_exposes_expected_execution_path() -> None:

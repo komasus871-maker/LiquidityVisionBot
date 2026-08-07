@@ -96,7 +96,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.14
+APP_VERSION=9.9.15
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -209,3 +209,7 @@ v9.9.12 adds a provider-neutral GPT trading intelligence layer in `AI_SHADOW` mo
 # LiquidityVisionBot v9.9.14
 
 v9.9.14 adds expiring provider certification, governance audit events, a durable global AI kill switch, rolling provider-quality telemetry, drift detection, deterministic shadow experiments, counterfactual cohorts and stricter startup validation. The AI layer remains advisory and `AI_GATED` remains blocked. See `V9_9_14_AI_PROVIDER_CERTIFICATION.md`.
+
+# LiquidityVisionBot v9.9.15
+
+v9.9.15 normalizes Chat Completions and Responses structured output before one shared validation pipeline, makes real-provider certification bounded and repeat-safe, and scopes governance evidence to the exact provider/model/prompt/schema identity. Historical disabled and unscoped decisions remain immutable and cannot qualify a current provider. The recommended observation transport is OpenAI Responses with `gpt-5.6-terra`, strict JSON Schema, low reasoning effort, external versioned pricing, one provider attempt, and `AI_GATED` still blocked. See `V9_9_15_OPENAI_PROVIDER_CERTIFICATION.md` and `OPENAI_PROVIDER_RUNBOOK.md`.

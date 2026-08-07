@@ -9,7 +9,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
@@ -62,6 +62,7 @@ class AIProviderCapabilities:
     supports_reasoning_models: bool = False
     supports_streaming: bool = False
     supports_retryable_idempotent_requests: bool = False
+    supports_max_output_tokens: bool = False
 
 
 def configured_ai_mode(telegram_id: int | None = None) -> AITradingMode:
@@ -72,11 +73,11 @@ def configured_ai_mode(telegram_id: int | None = None) -> AITradingMode:
             if row:
                 raw = str(row["mode"]).upper()
             else:
-                raw = os.getenv("AI_TRADING_MODE", "AI_SHADOW").strip().upper()
+                raw = os.getenv("AI_TRADING_MODE", "AI_OFF").strip().upper()
         except Exception:
-            raw = os.getenv("AI_TRADING_MODE", "AI_SHADOW").strip().upper()
+            raw = os.getenv("AI_TRADING_MODE", "AI_OFF").strip().upper()
     else:
-        raw = os.getenv("AI_TRADING_MODE", "AI_SHADOW").strip().upper()
+        raw = os.getenv("AI_TRADING_MODE", "AI_OFF").strip().upper()
     try:
         mode = AITradingMode(raw)
     except ValueError:
@@ -107,6 +108,13 @@ def _canonical(value: Any) -> str:
 
 def checksum(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+def transport_checksum(value: Any) -> str:
+    """Hash an untrusted transport envelope without retaining or rendering its contents."""
+    serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                            default=lambda item: f"<{type(item).__name__}>")
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 _SECRET_KEYS = re.compile(r"(api.?key|secret|token|password|database.?url|credential|passphrase)", re.I)
@@ -207,11 +215,6 @@ class AIContextBuilder:
         safe_features["market_intelligence"] = {
             key: safe_features.pop(key, "UNAVAILABLE") for key in intelligence_keys
         }
-        try:
-            observed = datetime.fromisoformat(market_timestamp.replace("Z", "+00:00"))
-            safe_features["data_freshness_seconds"] = max(0, int((datetime.now(timezone.utc) - observed).total_seconds()))
-        except (TypeError, ValueError):
-            safe_features["data_freshness_seconds"] = "UNAVAILABLE"
         return AIContext(
             telegram_id=item.get("owner_telegram_id"), signal_id=signal_id,
             symbol=str(item["symbol"]).upper(), timeframe=str(item["timeframe"]),
@@ -237,7 +240,7 @@ class AIProviderRequest:
 
 @dataclass(frozen=True, slots=True)
 class AIProviderResponse:
-    payload: dict[str, Any] | str | None
+    payload: dict[str, Any] | None = field(repr=False)
     provider: str
     model: str = ""
     model_version: str = ""
@@ -246,6 +249,7 @@ class AIProviderResponse:
     estimated_cost_usd: Decimal = Decimal("0")
     raw_checksum: str | None = None
     cached_tokens: int = 0
+    cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     provider_request_id: str | None = None
     provider_protocol: str = "disabled"
@@ -255,6 +259,36 @@ class AIProviderResponse:
     cost_status: str = "UNPRICED"
     pricing_version: str | None = None
     provider_usage_json: str | None = None
+    structured_text: str | None = field(default=None, repr=False, compare=False)
+    extraction_valid: bool = True
+    extraction_code: str = "VALID"
+    extraction_stage: str = "STRUCTURED_EXTRACTION"
+    raw_envelope_checksum: str | None = None
+    identity_checksum: str | None = None
+    endpoint_redacted: str | None = None
+    capability_snapshot_json: str | None = None
+    reasoning_effort: str | None = None
+    usage_valid: bool = False
+    provider_invoked: bool = False
+
+    def __post_init__(self) -> None:
+        # Directly injected test providers receive the same normalized contract as HTTP adapters.
+        if isinstance(self.payload, str):
+            text, payload, valid, code = normalize_structured_payload(self.payload)
+            object.__setattr__(self, "payload", payload)
+            object.__setattr__(self, "structured_text", text)
+            object.__setattr__(self, "extraction_valid", valid)
+            object.__setattr__(self, "extraction_code", code)
+            if self.raw_checksum is None and text is not None:
+                object.__setattr__(self, "raw_checksum", checksum(text))
+        elif isinstance(self.payload, dict) and self.structured_text is None:
+            text, payload, valid, code = normalize_structured_payload(self.payload)
+            object.__setattr__(self, "payload", payload)
+            object.__setattr__(self, "structured_text", text)
+            object.__setattr__(self, "extraction_valid", valid)
+            object.__setattr__(self, "extraction_code", code)
+            if self.raw_checksum is None:
+                object.__setattr__(self, "raw_checksum", checksum(text) if text is not None else None)
 
 
 class AIProvider(Protocol):
@@ -302,8 +336,89 @@ class AIProviderError(RuntimeError):
         super().__init__(code)
 
 
+def normalize_structured_payload(value: Any) -> tuple[str | None, dict[str, Any] | None, bool, str]:
+    """Parse provider structured output exactly once without retaining the transport envelope."""
+    if isinstance(value, dict):
+        try:
+            return _canonical(value), value, True, "VALID"
+        except (TypeError, ValueError):
+            return None, None, False, "STRUCTURED_CANONICALIZATION_FAILED"
+    if not isinstance(value, str):
+        return None, None, False, "STRUCTURED_CONTENT_MISSING"
+    text = value.strip()
+    if not text:
+        return None, None, False, "STRUCTURED_CONTENT_EMPTY"
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text, None, False, "STRUCTURED_JSON_INVALID"
+    if not isinstance(parsed, dict):
+        return text, None, False, "STRUCTURED_JSON_NOT_OBJECT"
+    return text, parsed, True, "VALID"
+
+
+def _normalized_response(*, content: Any, provider: str, model: str, model_version: str,
+                         protocol: str, request: AIProviderRequest, input_tokens: int,
+                         output_tokens: int, cached_tokens: int, cache_write_tokens: int,
+                         reasoning_tokens: int,
+                         cost: Decimal, cost_status: str, pricing_version: str | None,
+                         usage_json: str, request_id: str | None, envelope: dict[str, Any],
+                         usage_valid: bool) -> AIProviderResponse:
+    text, payload, valid, code = normalize_structured_payload(content)
+    return AIProviderResponse(
+        payload=payload, provider=provider, model=model, model_version=model_version,
+        input_tokens=input_tokens, output_tokens=output_tokens, estimated_cost_usd=cost,
+        raw_checksum=checksum(text) if text is not None else None,
+        cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens,
+        reasoning_tokens=reasoning_tokens,
+        provider_request_id=request_id, provider_protocol=protocol,
+        requested_output_mode=request.requested_output_mode.value,
+        effective_output_mode=request.effective_output_mode.value,
+        cost_status=cost_status, pricing_version=pricing_version,
+        provider_usage_json=usage_json, structured_text=text,
+        extraction_valid=valid, extraction_code=code,
+        raw_envelope_checksum=transport_checksum(envelope),
+        reasoning_effort=os.getenv("AI_REASONING_EFFORT", "low").strip().lower()
+            if protocol == "responses" else None,
+        usage_valid=usage_valid,
+        provider_invoked=True,
+    )
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, "true" if default else "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int | None = None,
+             maximum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None,
+               maximum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    if not math.isfinite(value):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def configured_ai_interval() -> int:
+    return _env_int("AI_SHADOW_INTERVAL", 60, 30, 3600)
 
 
 def configured_capabilities(protocol: str) -> AIProviderCapabilities:
@@ -322,18 +437,19 @@ def configured_capabilities(protocol: str) -> AIProviderCapabilities:
         supports_request_id=_env_bool("AI_SUPPORTS_REQUEST_ID", True),
         supports_reasoning_models=_env_bool("AI_SUPPORTS_REASONING_MODELS", responses),
         supports_streaming=_env_bool("AI_SUPPORTS_STREAMING", False),
-        supports_retryable_idempotent_requests=_env_bool("AI_SUPPORTS_RETRYABLE_IDEMPOTENT_REQUESTS", True),
+        supports_retryable_idempotent_requests=_env_bool("AI_SUPPORTS_RETRYABLE_IDEMPOTENT_REQUESTS", False),
+        supports_max_output_tokens=_env_bool("AI_SUPPORTS_MAX_OUTPUT_TOKENS", responses),
     )
 
 
 def resolve_output_mode(capabilities: AIProviderCapabilities) -> tuple[AIOutputMode, AIOutputMode, str | None]:
-    raw = os.getenv("AI_STRUCTURED_OUTPUT_MODE", "auto").strip().lower()
+    raw = os.getenv("AI_STRUCTURED_OUTPUT_MODE", "json_schema").strip().lower()
     try:
         requested = AIOutputMode(raw)
     except ValueError:
         return AIOutputMode.DISABLED, AIOutputMode.DISABLED, "OUTPUT_MODE_INVALID"
-    strict_required = _env_bool("AI_STRICT_SCHEMA_REQUIRED", False)
-    fallback = _env_bool("AI_ALLOW_JSON_OBJECT_FALLBACK", True)
+    strict_required = _env_bool("AI_STRICT_SCHEMA_REQUIRED", True)
+    fallback = _env_bool("AI_ALLOW_JSON_OBJECT_FALLBACK", False)
     if requested is AIOutputMode.DISABLED:
         return requested, AIOutputMode.DISABLED, None
     if requested in {AIOutputMode.AUTO, AIOutputMode.STRICT_JSON_SCHEMA}:
@@ -366,7 +482,7 @@ class BaseHTTPAIProvider:
     async def _post(self, body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         if not self.endpoint or not self.model or not self._api_key:
             raise AIProviderError("AI_PROVIDER_NOT_CONFIGURED")
-        timeout = aiohttp.ClientTimeout(total=max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "8"))))
+        timeout = aiohttp.ClientTimeout(total=_env_float("AI_REQUEST_TIMEOUT_SECONDS", 15, 1, 120))
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(self.endpoint, json=body, headers=self._headers()) as response:
@@ -376,7 +492,15 @@ class BaseHTTPAIProvider:
                         retryable = status == 429 or status >= 500
                         raise AIProviderError("PROVIDER_RATE_LIMIT" if status == 429 else f"AI_PROVIDER_HTTP_{status}", retryable=retryable)
                     try:
-                        data = await response.json()
+                        maximum = _env_int("AI_PROVIDER_MAX_RESPONSE_BYTES", 1_000_000, 16_384, 10_000_000)
+                        raw = bytearray()
+                        async for chunk in response.content.iter_chunked(65_536):
+                            raw.extend(chunk)
+                            if len(raw) > maximum:
+                                raise AIProviderError("PROVIDER_RESPONSE_TOO_LARGE")
+                        data = json.loads(bytes(raw))
+                    except AIProviderError:
+                        raise
                     except Exception as exc:
                         raise AIProviderError("PROVIDER_RESPONSE_INVALID") from exc
         except asyncio.TimeoutError as exc:
@@ -388,28 +512,65 @@ class BaseHTTPAIProvider:
         return data, request_id
 
     @staticmethod
-    def _usage(data: dict[str, Any]) -> tuple[int, int, int, int, str]:
-        usage = data.get("usage") or {}
+    def _usage(data: dict[str, Any]) -> tuple[int, int, int, int, int, str, bool]:
+        usage = data.get("usage")
+        valid = isinstance(usage, dict) and any(
+            key in usage for key in ("prompt_tokens", "input_tokens")
+        ) and any(key in usage for key in ("completion_tokens", "output_tokens"))
         if not isinstance(usage, dict):
             usage = {}
-        input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        try:
+            input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        except (TypeError, ValueError, OverflowError):
+            input_tokens = output_tokens = 0
+            valid = False
         input_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
         output_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
-        cached = int(input_details.get("cached_tokens") or 0) if isinstance(input_details, dict) else 0
-        reasoning = int(output_details.get("reasoning_tokens") or 0) if isinstance(output_details, dict) else 0
-        return input_tokens, output_tokens, cached, reasoning, _canonical(usage)
+        try:
+            cached = int(input_details.get("cached_tokens") or 0) if isinstance(input_details, dict) else 0
+            cache_write = int(input_details.get("cache_write_tokens") or 0) if isinstance(input_details, dict) else 0
+            reasoning = int(output_details.get("reasoning_tokens") or 0) if isinstance(output_details, dict) else 0
+        except (TypeError, ValueError, OverflowError):
+            cached = cache_write = reasoning = 0
+            valid = False
+        # Cache reads and writes may overlap, but neither may exceed total input.
+        if (min(input_tokens, output_tokens, cached, cache_write, reasoning) < 0 or
+                cached > input_tokens or cache_write > input_tokens or reasoning > output_tokens):
+            valid = False
+        normalized = {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                      "cached_tokens": cached, "cache_write_tokens": cache_write,
+                      "reasoning_tokens": reasoning,
+                      "reported": valid}
+        return input_tokens, output_tokens, cached, cache_write, reasoning, _canonical(normalized), valid
 
     @staticmethod
-    def _cost(input_tokens: int, output_tokens: int, cached_tokens: int) -> tuple[Decimal, str, str | None]:
+    def _cost(input_tokens: int, output_tokens: int, cached_tokens: int,
+              cache_write_tokens: int,
+              usage_valid: bool = True) -> tuple[Decimal, str, str | None]:
         price_version = os.getenv("AI_PRICE_VERSION", "").strip() or None
         input_raw, output_raw = os.getenv("AI_INPUT_COST_PER_MILLION_USD", "").strip(), os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "").strip()
-        if not price_version or not input_raw or not output_raw:
+        cached_raw = os.getenv("AI_CACHED_INPUT_COST_PER_MILLION_USD", "").strip()
+        cache_write_raw = os.getenv("AI_CACHE_WRITE_COST_PER_MILLION_USD", "").strip()
+        if (not usage_valid or not price_version or not input_raw or not output_raw or
+                (cached_tokens and not cached_raw) or (cache_write_tokens and not cache_write_raw)):
             return Decimal("0"), "UNPRICED", price_version
-        input_rate, output_rate = max(Decimal("0"), Decimal(input_raw)), max(Decimal("0"), Decimal(output_raw))
-        cached_rate = max(Decimal("0"), Decimal(os.getenv("AI_CACHED_INPUT_COST_PER_MILLION_USD", input_raw)))
-        uncached = max(0, input_tokens - cached_tokens)
-        cost = (Decimal(uncached) * input_rate + Decimal(cached_tokens) * cached_rate + Decimal(output_tokens) * output_rate) / Decimal(1_000_000)
+        try:
+            input_rate, output_rate = Decimal(input_raw), Decimal(output_raw)
+            cached_rate = Decimal(cached_raw or input_raw)
+            cache_write_rate = Decimal(cache_write_raw or input_raw)
+        except Exception:
+            return Decimal("0"), "UNPRICED", price_version
+        if any(not rate.is_finite() or rate < 0 for rate in
+               (input_rate, cached_rate, cache_write_rate, output_rate)):
+            return Decimal("0"), "UNPRICED", price_version
+        # GPT-5.6 may report overlapping cache reads and writes. Charge both reported
+        # cache activities and only the input outside the larger cache span.
+        ordinary = max(0, input_tokens - max(cached_tokens, cache_write_tokens))
+        cost = (Decimal(ordinary) * input_rate +
+                Decimal(cached_tokens) * cached_rate +
+                Decimal(cache_write_tokens) * cache_write_rate +
+                Decimal(output_tokens) * output_rate) / Decimal(1_000_000)
         return cost, "PRICED", price_version
 
     async def health(self) -> dict[str, Any]:
@@ -455,19 +616,32 @@ class ChatCompletionsAIProvider(BaseHTTPAIProvider):
 
     async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
         data, request_id = await self._post(self.build_request(request))
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AIProviderError("PROVIDER_RESPONSE_INVALID") from exc
-        if not isinstance(content, (str, dict)):
-            raise AIProviderError("PROVIDER_RESPONSE_INVALID")
-        inp, out, cached, reasoning, usage_json = self._usage(data)
-        cost, cost_status, price_version = self._cost(inp, out, cached)
-        returned_model = str(data.get("model") or self.model_version)
-        return AIProviderResponse(content, self.name, self.model, returned_model, inp, out, cost,
-            checksum(content), cached, reasoning, request_id or data.get("id"), self.protocol,
-            request.requested_output_mode.value, request.effective_output_mode.value, None,
-            cost_status, price_version, usage_json)
+        choices = data.get("choices")
+        extraction_error = None
+        content: Any = None
+        if not isinstance(choices, list) or not choices:
+            extraction_error = "CHAT_CHOICES_MISSING"
+        elif not isinstance(choices[0], dict):
+            extraction_error = "CHAT_CHOICE_INVALID"
+        elif not isinstance(choices[0].get("message"), dict):
+            extraction_error = "CHAT_MESSAGE_MISSING"
+        elif "content" not in choices[0]["message"]:
+            extraction_error = "CHAT_CONTENT_MISSING"
+        else:
+            content = choices[0]["message"].get("content")
+        inp, out, cached, cache_write, reasoning, usage_json, usage_valid = self._usage(data)
+        cost, cost_status, price_version = self._cost(inp, out, cached, cache_write, usage_valid)
+        returned_model = str(data.get("model") or "")
+        response = _normalized_response(content=content, provider=self.name, model=self.model,
+            model_version=returned_model, protocol=self.protocol, request=request,
+            input_tokens=inp, output_tokens=out, cached_tokens=cached,
+            cache_write_tokens=cache_write, reasoning_tokens=reasoning,
+            cost=cost, cost_status=cost_status, pricing_version=price_version,
+            usage_json=usage_json, request_id=request_id or data.get("id"), envelope=data,
+            usage_valid=usage_valid)
+        if extraction_error:
+            response = replace(response, extraction_valid=False, extraction_code=extraction_error)
+        return response
 
 
 class OpenAIResponsesAIProvider(BaseHTTPAIProvider):
@@ -476,27 +650,65 @@ class OpenAIResponsesAIProvider(BaseHTTPAIProvider):
     def build_request(self, request: AIProviderRequest) -> dict[str, Any]:
         if request.effective_output_mode is not AIOutputMode.STRICT_JSON_SCHEMA:
             raise AIProviderError("PROVIDER_CAPABILITY_MISMATCH")
-        return {"model": self.model, "instructions": request.system_prompt,
+        if not self.capabilities.supports_max_output_tokens:
+            raise AIProviderError("MODEL_PARAMETER_UNSUPPORTED")
+        body = {"model": self.model, "instructions": request.system_prompt,
                 "input": _canonical(request.context), "max_output_tokens": request.max_tokens,
                 "text": {"format": {"type": "json_schema",
                     "name": request.schema_version.replace("-", "_")[:64],
                     "strict": True, "schema": request.response_schema}}}
+        effort = os.getenv("AI_REASONING_EFFORT", "low").strip().lower()
+        if self.capabilities.supports_reasoning_models:
+            body["reasoning"] = {"effort": effort}
+        return body
+
+    @staticmethod
+    def _extract_content(data: dict[str, Any]) -> tuple[Any, str | None]:
+        if isinstance(data.get("error"), dict):
+            return None, "RESPONSES_PROVIDER_ERROR"
+        if str(data.get("status") or "").lower() == "incomplete":
+            return None, "RESPONSES_INCOMPLETE"
+        output = data.get("output")
+        if isinstance(output, list):
+            # The last assistant message is the application result. Reasoning items are ignored.
+            for item in reversed(output):
+                if not isinstance(item, dict) or item.get("type") != "message":
+                    continue
+                if item.get("role") not in {None, "assistant"}:
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    return None, "RESPONSES_MESSAGE_CONTENT_INVALID"
+                if any(isinstance(part, dict) and part.get("type") == "refusal" for part in content):
+                    return None, "PROVIDER_REFUSAL"
+                for part in reversed(content):
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") in {"output_text", "text"} and "text" in part:
+                        return part.get("text"), None
+                return None, "RESPONSES_OUTPUT_TEXT_MISSING"
+            return None, "RESPONSES_MESSAGE_MISSING"
+        # Compatibility for injected providers that expose the SDK convenience field.
+        if isinstance(data.get("output_text"), (str, dict)):
+            return data.get("output_text"), None
+        return None, "RESPONSES_OUTPUT_MISSING"
 
     async def analyze(self, request: AIProviderRequest) -> AIProviderResponse:
         data, request_id = await self._post(self.build_request(request))
-        content = data.get("output_text")
-        if not isinstance(content, str):
-            try:
-                content = data["output"][0]["content"][0]["text"]
-            except (KeyError, IndexError, TypeError) as exc:
-                raise AIProviderError("PROVIDER_RESPONSE_INVALID") from exc
-        inp, out, cached, reasoning, usage_json = self._usage(data)
-        cost, cost_status, price_version = self._cost(inp, out, cached)
-        returned_model = str(data.get("model") or self.model_version)
-        return AIProviderResponse(content, self.name, self.model, returned_model, inp, out, cost,
-            checksum(content), cached, reasoning, request_id or data.get("id"), self.protocol,
-            request.requested_output_mode.value, request.effective_output_mode.value, None,
-            cost_status, price_version, usage_json)
+        content, extraction_error = self._extract_content(data)
+        inp, out, cached, cache_write, reasoning, usage_json, usage_valid = self._usage(data)
+        cost, cost_status, price_version = self._cost(inp, out, cached, cache_write, usage_valid)
+        returned_model = str(data.get("model") or "")
+        response = _normalized_response(content=content, provider=self.name, model=self.model,
+            model_version=returned_model, protocol=self.protocol, request=request,
+            input_tokens=inp, output_tokens=out, cached_tokens=cached,
+            cache_write_tokens=cache_write, reasoning_tokens=reasoning,
+            cost=cost, cost_status=cost_status, pricing_version=price_version,
+            usage_json=usage_json, request_id=request_id or data.get("id"), envelope=data,
+            usage_valid=usage_valid)
+        if extraction_error:
+            response = replace(response, extraction_valid=False, extraction_code=extraction_error)
+        return response
 
 
 # Backward-compatible import name; v9.9.13 selects an explicit protocol below.
@@ -506,7 +718,7 @@ StructuredHTTPAIProvider = ChatCompletionsAIProvider
 def build_ai_provider() -> AIProvider:
     if os.getenv("AI_PROVIDER", "disabled").strip().lower() == "disabled":
         return DisabledAIProvider()
-    protocol = os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower()
+    protocol = os.getenv("AI_PROVIDER_PROTOCOL", "responses").strip().lower()
     if protocol == "chat_completions":
         return ChatCompletionsAIProvider()
     if protocol == "responses":
@@ -516,7 +728,7 @@ def build_ai_provider() -> AIProvider:
 
 SCHEMA_VERSION = os.getenv("AI_SCHEMA_VERSION", "ai-decision-v1").strip() or "ai-decision-v1"
 CONTEXT_VERSION = "ai-context-v1"
-REQUEST_FORMAT_VERSION = "ai-provider-request-v2"
+REQUEST_FORMAT_VERSION = "ai-provider-request-v3"
 _REQUIRED_FIELDS = ["regime", "direction", "confidence", "uncertainty", "recommended_action",
                     "recommended_risk_multiplier", "abstention", "supporting_factors",
                     "conflicting_factors", "invalidation_conditions", "explanation"]
@@ -578,19 +790,56 @@ class AIResponseValidator:
         return ValidatedDecision("UNKNOWN", "NEUTRAL", 0, 1, AIAction.ABSTAIN, 0, True,
                                  (), (code,), (), f"AI abstained: {code}", False, code, stage)
 
-    def validate(self, raw: dict[str, Any] | str | None, context: AIContext) -> ValidatedDecision:
+    @staticmethod
+    def _schema_valid(value: Any, schema: dict[str, Any]) -> bool:
+        expected = schema.get("type")
+        accepted = expected if isinstance(expected, list) else [expected] if expected else []
+        if value is None:
+            return "null" in accepted
+        if "object" in accepted:
+            if not isinstance(value, dict):
+                return False
+            required = schema.get("required") or []
+            if any(key not in value for key in required):
+                return False
+            properties = schema.get("properties") or {}
+            if schema.get("additionalProperties") is False and any(key not in properties for key in value):
+                return False
+            return all(key not in properties or AIResponseValidator._schema_valid(item, properties[key])
+                       for key, item in value.items())
+        if "array" in accepted:
+            if not isinstance(value, list) or len(value) > int(schema.get("maxItems", len(value))):
+                return False
+            return all(AIResponseValidator._schema_valid(item, schema.get("items") or {}) for item in value)
+        if "string" in accepted:
+            if not isinstance(value, str):
+                return False
+            if len(value) < int(schema.get("minLength", 0)) or len(value) > int(schema.get("maxLength", len(value))):
+                return False
+        elif "number" in accepted:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                return False
+            if "minimum" in schema and value < schema["minimum"]:
+                return False
+            if "maximum" in schema and value > schema["maximum"]:
+                return False
+            if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
+                return False
+        elif "integer" in accepted:
+            if isinstance(value, bool) or not isinstance(value, int):
+                return False
+        elif "boolean" in accepted:
+            if not isinstance(value, bool):
+                return False
+        if "enum" in schema and value not in schema["enum"]:
+            return False
+        return True
+
+    def validate(self, payload: dict[str, Any] | None, context: AIContext) -> ValidatedDecision:
         try:
-            try:
-                payload = json.loads(raw) if isinstance(raw, str) else raw
-            except (TypeError, json.JSONDecodeError):
-                return self.fallback("OUTPUT_NOT_JSON", "JSON_PARSING")
             if not isinstance(payload, dict):
-                return self.fallback("OUTPUT_NOT_JSON", "JSON_PARSING")
-            missing = [key for key in _REQUIRED_FIELDS if key not in payload]
-            if missing:
-                return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
-            allowed = set(RESPONSE_SCHEMA["properties"])
-            if set(payload) - allowed:
+                return self.fallback("NORMALIZED_PAYLOAD_MISSING", "STRUCTURED_EXTRACTION")
+            if not self._schema_valid(payload, RESPONSE_SCHEMA):
                 return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             try:
                 action = AIAction(str(payload["recommended_action"]).upper())
@@ -620,10 +869,16 @@ class AIResponseValidator:
                     return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             if not isinstance(payload["abstention"], bool):
                 return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
-            timestamp = datetime.fromisoformat(context.market_timestamp.replace("Z", "+00:00"))
+            try:
+                timestamp = datetime.fromisoformat(context.market_timestamp.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return self.fallback("MARKET_TIMESTAMP_INVALID", "MARKET_TRUTH_VALIDATION")
             timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) - timestamp > timedelta(seconds=self.max_age_seconds):
+            age = datetime.now(timezone.utc) - timestamp
+            if age > timedelta(seconds=self.max_age_seconds):
                 return self.fallback("STALE_CONTEXT", "MARKET_TRUTH_VALIDATION")
+            if age < -timedelta(seconds=_env_int("AI_CONTEXT_MAX_FUTURE_SECONDS", 5, 0, 300)):
+                return self.fallback("FUTURE_CONTEXT", "MARKET_TRUTH_VALIDATION")
             factors = tuple(str(x)[:240] for x in payload["supporting_factors"] if str(x).strip())
             conflicts = tuple(str(x)[:240] for x in payload["conflicting_factors"] if str(x).strip())
             invalidations = tuple(str(x)[:240] for x in payload["invalidation_conditions"] if str(x).strip())
@@ -654,6 +909,16 @@ class AIResponseValidator:
             return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
 
 
+def validate_provider_response(response: AIProviderResponse, context: AIContext,
+                               validator: AIResponseValidator | None = None) -> ValidatedDecision:
+    """The only extraction-to-decision validation path used by certification and analysis."""
+    validator = validator or AIResponseValidator(
+        max_age_seconds=_env_int("AI_CONTEXT_MAX_AGE_SECONDS", 300, 1, 86400))
+    if not response.extraction_valid:
+        return validator.fallback(response.extraction_code, response.extraction_stage)
+    return validator.validate(response.payload, context)
+
+
 class AIDecisionRepository:
     def register_prompt(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -670,7 +935,7 @@ class AIDecisionRepository:
              deterministic_accepted: bool | None = None) -> tuple[dict[str, Any], bool]:
         key = checksum({"signal": context.signal_id, "market": context.market_checksum,
                         "features": context.feature_checksum, "prompt": PROMPT_VERSION,
-                        "provider": response.provider, "model": response.model_version})
+                        "identity": response.identity_checksum or response.provider})
         decision_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
         now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
@@ -684,9 +949,11 @@ class AIDecisionRepository:
                 raw_response_checksum,deterministic_accepted,deterministic_action,
                 provider_protocol,schema_version,schema_checksum,context_version,request_format_version,
                 requested_output_mode,effective_output_mode,downgrade_reason,validation_stage,
-                pricing_version,cost_status,cached_tokens,reasoning_tokens,provider_request_id,
-                provider_usage_json,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                pricing_version,cost_status,cached_tokens,cache_write_tokens,reasoning_tokens,provider_request_id,
+                provider_usage_json,provider_identity_checksum,provider_endpoint_redacted,
+                capability_snapshot_json,reasoning_effort,extraction_stage,extraction_code,
+                raw_envelope_checksum,provider_invoked,legacy_classification,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(idempotency_key) DO NOTHING""", (
                 decision_id, key, f"signal:{context.signal_id}", context.telegram_id, context.signal_id,
                 context.symbol, context.timeframe, context.market_timestamp, context.market_checksum,
@@ -694,15 +961,25 @@ class AIDecisionRepository:
                 PROMPT_VERSION, mode.value, decision.regime, decision.direction, decision.confidence,
                 decision.uncertainty, decision.action.value, decision.risk_multiplier, int(decision.abstention),
                 _canonical(decision.supporting), _canonical(decision.conflicting),
-                _canonical(decision.invalidations), decision.explanation, int(decision.valid), decision.code,
+                _canonical(decision.invalidations), decision.explanation,
+                int(decision.validation_stage not in {"STRUCTURED_EXTRACTION", "JSON_SCHEMA_VALIDATION"}),
+                decision.code,
                 latency_ms, response.input_tokens, response.output_tokens, str(response.estimated_cost_usd),
                 response.raw_checksum, None if deterministic_accepted is None else int(deterministic_accepted),
                 "ACCEPT" if deterministic_accepted else "REJECT" if deterministic_accepted is False else None,
                 response.provider_protocol, SCHEMA_VERSION, SCHEMA_CHECKSUM, CONTEXT_VERSION,
                 REQUEST_FORMAT_VERSION, response.requested_output_mode, response.effective_output_mode,
                 response.downgrade_reason, decision.validation_stage, response.pricing_version,
-                response.cost_status, response.cached_tokens, response.reasoning_tokens,
-                response.provider_request_id, response.provider_usage_json, now,
+                response.cost_status, response.cached_tokens, response.cache_write_tokens,
+                response.reasoning_tokens,
+                response.provider_request_id, response.provider_usage_json,
+                response.identity_checksum, response.endpoint_redacted,
+                response.capability_snapshot_json, response.reasoning_effort,
+                response.extraction_stage, response.extraction_code,
+                response.raw_envelope_checksum, int(response.provider_invoked),
+                "CURRENT_IDENTITY" if response.identity_checksum else
+                "LEGACY_DISABLED" if response.provider == "disabled" else "LEGACY_UNSCOPED",
+                now,
             ))
             created = cur.rowcount == 1
             row = conn.execute("SELECT * FROM ai_decisions WHERE idempotency_key=?", (key,)).fetchone()
@@ -721,6 +998,24 @@ class AIDecisionRepository:
             row = conn.execute(f"SELECT * FROM ai_decisions{where} ORDER BY id DESC LIMIT 1", params).fetchone()
         return dict(row) if row else None
 
+    def by_idempotency(self, idempotency_key: str) -> dict[str, Any] | None:
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM ai_decisions WHERE idempotency_key=?",
+                               (idempotency_key,)).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def record_observation(*, event_key: str, signal_id: int | None, telegram_id: int | None,
+                           identity_checksum: str | None, snapshot_checksum: str | None,
+                           status: str, reason_code: str) -> bool:
+        with connect() as conn:
+            cur = conn.execute("""INSERT INTO ai_observation_events(event_key,signal_id,telegram_id,
+                identity_checksum,snapshot_checksum,status,reason_code,created_at)
+                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING""", (
+                event_key, signal_id, telegram_id, identity_checksum, snapshot_checksum,
+                status, reason_code, datetime.now(timezone.utc).isoformat()))
+        return cur.rowcount == 1
+
 
 class AITradingService:
     _semaphore: asyncio.Semaphore | None = None
@@ -729,29 +1024,46 @@ class AITradingService:
         self.provider = provider or build_ai_provider()
         self.repository = repository or AIDecisionRepository()
         self.context_builder = AIContextBuilder()
-        self.timeout = max(0.1, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "8")))
-        self.max_tokens = max(64, int(os.getenv("AI_MAX_TOKENS", "800")))
-        self.max_attempts = max(1, min(3, int(os.getenv("AI_PROVIDER_MAX_ATTEMPTS", "2"))))
-        self.max_daily_user = max(0, int(os.getenv("AI_MAX_DAILY_REQUESTS_PER_USER", "25")))
-        self.max_daily_global = max(0, int(os.getenv("AI_MAX_DAILY_REQUESTS", "500")))
+        self.timeout = _env_float("AI_REQUEST_TIMEOUT_SECONDS", 15, .1, 120)
+        self.max_tokens = _env_int("AI_MAX_TOKENS", 600, 64, 32768)
+        self.max_attempts = _env_int("AI_PROVIDER_MAX_ATTEMPTS", 1, 1, 3)
+        self.max_daily_user = _env_int("AI_MAX_DAILY_REQUESTS_PER_USER", 10, 0, 100000)
+        self.max_daily_global = _env_int("AI_MAX_DAILY_REQUESTS", 100, 0, 100000)
         try:
             self.max_daily_cost = max(Decimal("0"), Decimal(os.getenv("AI_MAX_DAILY_COST_USD", "5")))
         except Exception:
             self.max_daily_cost = Decimal("0")
-        self.max_context_chars = max(1000, int(os.getenv("AI_CONTEXT_MAX_CHARS", "30000")))
-        self.validator = AIResponseValidator(max_age_seconds=int(os.getenv("AI_CONTEXT_MAX_AGE_SECONDS", "300")))
+        self.max_context_chars = _env_int("AI_CONTEXT_MAX_CHARS", 30000, 1000, 1_000_000)
+        self.validator = AIResponseValidator(max_age_seconds=_env_int("AI_CONTEXT_MAX_AGE_SECONDS", 300, 1, 86400))
         self.capabilities = getattr(self.provider, "capabilities", AIProviderCapabilities(
             supports_json_object=True, supports_json_schema=True, supports_strict_schema=True,
             supports_temperature=True, supports_max_tokens=True, supports_usage_reporting=True,
             supports_retryable_idempotent_requests=True,
         ))
         if AITradingService._semaphore is None:
-            AITradingService._semaphore = asyncio.Semaphore(max(1, int(os.getenv("AI_MAX_CONCURRENCY", "2"))))
+            AITradingService._semaphore = asyncio.Semaphore(_env_int("AI_MAX_CONCURRENCY", 1, 1, 32))
+
+    def _identity(self) -> dict[str, Any]:
+        from services.ai_operations import provider_identity
+        return provider_identity(self.provider)
+
+    def _decorate_response(self, response: AIProviderResponse,
+                           identity: dict[str, Any]) -> AIProviderResponse:
+        return replace(
+            response,
+            identity_checksum=identity["identity_checksum"],
+            endpoint_redacted=identity["endpoint"],
+            capability_snapshot_json=_canonical(identity["capabilities"]),
+            reasoning_effort=identity.get("reasoning_effort"),
+        )
 
     def _provider_available(self) -> bool:
         now = datetime.now(timezone.utc)
+        identity = self._identity()["identity_checksum"]
+        provider_key = f"{self.provider.name}:{identity}"
         with connect() as conn:
-            row = conn.execute("SELECT * FROM ai_provider_state WHERE provider=?", (self.provider.name,)).fetchone()
+            row = conn.execute("SELECT * FROM ai_provider_state WHERE provider=? AND identity_checksum=?",
+                               (provider_key, identity)).fetchone()
         if not row or row["state"] != "OPEN" or not row["opened_until"]:
             return True
         opened_until = datetime.fromisoformat(str(row["opened_until"]).replace("Z", "+00:00"))
@@ -786,27 +1098,35 @@ class AITradingService:
 
     def _provider_result(self, *, success: bool, code: str | None = None) -> None:
         now = datetime.now(timezone.utc)
+        identity_checksum = self._identity()["identity_checksum"]
+        provider_key = f"{self.provider.name}:{identity_checksum}"
         with connect() as conn:
-            row = conn.execute("SELECT consecutive_failures FROM ai_provider_state WHERE provider=?", (self.provider.name,)).fetchone()
+            row = conn.execute("SELECT consecutive_failures FROM ai_provider_state WHERE provider=? AND identity_checksum=?",
+                               (provider_key, identity_checksum)).fetchone()
             failures = 0 if success else int(row["consecutive_failures"] or 0) + 1 if row else 1
-            threshold = max(1, int(os.getenv("AI_CIRCUIT_BREAKER_FAILURES", "5")))
+            threshold = _env_int("AI_CIRCUIT_BREAKER_FAILURES", 5, 1, 100)
             state = "CLOSED" if success or failures < threshold else "OPEN"
-            opened_until = (now + timedelta(seconds=max(30, int(os.getenv("AI_CIRCUIT_BREAKER_SECONDS", "300"))))).isoformat() if state == "OPEN" else None
+            opened_until = (now + timedelta(seconds=_env_int("AI_CIRCUIT_BREAKER_SECONDS", 300, 30, 86400))).isoformat() if state == "OPEN" else None
             conn.execute("""INSERT INTO ai_provider_state(provider,state,consecutive_failures,opened_until,
-                last_success_at,last_failure_at,last_error_code,updated_at) VALUES(?,?,?,?,?,?,?,?)
+                last_success_at,last_failure_at,last_error_code,identity_checksum,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(provider) DO UPDATE SET state=excluded.state,
                 consecutive_failures=excluded.consecutive_failures,opened_until=excluded.opened_until,
                 last_success_at=COALESCE(excluded.last_success_at,ai_provider_state.last_success_at),
                 last_failure_at=COALESCE(excluded.last_failure_at,ai_provider_state.last_failure_at),
-                last_error_code=excluded.last_error_code,updated_at=excluded.updated_at""",
-                (self.provider.name, state, failures, opened_until, now.isoformat() if success else None,
-                 None if success else now.isoformat(), code, now.isoformat()))
+                last_error_code=excluded.last_error_code,identity_checksum=excluded.identity_checksum,
+                updated_at=excluded.updated_at""",
+                (provider_key, state, failures, opened_until, now.isoformat() if success else None,
+                 None if success else now.isoformat(), code, identity_checksum, now.isoformat()))
 
-    def _usage(self, telegram_id: int | None) -> tuple[int, int, Decimal]:
+    def _usage(self, telegram_id: int | None, identity_checksum: str) -> tuple[int, int, Decimal]:
         start = datetime.now(timezone.utc).date().isoformat()
         with connect() as conn:
-            global_row = conn.execute("SELECT COUNT(*) n,COALESCE(SUM(estimated_cost_usd),0) cost FROM ai_decisions WHERE created_at>=?", (start,)).fetchone()
-            user_row = conn.execute("SELECT COUNT(*) n FROM ai_decisions WHERE telegram_id=? AND created_at>=?", (telegram_id, start)).fetchone() if telegram_id is not None else {"n": 0}
+            global_row = conn.execute("""SELECT COUNT(*) n,COALESCE(SUM(estimated_cost_usd),0) cost
+                FROM ai_decisions WHERE created_at>=? AND provider_identity_checksum=? AND provider_invoked=1""",
+                (start, identity_checksum)).fetchone()
+            user_row = conn.execute("""SELECT COUNT(*) n FROM ai_decisions WHERE telegram_id=?
+                AND created_at>=? AND provider_identity_checksum=? AND provider_invoked=1""",
+                (telegram_id, start, identity_checksum)).fetchone() if telegram_id is not None else {"n": 0}
         return int(global_row["n"]), int(user_row["n"]), Decimal(str(global_row["cost"]))
 
     def _claim(self, key: str) -> bool:
@@ -830,19 +1150,21 @@ class AITradingService:
         if mode is AITradingMode.AI_OFF:
             return None
         context = self.context_builder.from_signal(signal_id, telegram_id=telegram_id)
+        identity = self._identity()
         request_key = checksum({"signal": context.signal_id, "market": context.market_checksum,
                                 "features": context.feature_checksum, "prompt": PROMPT_VERSION,
-                                "provider": self.provider.name, "model": self.provider.model_version})
-        existing = self.repository.latest(telegram_id=telegram_id, signal_id=signal_id)
-        if (existing and existing.get("market_snapshot_checksum") == context.market_checksum
-                and existing.get("feature_snapshot_checksum") == context.feature_checksum
-                and existing.get("prompt_version") == PROMPT_VERSION
-                and existing.get("provider") == self.provider.name
-                and str(existing.get("model_version") or "") == str(self.provider.model_version or "")):
+                                "identity": identity["identity_checksum"]})
+        existing = self.repository.by_idempotency(request_key)
+        if existing:
             return existing
         if not self._claim(request_key):
-            return self.repository.latest(telegram_id=telegram_id, signal_id=signal_id)
-        total, user_total, cost = self._usage(context.telegram_id)
+            self.repository.record_observation(
+                event_key=f"duplicate:{request_key}", signal_id=context.signal_id,
+                telegram_id=context.telegram_id, identity_checksum=identity["identity_checksum"],
+                snapshot_checksum=context.market_checksum, status="SKIPPED",
+                reason_code="DUPLICATE_SUPPRESSED")
+            return self.repository.by_idempotency(request_key)
+        total, user_total, cost = self._usage(context.telegram_id, identity["identity_checksum"])
         block = None
         if total >= self.max_daily_global or (context.telegram_id is not None and user_total >= self.max_daily_user):
             block = "DAILY_REQUEST_LIMIT"
@@ -855,6 +1177,7 @@ class AITradingService:
         block = block or self._activation_block(mode)
         input_raw = os.getenv("AI_INPUT_COST_PER_MILLION_USD", "").strip()
         output_raw = os.getenv("AI_OUTPUT_COST_PER_MILLION_USD", "").strip()
+        cache_write_raw = os.getenv("AI_CACHE_WRITE_COST_PER_MILLION_USD", "").strip()
         price_version = os.getenv("AI_PRICE_VERSION", "").strip()
         priced = bool(input_raw and output_raw and price_version)
         if self.provider.name != "disabled" and not priced and _env_bool("AI_REQUIRE_PRICING_FOR_REQUESTS", True):
@@ -862,12 +1185,15 @@ class AITradingService:
         try:
             input_rate = max(Decimal("0"), Decimal(input_raw or "0"))
             output_rate = max(Decimal("0"), Decimal(output_raw or "0"))
+            cache_write_rate = max(Decimal("0"), Decimal(cache_write_raw or input_raw or "0"))
         except Exception:
-            input_rate = output_rate = Decimal("0")
+            input_rate = output_rate = cache_write_rate = Decimal("0")
+            priced = False
             block = "PRICING_CONFIGURATION_INVALID"
         priced_prompt_chars = prompt_chars + len(SYSTEM_PROMPT) + len(_canonical(RESPONSE_SCHEMA))
         estimated_upper_cost = (
-            Decimal(math.ceil(priced_prompt_chars / 4)) * input_rate + Decimal(self.max_tokens) * output_rate
+            Decimal(math.ceil(priced_prompt_chars / 4)) * max(input_rate, cache_write_rate) +
+            Decimal(self.max_tokens) * output_rate
         ) / Decimal(1_000_000)
         if cost + estimated_upper_cost > self.max_daily_cost:
             block = "COST_LIMIT"
@@ -876,14 +1202,14 @@ class AITradingService:
         if effective_output is AIOutputMode.DISABLED and self.provider.name != "disabled":
             block = downgrade_reason or "PROVIDER_CAPABILITY_MISMATCH"
         started = time.perf_counter()
-        response = AIProviderResponse(None, provider=self.provider.name,
+        response = self._decorate_response(AIProviderResponse(None, provider=self.provider.name,
                                       model=self.provider.model, model_version=self.provider.model_version,
                                       provider_protocol=getattr(self.provider, "protocol", "injected"),
                                       requested_output_mode=requested_output.value,
                                       effective_output_mode=effective_output.value,
                                       downgrade_reason=downgrade_reason,
                                       cost_status="PRICED" if priced else "UNPRICED",
-                                      pricing_version=price_version or None)
+                                      pricing_version=price_version or None), identity)
         if block or self.provider.name == "disabled" or not self._provider_available():
             decision = self.validator.fallback(block or ("PROVIDER_DISABLED" if self.provider.name == "disabled" else "CIRCUIT_OPEN"))
         else:
@@ -895,6 +1221,7 @@ class AITradingService:
                 last_error: Exception | None = None
                 for attempt in range(self.max_attempts):
                     try:
+                        response = replace(response, provider_invoked=True)
                         async with self._semaphore:
                             response = await asyncio.wait_for(self.provider.analyze(request), timeout=self.timeout)
                         last_error = None
@@ -911,9 +1238,11 @@ class AITradingService:
                             break
                 if last_error is not None:
                     raise last_error
-                response = replace(response, downgrade_reason=downgrade_reason or response.downgrade_reason)
-                decision = self.validator.validate(response.payload, context)
-                self._provider_result(success=True)
+                response = self._decorate_response(replace(
+                    response, downgrade_reason=downgrade_reason or response.downgrade_reason,
+                    provider_invoked=True), identity)
+                decision = validate_provider_response(response, context, self.validator)
+                self._provider_result(success=decision.valid, code=None if decision.valid else decision.code)
             except (asyncio.TimeoutError, AIProviderError) as exc:
                 code = exc.code if isinstance(exc, AIProviderError) else "PROVIDER_TIMEOUT"
                 stage = "HTTP_RESPONSE_SHAPE" if code == "PROVIDER_RESPONSE_INVALID" else "PROVIDER_TRANSPORT"
@@ -926,6 +1255,11 @@ class AITradingService:
         row, _ = self.repository.save(context=context, response=response, decision=decision,
                                       mode=mode, latency_ms=latency,
                                       deterministic_accepted=deterministic_accepted)
+        self.repository.record_observation(
+            event_key=f"decision:{row['decision_id']}", signal_id=context.signal_id,
+            telegram_id=context.telegram_id, identity_checksum=identity["identity_checksum"],
+            snapshot_checksum=context.market_checksum,
+            status="COMPLETED" if decision.valid else "SKIPPED", reason_code=decision.code)
         self._release_claim(request_key)
         return row
 
@@ -944,21 +1278,35 @@ class AIShadowWorker:
         outcomes = AIOutcomeRepository().attach_closed_signals(limit=100)
         if configured_ai_mode() is AITradingMode.AI_OFF:
             return {"processed": 0, "failed": 0, "outcomes_attached": outcomes}
+        queue_depth = _env_int("AI_OBSERVE_QUEUE_DEPTH", 10, 1, 100)
+        drop_audit_limit = _env_int("AI_OBSERVE_DROP_AUDIT_LIMIT", 25, 1, 100)
+        identity = self.service._identity()
         with connect() as conn:
-            rows = conn.execute("""SELECT s.id,s.owner_telegram_id FROM signals s
+            rows = conn.execute("""SELECT s.id,s.owner_telegram_id,s.updated_at FROM signals s
                 WHERE s.status IN ('WATCHING','TRIGGERED','ACTIVE','TP1','TP2')
                 AND NOT EXISTS(SELECT 1 FROM ai_decisions d WHERE d.signal_id=s.id
-                    AND d.created_at>=s.updated_at) ORDER BY s.id LIMIT 10""").fetchall()
+                    AND d.created_at>=s.updated_at AND d.provider_identity_checksum=?)
+                ORDER BY s.id LIMIT ?""",
+                (identity["identity_checksum"], queue_depth + drop_audit_limit)).fetchall()
+        queued, overflow = rows[:queue_depth], rows[queue_depth:]
+        for raw in overflow:
+            overflow_snapshot = checksum({"signal": raw["id"], "updated_at": raw["updated_at"]})
+            self.service.repository.record_observation(
+                event_key=f"queue-full:{identity['identity_checksum']}:{overflow_snapshot}",
+                signal_id=int(raw["id"]), telegram_id=raw["owner_telegram_id"],
+                identity_checksum=identity["identity_checksum"], snapshot_checksum=overflow_snapshot,
+                status="SKIPPED", reason_code="OBSERVATION_QUEUE_FULL")
         # Snapshot-level duplicate suppression is enforced again by the ledger.
         processed = failed = 0
-        for raw in rows:
+        for raw in queued:
             try:
                 await self.service.analyze_signal(int(raw["id"]), telegram_id=raw["owner_telegram_id"])
                 processed += 1
             except Exception:
                 failed += 1
                 logger.exception("AI shadow decision failed for signal_id=%s", raw["id"])
-        return {"processed": processed, "failed": failed, "outcomes_attached": outcomes}
+        return {"processed": processed, "failed": failed, "dropped": len(overflow),
+                "outcomes_attached": outcomes}
 
     async def run_forever(self) -> None:
         while not self._stop.is_set():

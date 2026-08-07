@@ -102,7 +102,8 @@ class AIEvaluationService:
         ordered = sorted(values)
         return ordered[max(0, math.ceil(len(ordered) * percentile) - 1)]
 
-    def rolling_metrics(self, telegram_id: int | None = None) -> dict[str, Any]:
+    def rolling_metrics(self, telegram_id: int | None = None,
+                        identity_checksum: str | None = None) -> dict[str, Any]:
         windows = {"1h": timedelta(hours=1), "24h": timedelta(hours=24),
                    "7d": timedelta(days=7), "30d": timedelta(days=30)}
         result: dict[str, Any] = {}
@@ -111,6 +112,10 @@ class AIEvaluationService:
             if telegram_id is not None:
                 clauses.append("telegram_id=?")
                 params.append(telegram_id)
+            if identity_checksum is not None:
+                clauses.append("provider_identity_checksum=?")
+                params.append(identity_checksum)
+                clauses.append("provider_invoked=1")
             with connect() as conn:
                 rows = [dict(row) for row in conn.execute(
                     f"SELECT * FROM ai_decisions WHERE {' AND '.join(clauses)} ORDER BY id", tuple(params)).fetchall()]
@@ -122,7 +127,8 @@ class AIEvaluationService:
                 "http_success_rate": sum(not code.startswith("AI_PROVIDER_HTTP_") and code not in
                     {"PROVIDER_TIMEOUT", "PROVIDER_TRANSPORT_ERROR", "PROVIDER_RATE_LIMIT"} for code in codes) / count if count else 0,
                 "schema_success_rate": sum(str(row.get("validation_stage")) not in
-                    {"JSON_PARSING", "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"} for row in rows) / count if count else 0,
+                    {"PROVIDER_TRANSPORT", "STRUCTURED_EXTRACTION", "JSON_PARSING",
+                     "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"} for row in rows) / count if count else 0,
                 "semantic_success_rate": codes.count("VALID") / count if count else 0,
                 "abstention_rate": sum(bool(row.get("abstention")) for row in rows) / count if count else 0,
                 "timeout_count": codes.count("PROVIDER_TIMEOUT"),
@@ -132,20 +138,48 @@ class AIEvaluationService:
                                "p99": self._percentile(latencies, .99)},
                 "input_tokens": sum(int(row.get("input_tokens") or 0) for row in rows),
                 "output_tokens": sum(int(row.get("output_tokens") or 0) for row in rows),
+                "cached_tokens": sum(int(row.get("cached_tokens") or 0) for row in rows),
+                "cache_write_tokens": sum(int(row.get("cache_write_tokens") or 0) for row in rows),
+                "reasoning_tokens": sum(int(row.get("reasoning_tokens") or 0) for row in rows),
                 "cost_usd": str(sum((__import__("decimal").Decimal(str(row.get("estimated_cost_usd") or 0)) for row in rows), __import__("decimal").Decimal("0"))),
                 "request_ids_present": sum(bool(row.get("provider_request_id")) for row in rows),
                 "downgrade_count": sum(bool(row.get("downgrade_reason")) for row in rows),
-                "duplicate_suppression": max(0, len(rows) - len({row.get("idempotency_key") for row in rows})),
+                "duplicate_suppression": self._observation_count(identity_checksum, "DUPLICATE_SUPPRESSED",
+                                                                  datetime.now(timezone.utc) - delta),
             }
         return result
 
-    def quality_report(self, telegram_id: int | None = None, minimum_samples: int = 30) -> dict[str, Any]:
-        metrics = self.metrics(telegram_id)
+    @staticmethod
+    def _observation_count(identity_checksum: str | None, reason_code: str,
+                           since: datetime | None = None) -> int:
+        clauses, params = ["reason_code=?"], [reason_code]
+        if identity_checksum is not None:
+            clauses.append("identity_checksum=?")
+            params.append(identity_checksum)
+        if since is not None:
+            clauses.append("created_at>=?")
+            params.append(since.isoformat())
         with connect() as conn:
-            where, params = ("WHERE d.telegram_id=?", (telegram_id,)) if telegram_id is not None else ("", ())
+            row = conn.execute(f"SELECT COUNT(*) n FROM ai_observation_events WHERE {' AND '.join(clauses)}",
+                               tuple(params)).fetchone()
+        return int(row["n"] or 0)
+
+    def quality_report(self, telegram_id: int | None = None, minimum_samples: int = 30,
+                       identity_checksum: str | None = None) -> dict[str, Any]:
+        metrics = self.metrics(telegram_id, identity_checksum)
+        with connect() as conn:
+            clauses, params = [], []
+            if telegram_id is not None:
+                clauses.append("d.telegram_id=?")
+                params.append(telegram_id)
+            if identity_checksum is not None:
+                clauses.append("d.provider_identity_checksum=?")
+                params.append(identity_checksum)
+                clauses.append("d.provider_invoked=1")
+            where = "WHERE " + " AND ".join(clauses) if clauses else ""
             rows = [dict(row) for row in conn.execute(f"""SELECT d.recommended_action,d.abstention,
                 d.deterministic_accepted,o.direction_correct,o.realized_r,o.intervention_type,o.counterfactual_result
-                FROM ai_decisions d LEFT JOIN ai_decision_outcomes o ON o.decision_id=d.decision_id {where}""", params).fetchall()]
+                FROM ai_decisions d LEFT JOIN ai_decision_outcomes o ON o.decision_id=d.decision_id {where}""", tuple(params)).fetchall()]
         resolved = [row for row in rows if row.get("direction_correct") is not None and not row.get("intervention_type")]
         accepted = [row for row in resolved if row["recommended_action"] in ACCEPT_ACTIONS]
         rejected = [row for row in resolved if row["recommended_action"] == "REJECT"]
@@ -173,7 +207,7 @@ class AIEvaluationService:
             "deterministic_accept": quality([x for x in resolved if bool(x.get("deterministic_accepted"))]),
             "deterministic_reject": quality([x for x in resolved if x.get("deterministic_accepted") == 0]),
         }
-        return {"metrics": metrics, "rolling": self.rolling_metrics(telegram_id),
+        return {"metrics": metrics, "rolling": self.rolling_metrics(telegram_id, identity_checksum),
                 "counterfactual": counterfactual,
                 "abstention_quality": {"sample_size": len(abstained),
                     "correct_abstentions": sum(not bool(x["direction_correct"]) for x in abstained),
@@ -182,10 +216,12 @@ class AIEvaluationService:
                 "manual_interventions_excluded_from_calibration": sum(bool(x.get("intervention_type")) for x in rows),
                 "warning": "No improvement claim is valid when a cohort reports INSUFFICIENT_SAMPLES."}
 
-    def drift(self, telegram_id: int | None = None, minimum_samples: int = 30) -> dict[str, Any]:
-        rolling = self.rolling_metrics(telegram_id)
+    def drift(self, telegram_id: int | None = None, minimum_samples: int = 30,
+              identity_checksum: str | None = None) -> dict[str, Any]:
+        rolling = self.rolling_metrics(telegram_id, identity_checksum)
         current, baseline = rolling["24h"], rolling["30d"]
-        scope = f"telegram:{telegram_id}" if telegram_id is not None else "global"
+        base_scope = f"telegram:{telegram_id}" if telegram_id is not None else "global"
+        scope = f"{base_scope}:identity:{identity_checksum}" if identity_checksum else base_scope
         with connect() as conn:
             saved = conn.execute("SELECT * FROM ai_drift_baselines WHERE scope_key=? ORDER BY id DESC LIMIT 1", (scope,)).fetchone()
         if saved:
@@ -206,8 +242,9 @@ class AIEvaluationService:
 
     def capture_drift_baseline(self, identity_checksum: str, telegram_id: int | None = None,
                                minimum_samples: int = 30) -> dict[str, Any]:
-        scope = f"telegram:{telegram_id}" if telegram_id is not None else "global"
-        baseline = self.rolling_metrics(telegram_id)["30d"]
+        base_scope = f"telegram:{telegram_id}" if telegram_id is not None else "global"
+        scope = f"{base_scope}:identity:{identity_checksum}"
+        baseline = self.rolling_metrics(telegram_id, identity_checksum)["30d"]
         status = "CAPTURED" if baseline["requests"] >= minimum_samples else "INSUFFICIENT_SAMPLES"
         if status == "CAPTURED":
             with connect() as conn:
@@ -218,23 +255,36 @@ class AIEvaluationService:
                     json.dumps(baseline, sort_keys=True), datetime.now(timezone.utc).isoformat()))
         return {"status": status, "scope": scope, "sample_size": baseline["requests"]}
 
-    def metrics(self, telegram_id: int | None = None) -> dict[str, Any]:
-        where, params = ("WHERE d.telegram_id=?", (telegram_id,)) if telegram_id is not None else ("", ())
+    def metrics(self, telegram_id: int | None = None,
+                identity_checksum: str | None = None) -> dict[str, Any]:
+        clauses, params = [], []
+        if telegram_id is not None:
+            clauses.append("d.telegram_id=?")
+            params.append(telegram_id)
+        if identity_checksum is not None:
+            clauses.append("d.provider_identity_checksum=?")
+            params.append(identity_checksum)
+            clauses.append("d.provider_invoked=1")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with connect() as conn:
             rows = [dict(row) for row in conn.execute(f"""SELECT d.*,o.signal_result,o.direction_correct,
                 o.intervention_type,o.realized_r,o.counterfactual_result,s.setup_key
                 FROM ai_decisions d LEFT JOIN ai_decision_outcomes o ON o.decision_id=d.decision_id
                 LEFT JOIN signals s ON s.id=d.signal_id
-                {where} ORDER BY d.id""", params).fetchall()]
+                {where} ORDER BY d.id""", tuple(params)).fetchall()]
         count = len(rows)
         actions: dict[str, int] = {}
         for row in rows:
             action = str(row["recommended_action"])
             actions[action] = actions.get(action, 0) + 1
         resolved = [row for row in rows if row.get("direction_correct") is not None]
-        schema_failure_stages = {"JSON_PARSING", "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"}
+        schema_failure_stages = {"PROVIDER_TRANSPORT", "STRUCTURED_EXTRACTION", "JSON_PARSING",
+                                 "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"}
         schema_valid_count = sum(str(row.get("validation_stage") or "") not in schema_failure_stages for row in rows)
         semantic_valid_count = sum(str(row.get("validation_code") or "") == "VALID" for row in rows)
+        transport_codes = {"PROVIDER_TIMEOUT", "PROVIDER_TRANSPORT_ERROR", "PROVIDER_FAILURE", "PROVIDER_RATE_LIMIT"}
+        transport_failure_count = sum(str(row.get("validation_code") or "") in transport_codes or
+                                      str(row.get("validation_code") or "").startswith("AI_PROVIDER_HTTP_") for row in rows)
         latencies = sorted(float(row["latency_ms"] or 0) for row in rows)
         p95_index = max(0, math.ceil(len(latencies) * 0.95) - 1) if latencies else 0
         samples = [(float(row["raw_confidence"]) / 100, int(row["direction_correct"])) for row in resolved]
@@ -256,6 +306,8 @@ class AIEvaluationService:
             breakdowns[label] = values
         return {
             "decision_count": count,
+            "schema_valid_count": schema_valid_count,
+            "semantic_valid_count": semantic_valid_count,
             "valid_schema_rate": schema_valid_count / count if count else 0,
             "semantic_valid_rate": semantic_valid_count / count if count else 0,
             "abstention_rate": sum(bool(row["abstention"]) for row in rows) / count if count else 0,
@@ -263,16 +315,41 @@ class AIEvaluationService:
             "average_latency_ms": sum(float(row["latency_ms"] or 0) for row in rows) / count if count else 0,
             "p95_latency_ms": latencies[p95_index] if latencies else 0,
             "estimated_cost_usd": str(sum((__import__("decimal").Decimal(str(row["estimated_cost_usd"] or 0)) for row in rows), __import__("decimal").Decimal("0"))),
-            "cost_status": "UNPRICED" if any(str(row.get("cost_status") or "UNPRICED") == "UNPRICED" for row in rows) else "PRICED",
+            "input_tokens": sum(int(row.get("input_tokens") or 0) for row in rows),
+            "output_tokens": sum(int(row.get("output_tokens") or 0) for row in rows),
+            "cached_tokens": sum(int(row.get("cached_tokens") or 0) for row in rows),
+            "cache_write_tokens": sum(int(row.get("cache_write_tokens") or 0) for row in rows),
+            "reasoning_tokens": sum(int(row.get("reasoning_tokens") or 0) for row in rows),
+            "cost_status": "UNPRICED" if not rows or any(str(row.get("cost_status") or "UNPRICED") == "UNPRICED" for row in rows) else "PRICED",
             "downgrade_count": sum(bool(row.get("downgrade_reason")) for row in rows),
             "timeout_rate": sum(row.get("validation_code") == "PROVIDER_TIMEOUT" for row in rows) / count if count else 0,
             "rate_limit_rate": sum(row.get("validation_code") == "PROVIDER_RATE_LIMIT" for row in rows) / count if count else 0,
+            "transport_failure_count": transport_failure_count,
+            "transport_failure_rate": transport_failure_count / count if count else 0,
+            "timeout_count": sum(row.get("validation_code") == "PROVIDER_TIMEOUT" for row in rows),
+            "rate_limit_count": sum(row.get("validation_code") == "PROVIDER_RATE_LIMIT" for row in rows),
+            "server_error_count": sum(str(row.get("validation_code") or "").startswith("AI_PROVIDER_HTTP_5") for row in rows),
+            "duplicates_suppressed": self._observation_count(identity_checksum, "DUPLICATE_SUPPRESSED"),
+            "queue_drops": self._observation_count(identity_checksum, "OBSERVATION_QUEUE_FULL"),
+            "resolved_outcomes": len(resolved),
+            "current_governance_sample_count": count,
+            "request_ids_available": sum(bool(row.get("provider_request_id")) for row in rows),
             "compatibility_failures": sum(row.get("validation_code") in {"PROVIDER_CAPABILITY_MISMATCH", "MODEL_PARAMETER_UNSUPPORTED"} for row in rows),
             "agreement_rate": len(agrees) / sum(row.get("deterministic_accepted") is not None for row in rows) if any(row.get("deterministic_accepted") is not None for row in rows) else None,
             "reject_precision": sum(not bool(row["direction_correct"]) for row in reject) / len(reject) if reject else None,
             "accept_precision": sum(bool(row["direction_correct"]) for row in accept) / len(accept) if accept else None,
             "calibration": calibration,
             "breakdowns": breakdowns,
+            "scope": "CURRENT_PROVIDER_IDENTITY" if identity_checksum else "GLOBAL_HISTORY",
+            "identity_checksum": identity_checksum,
+            "legacy_classification": {
+                "legacy_disabled": sum(row.get("legacy_classification") == "LEGACY_DISABLED" or
+                    (row.get("provider") == "disabled" and not row.get("provider_identity_checksum")) for row in rows),
+                "legacy_unscoped": sum(row.get("legacy_classification") == "LEGACY_UNSCOPED" or
+                    (row.get("provider") != "disabled" and not row.get("provider_identity_checksum")) for row in rows),
+                "identity_scoped": sum(row.get("legacy_classification") == "CURRENT_IDENTITY" or
+                    bool(row.get("provider_identity_checksum")) for row in rows),
+            },
             "warning": "Raw AI confidence is not a calibrated probability.",
         }
 

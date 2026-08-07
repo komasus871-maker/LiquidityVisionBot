@@ -359,3 +359,15 @@
 - Added deterministic shadow-experiment assignment and additive certification, governance, drift, experiment and cost-reconciliation schema.
 - Added `/ai_provider`, `/ai_certification`, `/ai_drift`, `/ai_experiments` and admin-only `/ai_kill` diagnostics.
 - Preserved deterministic execution isolation; AI remains advisory and `AI_GATED` remains unavailable.
+
+## v9.9.15 — OpenAI Provider Certification Readiness
+
+- Normalized Chat Completions and Responses envelopes into extracted structured text, one parsed payload, request/model/usage metadata, and explicit extraction status without persisting raw bodies or reasoning items.
+- Replaced protocol-specific certification shape checks with the exact production JSON Schema, domain, market-truth, and semantic validation pipeline.
+- Made Responses extraction order-independent across reasoning and message items; refusals, incomplete output, missing messages, and malformed content fail with normalized stage/code diagnostics.
+- Added explicit, durable certification states and timestamps, one-attempt paid probes, per-identity repeat suppression, request/usage/cost evidence, and identity-change invalidation.
+- Bound decisions, circuit state, telemetry, promotion evidence, and governance to the exact provider/protocol/endpoint/model/prompt/schema/context/request/pricing/capability/output/reasoning identity.
+- Isolated immutable legacy and disabled-provider decisions from current-identity promotion; added persisted scoped evidence and configurable promotion thresholds.
+- Added bounded observation depth, queue-drop and duplicate-suppression audits, identity-scoped Telegram diagnostics, and Responses-first safe deployment defaults.
+- Added GPT-5.6 cache-write token normalization and externally versioned 1.25x cache-write pricing so cost limits cannot silently omit prompt-cache writes.
+- Preserved zero AI execution authority and kept `AI_GATED` unreachable.

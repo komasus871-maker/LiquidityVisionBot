@@ -35,7 +35,7 @@ from services.webhook_server import WebhookServer
 from services.trade_memory import TradeMemoryService
 from services.historical_execution_migration import HistoricalExecutionMigrationService
 from services.copy_execution_worker import CopyExecutionWorker
-from services.ai_trading import AIShadowWorker
+from services.ai_trading import AIShadowWorker, configured_ai_interval
 from services.ai_operations import AIConfigurationValidator
 
 logging.basicConfig(
@@ -116,7 +116,7 @@ async def main() -> None:
     observation_monitor = ObservationMonitor(bot=bot)
     watch_engine = WatchEngine(bot=bot)
     copy_execution = CopyExecutionWorker()
-    ai_shadow = AIShadowWorker(interval_seconds=int(os.getenv("AI_SHADOW_INTERVAL", "60")))
+    ai_shadow = AIShadowWorker(interval_seconds=configured_ai_interval())
     workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),

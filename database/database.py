@@ -162,7 +162,8 @@ def _add_column(conn: DBConnection, table: str, name: str, definition: str) -> N
         # PostgreSQL aborts the current transaction after duplicate_column, so
         # use a savepoint to make that benign race recoverable without hiding
         # any other migration failure. SQLite serializes ALTER TABLE writes.
-        duplicate_column = getattr(exc, "pgcode", None) == "42701"
+        duplicate_column = (getattr(exc, "pgcode", None) == "42701" or
+                            "duplicate column name" in str(exc).lower())
         if conn.postgres:
             conn.execute("ROLLBACK TO SAVEPOINT add_column_guard")
             conn.execute("RELEASE SAVEPOINT add_column_guard")
@@ -553,8 +554,13 @@ def create_tables() -> None:
                 context_version TEXT, request_format_version TEXT,
                 requested_output_mode TEXT, effective_output_mode TEXT, downgrade_reason TEXT,
                 validation_stage TEXT, pricing_version TEXT, cost_status TEXT,
-                cached_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                 provider_request_id TEXT, provider_usage_json TEXT,
+                provider_identity_checksum TEXT, provider_endpoint_redacted TEXT,
+                capability_snapshot_json TEXT, reasoning_effort TEXT,
+                extraction_stage TEXT, extraction_code TEXT, raw_envelope_checksum TEXT,
+                provider_invoked INTEGER NOT NULL DEFAULT 0, legacy_classification TEXT,
                 created_at TEXT NOT NULL
             )
         """)
@@ -590,7 +596,7 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS ai_provider_state(
                 provider TEXT PRIMARY KEY, state TEXT NOT NULL, consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 opened_until TEXT, last_success_at TEXT, last_failure_at TEXT,
-                last_error_code TEXT, updated_at TEXT NOT NULL
+                last_error_code TEXT, identity_checksum TEXT, updated_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -601,8 +607,22 @@ def create_tables() -> None:
                 prompt_version TEXT NOT NULL, schema_version TEXT NOT NULL,
                 context_version TEXT NOT NULL, request_format_version TEXT NOT NULL,
                 pricing_version TEXT, capability_snapshot_json TEXT NOT NULL,
-                status TEXT NOT NULL, checks_json TEXT NOT NULL, failure_code TEXT,
-                certified_at TEXT NOT NULL, expires_at TEXT NOT NULL
+                schema_checksum TEXT, reasoning_effort TEXT, requested_output_mode TEXT,
+                effective_output_mode TEXT, status TEXT NOT NULL, checks_json TEXT NOT NULL,
+                failure_code TEXT, validation_stage TEXT, validation_code TEXT,
+                provider_request_id TEXT, returned_model_version TEXT,
+                raw_envelope_checksum TEXT, latency_ms DOUBLE PRECISION,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd NUMERIC(18,8) NOT NULL DEFAULT 0, cost_status TEXT,
+                started_at TEXT, completed_at TEXT, certified_at TEXT NOT NULL, expires_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_certification_claims(
+                identity_checksum TEXT PRIMARY KEY, certification_id TEXT NOT NULL,
+                claimed_at TEXT NOT NULL, expires_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -638,6 +658,22 @@ def create_tables() -> None:
                 internal_cost_usd NUMERIC(18,8) NOT NULL, provider_cost_usd NUMERIC(18,8),
                 variance_usd NUMERIC(18,8), status TEXT NOT NULL, details_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_governance_evidence(
+                id {id_col}, identity_checksum TEXT NOT NULL, target_state TEXT NOT NULL,
+                decision_count INTEGER NOT NULL, schema_valid_count INTEGER NOT NULL,
+                semantic_valid_count INTEGER NOT NULL, transport_failure_count INTEGER NOT NULL,
+                timeout_count INTEGER NOT NULL, blockers_json TEXT NOT NULL,
+                metrics_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS ai_observation_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, signal_id BIGINT,
+                telegram_id BIGINT, identity_checksum TEXT, snapshot_checksum TEXT,
+                status TEXT NOT NULL, reason_code TEXT NOT NULL, created_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -765,10 +801,33 @@ def create_tables() -> None:
             "downgrade_reason": "TEXT", "validation_stage": "TEXT",
             "pricing_version": "TEXT", "cost_status": "TEXT",
             "cached_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "cache_write_tokens": "INTEGER NOT NULL DEFAULT 0",
             "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
             "provider_request_id": "TEXT", "provider_usage_json": "TEXT",
+            "provider_identity_checksum": "TEXT", "provider_endpoint_redacted": "TEXT",
+            "capability_snapshot_json": "TEXT", "reasoning_effort": "TEXT",
+            "extraction_stage": "TEXT", "extraction_code": "TEXT",
+            "raw_envelope_checksum": "TEXT",
+            "provider_invoked": "INTEGER NOT NULL DEFAULT 0",
+            "legacy_classification": "TEXT",
         }.items():
             _add_column(conn, "ai_decisions", name, definition)
+        for name, definition in {
+            "schema_checksum": "TEXT", "reasoning_effort": "TEXT",
+            "requested_output_mode": "TEXT", "effective_output_mode": "TEXT",
+            "validation_stage": "TEXT", "validation_code": "TEXT",
+            "provider_request_id": "TEXT", "returned_model_version": "TEXT",
+            "raw_envelope_checksum": "TEXT", "latency_ms": "DOUBLE PRECISION",
+            "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "cached_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "cache_write_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "estimated_cost_usd": "NUMERIC(18,8) NOT NULL DEFAULT 0",
+            "cost_status": "TEXT", "started_at": "TEXT", "completed_at": "TEXT",
+        }.items():
+            _add_column(conn, "ai_provider_certifications", name, definition)
+        _add_column(conn, "ai_provider_state", "identity_checksum", "TEXT")
         _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.
@@ -833,9 +892,12 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_user_time ON ai_decisions(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_signal ON ai_decisions(signal_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_eval ON ai_decisions(provider,model_version,prompt_version,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_decisions_identity_time ON ai_decisions(provider_identity_checksum,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_outcomes_unmatched ON ai_decision_outcomes(decision_id,attached_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cert_identity_expiry ON ai_provider_certifications(identity_checksum,status,expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_observation_identity_time ON ai_observation_events(identity_checksum,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_governance_provider_time ON ai_governance_events(provider,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_provider_state_identity ON ai_provider_state(identity_checksum)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",
