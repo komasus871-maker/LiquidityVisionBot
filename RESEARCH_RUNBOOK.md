@@ -28,6 +28,13 @@ EDGE_RANK_OVERLAP_MINUTES=60
 RESEARCH_ESTIMATED_EXECUTION_COST_PCT=0.19
 SCALPING_MIN_SAMPLES=100
 SCALPING_MIN_GROSS_COST_MULTIPLE=1.5
+MICROSTRUCTURE_COLLECTION_ENABLED=true
+MICROSTRUCTURE_INTERVAL_SECONDS=60
+MICROSTRUCTURE_MAX_SYMBOLS=8
+MICROSTRUCTURE_SAMPLES_PER_SYMBOL=5
+MICROSTRUCTURE_SAMPLE_SPACING_MS=400
+MICROSTRUCTURE_MAX_LEVELS=50
+REVERSAL_EXTREME_MOVE_PCT=12
 ```
 
 Increase bootstrap counts or history limits only after measuring worker latency and PostgreSQL load. Do not lower sample gates to manufacture findings.
@@ -41,6 +48,8 @@ Increase bootstrap counts or history limits only after measuring worker latency 
 5. Run `/feature_edge`, `/hypotheses` and `/forward_tests`.
 6. Run `/strategy_lab`, `/regimes`, `/signal_rankings` and `/scalping_research`.
 7. Confirm copy diagnostics, positions and portfolio reconciliation remain consistent.
+8. Run `/market_story SIGNAL_ID`, `/signal_quality SIGNAL_ID`, `/contradictions SIGNAL_ID`, and `/quality_report`.
+9. Run `/orderbook BTCUSDT`; `stale=false`, at least three samples, and no raw bids/asks in storage indicate a healthy bounded observer.
 
 ## PASS indicators
 

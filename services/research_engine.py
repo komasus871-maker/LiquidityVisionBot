@@ -13,7 +13,7 @@ from typing import Any
 from database.database import connect
 
 
-FEATURE_VERSION = "research-features-v1"
+FEATURE_VERSION = "research-features-v3"
 RANK_VERSION = "research-rank-v1"
 STRATEGY_VERSIONS = {
     "NAIVE_ELIGIBLE": "naive-eligible-v1",
@@ -21,6 +21,14 @@ STRATEGY_VERSIONS = {
     "TREND_FOLLOWING": "trend-following-v1",
     "BREAKOUT": "breakout-v1",
     "MEAN_REVERSION": "mean-reversion-v1",
+}
+INTELLIGENCE_STRATEGY_VERSIONS = {
+    "PUMP_REVERSAL": "pump-reversal-shadow-v1",
+    "DUMP_REVERSAL": "dump-reversal-shadow-v1",
+    "SCALPING_TREND": "scalping-trend-shadow-v1",
+    "SCALPING_BREAKOUT": "scalping-breakout-shadow-v1",
+    "SCALPING_MEAN_REVERSION": "scalping-mean-reversion-shadow-v1",
+    "SCALPING_LIQUIDITY": "scalping-liquidity-shadow-v1",
 }
 TERMINAL = {"TP3", "STOP", "BREAKEVEN", "MANUAL_STOP", "INVALIDATED", "EXPIRED", "CLOSED"}
 MANUAL_REASONS = {"MANUAL", "MANUAL_CLOSE", "MANUAL_STOP", "PANIC", "PANIC_CLOSE",
@@ -66,6 +74,16 @@ def _value(features: dict[str, Any], *keys: str) -> Any:
             return features[key]
         if key in extras and extras[key] is not None and extras[key] != "":
             return extras[key]
+    return None
+
+
+def _market_intelligence(features: dict[str, Any]) -> dict[str, Any] | None:
+    direct = features.get("market_intelligence")
+    if isinstance(direct, dict):
+        return direct
+    extras = features.get("extras")
+    if isinstance(extras, dict) and isinstance(extras.get("market_intelligence"), dict):
+        return extras["market_intelligence"]
     return None
 
 
@@ -181,6 +199,14 @@ class ResearchEngine:
             item = dict(stored)
             self.evaluate_strategies(item)
             self.rank_snapshot(item)
+            try:
+                from services.market_intelligence_repository import MarketIntelligenceRepository
+                immutable_snapshot = _loads(item.get("snapshot_json"), {})
+                immutable_features = (immutable_snapshot.get("features")
+                                      if isinstance(immutable_snapshot.get("features"), dict) else {})
+                MarketIntelligenceRepository().persist_signal(item, immutable_features)
+            except Exception:
+                logging.exception("market_intelligence_persist_failed signal_id=%s", signal_id)
             return item
         return None
 
@@ -208,6 +234,7 @@ class ResearchEngine:
         bos = _text(_value(features, "bos", "structure"))
         evidence: list[str] = []
         action = "WAIT"
+        direction = side
         if strategy == "NAIVE_ELIGIBLE":
             action, evidence = "ACCEPT", ["unfiltered eligible-signal baseline"]
         elif strategy == "LIQUIDITY_SMC":
@@ -225,7 +252,28 @@ class ResearchEngine:
             aligned = "RANGE" in regimes and ((side == "LONG" and rsi <= 35) or (side == "SHORT" and rsi >= 65))
             action = "ACCEPT" if aligned else "WAIT" if "RANGE" in regimes else "REJECT"
             evidence = [f"range={('RANGE' in regimes)} rsi={rsi:.1f}"]
-        return {"action": action, "direction": side,
+        elif strategy in INTELLIGENCE_STRATEGY_VERSIONS:
+            intelligence = _market_intelligence(features) or {}
+            suitability = intelligence.get("strategy_suitability") or {}
+            score = _number(suitability.get(strategy), 0)
+            action = "ACCEPT" if score >= 70 else "WAIT" if score >= 45 else "REJECT"
+            evidence = [f"research-only strategy suitability={score:.1f}"]
+            if strategy == "PUMP_REVERSAL":
+                candidate = (intelligence.get("reversal_research") or {}).get("pump") or {}
+                direction = "SHORT"
+                evidence.extend(candidate.get("evidence") or [])
+                if candidate.get("continuation_risk"):
+                    action = "REJECT"
+            elif strategy == "DUMP_REVERSAL":
+                candidate = (intelligence.get("reversal_research") or {}).get("dump") or {}
+                direction = "LONG"
+                evidence.extend(candidate.get("evidence") or [])
+                if candidate.get("continuation_risk"):
+                    action = "REJECT"
+            elif snapshot.get("timeframe") not in {"1m", "3m", "5m"}:
+                action = "REJECT"
+                evidence.append("not a scalping timeframe")
+        return {"action": action, "direction": direction,
                 "confidence": max(0.0, min(100.0, confidence if action == "ACCEPT" else confidence * .6)),
                 "evidence": evidence}
 
@@ -233,7 +281,11 @@ class ResearchEngine:
         snapshot = _loads(snapshot_row.get("snapshot_json"), {})
         created = 0
         now = datetime.now(timezone.utc).isoformat()
-        for strategy, version in STRATEGY_VERSIONS.items():
+        features = snapshot.get("features") if isinstance(snapshot.get("features"), dict) else {}
+        strategies = dict(STRATEGY_VERSIONS)
+        if _market_intelligence(features):
+            strategies.update(INTELLIGENCE_STRATEGY_VERSIONS)
+        for strategy, version in strategies.items():
             decision = self._strategy_decision(strategy, snapshot)
             payload = {"strategy": strategy, "version": version, **decision,
                        "entry": snapshot.get("entry"), "stop": snapshot.get("stop"),
@@ -537,7 +589,7 @@ class ResearchEngine:
         safe_limit = max(1, min(int(limit), 50))
         rows = []
         with connect() as conn:
-            for rank_version in ("research-rank-v2", RANK_VERSION):
+            for rank_version in ("signal-ranking-v3", "research-rank-v2", RANK_VERSION):
                 rows = conn.execute("""SELECT k.*,r.symbol,r.timeframe,r.side,r.primary_regime
                     FROM research_signal_rankings k JOIN research_signal_snapshots r ON r.snapshot_id=k.snapshot_id
                     WHERE k.rank_version=? AND r.capture_quality='DECISION_TIME'
@@ -547,7 +599,12 @@ class ResearchEngine:
                     (rank_version, telegram_id, telegram_id, safe_limit)).fetchall()
                 if rows:
                     break
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["components"] = _loads(item.get("components_json"), {})
+            result.append(item)
+        return result
 
     def scalping_report(self, telegram_id: int | None = None) -> dict[str, Any]:
         rows = [row for row in self._rows(telegram_id) if row.get("capture_quality") == "DECISION_TIME"

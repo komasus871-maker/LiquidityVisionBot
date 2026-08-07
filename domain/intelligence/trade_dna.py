@@ -96,6 +96,7 @@ class TradeDNABuilder:
         "readiness", "trade_health", "health_score", "ai_grade", "execution_status",
         "opportunity_category", "decision_action", "score_components", "direction_breakdown",
         "global_context", "execution_bias", "trade_quality_stars", "expected_path", "triggers",
+        "market_intelligence",
     }
 
     @classmethod

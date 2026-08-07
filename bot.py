@@ -40,6 +40,7 @@ from services.ai_trading import AIShadowWorker, configured_ai_interval
 from services.ai_operations import AIConfigurationValidator
 from services.ai_intelligence import AIObservationIntelligence
 from services.research_worker import ResearchWorker
+from services.microstructure_observer import MicrostructureObserver
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -127,7 +128,8 @@ async def main() -> None:
     copy_execution = CopyExecutionWorker()
     ai_shadow = AIShadowWorker(interval_seconds=configured_ai_interval())
     research = ResearchWorker()
-    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research]
+    microstructure = MicrostructureObserver()
+    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research, microstructure]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
@@ -135,6 +137,7 @@ async def main() -> None:
         asyncio.create_task(copy_execution.run_forever(), name="copy-execution"),
         asyncio.create_task(ai_shadow.run_forever(), name="ai-shadow"),
         asyncio.create_task(research.run_forever(), name="research-engine"),
+        asyncio.create_task(microstructure.run_forever(), name="microstructure-observer"),
     ]
 
     mode = deployment_mode()
@@ -153,6 +156,7 @@ async def main() -> None:
                 copy_result = await copy_execution.check_once()
                 ai_result = await ai_shadow.check_once()
                 research_result = await research.check_once()
+                microstructure_result = await microstructure.check_once()
                 return {
                     "database_backend": database_backend(),
                     "persistent_database": persistent_database(),
@@ -162,6 +166,7 @@ async def main() -> None:
                     "copy_execution": copy_result,
                     "ai_observation": ai_result,
                     "research_engine": research_result,
+                    "microstructure_observer": microstructure_result,
                 }
 
             webhook_server = WebhookServer(

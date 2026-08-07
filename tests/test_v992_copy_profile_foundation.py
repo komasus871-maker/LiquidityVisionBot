@@ -28,8 +28,8 @@ def _signal() -> dict:
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.17"
-    assert RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
+    assert APP_VERSION == "9.9.18"
+    assert RELEASE_NAME == "Market Intelligence & Signal Quality"
 
 
 def test_profile_validation_normalizes_future_execution_settings() -> None:

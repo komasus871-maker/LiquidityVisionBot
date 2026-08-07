@@ -1,3 +1,18 @@
+## v9.9.18 — Market Intelligence & Signal Quality
+
+- Added a deterministic Market Story Engine with decision-time state transitions and explicit no-future-data provenance.
+- Added explicit 4H context, 1H setup, and 15M entry roles without forcing blind alignment; reversal research requires stronger evidence when opposing the higher timeframe.
+- Added quality-scored swings, previous-day/session/round/FVG levels and family-aware clusters that prevent overlapping representations from being counted repeatedly.
+- Added unresolved/consumed liquidity maps and bounded BingX public depth, funding, and open-interest observation using documented read-only endpoints.
+- Added skeptical wall interaction states (`STATIC`, `PERSISTENT`, `PULLED`, `REPLENISHING`, `SWEPT`) plus possible spoof/absorption inference without actor-identity claims or raw-book persistence.
+- Added SHADOW/PAPER pump and dump reversal families, continuation-risk classification, bounded non-martingale re-entry policy research, realistic 1R–3R target bands, and explicit transaction-cost gates for scalping research.
+- Added upgraded structure/sweep/FVG/order-block quality, richer momentum states, trend maturity, Market Quality, strategy suitability, contradiction severity, confidence decomposition, and thesis-invalidation quality.
+- Added transparent Signal Quality V2 with family-level shrinkage and Signal Ranking V3; scores are not probabilities and do not modify production filters.
+- Added symmetric quality-threshold reporting for expectancy, missed winners, avoided losses and drawdown proxies, with minimum-sample warnings and no profitability claim.
+- Reframed GPT as a bounded red-team analyst using immutable market-intelligence facts while preserving no-chain-of-thought storage and zero execution authority.
+- Added additive, repeatable SQLite/PostgreSQL schema for immutable intelligence snapshots and bounded microstructure aggregates, plus Telegram inspection commands and concise `/trade` quality context.
+- Preserved automatic PAPER copy, unified accounting, LIVE gates, and `AI_GATED=AI_OFF`; no economic authority was added.
+
 ## v9.9.17 — Edge Discovery & Trading Intelligence Engine
 
 - Added versioned normalized research features with explicit missing values and quality classes for trustworthy decision-time, reconstructed, late-backfill, incomplete and contaminated data.

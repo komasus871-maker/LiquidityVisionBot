@@ -8,6 +8,8 @@ from aiogram.types import Message
 
 from services.capabilities import CapabilityService
 from services.edge_discovery import EdgeDiscoveryEngine
+from services.market_intelligence import concise_market_story
+from services.market_intelligence_repository import MarketIntelligenceRepository
 from services.research_engine import ResearchEngine
 
 
@@ -15,6 +17,7 @@ router = Router()
 engine = ResearchEngine()
 edge_engine = EdgeDiscoveryEngine()
 capabilities = CapabilityService()
+market_repo = MarketIntelligenceRepository()
 
 
 def _number(value, suffix: str = "", digits: int = 2) -> str:
@@ -32,6 +35,16 @@ def _metric_lines(metrics: dict) -> str:
         f"MFE / MAE: <b>{_number(metrics.get('average_mfe_pct'), '%')} / {_number(metrics.get('average_mae_pct'), '%')}</b>\n"
         f"Drawdown proxy: <b>{_number(metrics.get('drawdown_proxy_r'), 'R')}</b>"
     )
+
+
+def _signal_argument(message: Message) -> int | None:
+    parts = (message.text or "").split()
+    return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+
+
+def _symbol_argument(message: Message) -> str | None:
+    parts = (message.text or "").split()
+    return parts[1].upper() if len(parts) > 1 else None
 
 
 @router.message(Command("research"))
@@ -105,14 +118,30 @@ async def edge_report(message: Message):
 @router.message(Command("signal_rankings"))
 async def signal_rankings(message: Message):
     rows = engine.rankings(message.from_user.id, limit=10)
-    lines = [
-        f"<b>#{index} {escape(str(row['symbol']))} {escape(str(row['timeframe']))} {escape(str(row['side']))}</b> "
-        f"· {float(row['diagnostic_score']):.1f}/100 · <code>{escape(str(row['primary_regime']))}</code>"
-        for index, row in enumerate(rows, 1)
-    ]
+    lines = []
+    for index, row in enumerate(rows, 1):
+        components = row.get("components") or {}
+        advantages = components.get("strongest_advantages") or []
+        weaknesses = components.get("strongest_weaknesses") or []
+        advantage = advantages[0][0] if advantages else "unavailable"
+        weakness = weaknesses[0][0] if weaknesses else "unavailable"
+        lines.append(
+            f"<b>#{index} {escape(str(row['symbol']))} {escape(str(row['timeframe']))} {escape(str(row['side']))}</b> "
+            f"· {float(row['diagnostic_score']):.1f}/100 · <code>{escape(str(row['primary_regime']))}</code>\n"
+            f"  + {escape(str(advantage).replace('_', ' ').lower())} · "
+            f"− {escape(str(weakness).replace('_', ' ').lower())}"
+        )
+    comparison = ""
+    if len(rows) >= 2:
+        first, second = rows[0], rows[1]
+        margin = float(first["diagnostic_score"]) - float(second["diagnostic_score"])
+        comparison = (
+            f"\n\n#1 leads #2 by <b>{margin:.1f}</b> quality points; inspect "
+            f"<code>/signal_quality {int(first['signal_id'])}</code> for the full decomposition."
+        )
     await message.answer(
         "<b>Research Signal Ranking</b>\n\n" + ("\n".join(lines) or "No ranked snapshots yet.") +
-        "\n\nDiagnostic only; ranking has no execution authority.", parse_mode="HTML",
+        comparison + "\n\nDiagnostic only; ranking has no execution authority.", parse_mode="HTML",
     )
 
 
@@ -279,3 +308,174 @@ async def ai_research_compare(message: Message):
         f"Status: <code>{escape(str(report.get('status') or 'INSUFFICIENT'))}</code>\n\n"
         "All three remain independent and advisory; no future outcome is placed in GPT context.",
         parse_mode="HTML")
+
+
+@router.message(Command("market_story"))
+async def market_story(message: Message):
+    signal_id = _signal_argument(message)
+    if signal_id is None:
+        await message.answer("Usage: <code>/market_story SIGNAL_ID</code>", parse_mode="HTML")
+        return
+    row = market_repo.get_signal(signal_id, message.from_user.id)
+    if not row:
+        await message.answer("No v9.9.18 decision-time market story exists for that signal.")
+        return
+    snapshot = row["full_snapshot"]
+    story = snapshot.get("market_story") or {}
+    await message.answer(
+        f"<b>Market Story · #{signal_id}</b>\n\n"
+        f"State: <code>{escape(str(story.get('state') or 'UNKNOWN'))}</code>\n"
+        f"Transition: <code>{escape(str(story.get('transition') or 'UNKNOWN'))}</code>\n"
+        f"{escape(concise_market_story(snapshot))}\n\n"
+        "Grounded in immutable decision-time facts; no future data or actor identity claim.",
+        parse_mode="HTML")
+
+
+@router.message(Command("signal_quality"))
+async def signal_quality(message: Message):
+    signal_id = _signal_argument(message)
+    if signal_id is None:
+        await message.answer("Usage: <code>/signal_quality SIGNAL_ID</code>", parse_mode="HTML")
+        return
+    row = market_repo.get_signal(signal_id, message.from_user.id)
+    if not row:
+        await message.answer("No v9.9.18 quality snapshot exists for that signal.")
+        return
+    quality = row["quality"]
+    families = sorted((quality.get("family_scores") or {}).items(), key=lambda item: -float(item[1]))
+    lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: {float(score):.1f}"
+             for name, score in families[:8]]
+    await message.answer(
+        f"<b>Signal Quality V2 · #{signal_id}</b>\n\n"
+        f"Overall / market: <b>{float(quality.get('overall_quality') or 0):.1f} / "
+        f"{float(quality.get('market_quality') or 0):.1f}</b>\n"
+        f"Evidence families / diversity: <b>{int(quality.get('evidence_family_count') or 0)} / "
+        f"{float(quality.get('evidence_diversity_score') or 0):.1f}</b>\n\n"
+        + "\n".join(lines) +
+        "\n\nResearch score, not a probability and not an execution filter.", parse_mode="HTML")
+
+
+@router.message(Command("contradictions"))
+async def contradictions(message: Message):
+    signal_id = _signal_argument(message)
+    if signal_id is None:
+        await message.answer("Usage: <code>/contradictions SIGNAL_ID</code>", parse_mode="HTML")
+        return
+    row = market_repo.get_signal(signal_id, message.from_user.id)
+    if not row:
+        await message.answer("No v9.9.18 contradiction snapshot exists for that signal.")
+        return
+    quality = row["quality"]
+    against = quality.get("contradicting_evidence") or []
+    supports = quality.get("supporting_evidence") or []
+    critical = quality.get("critical_disqualifiers") or []
+    uncertainties = quality.get("uncertainties") or []
+    def render(items):
+        return "\n".join(f"• <code>{escape(str(item.get('severity') or 'INFO'))}</code> "
+                          f"{escape(str(item.get('reason') or ''))}" for item in items) or "• none"
+    await message.answer(
+        f"<b>Contradictions · #{signal_id}</b>\n\n<b>Supporting</b>\n{render(supports)}\n\n"
+        f"<b>Against</b>\n{render(against)}\n\n"
+        f"Critical: <code>{escape(', '.join(map(str, critical)) or 'none')}</code>\n"
+        f"Uncertainties: <code>{escape(', '.join(map(str, uncertainties)) or 'none')}</code>",
+        parse_mode="HTML")
+
+
+@router.message(Command("liquidity_map"))
+async def liquidity_map(message: Message):
+    symbol = _symbol_argument(message)
+    if not symbol:
+        await message.answer("Usage: <code>/liquidity_map BTCUSDT</code>", parse_mode="HTML")
+        return
+    row = market_repo.latest_symbol(symbol, message.from_user.id)
+    if not row:
+        await message.answer("No decision-time liquidity map exists for that symbol.")
+        return
+    liquidity = row["liquidity_map"]
+    def side_lines(items):
+        return "\n".join(f"• <code>{float(item.get('price') or 0):.8g}</code> · "
+                          f"attraction {float(item.get('attraction_score') or 0):.0f} · "
+                          f"{escape(str(item.get('state') or 'UNKNOWN'))}" for item in items[:5]) or "• none"
+    await message.answer(
+        f"<b>Liquidity Map · {escape(symbol)}</b>\n\n<b>Above</b>\n{side_lines(liquidity.get('above') or [])}\n\n"
+        f"<b>Below</b>\n{side_lines(liquidity.get('below') or [])}\n\n"
+        f"Unresolved / consumed: <b>{int(liquidity.get('unresolved_count') or 0)} / "
+        f"{int(liquidity.get('consumed_count') or 0)}</b>", parse_mode="HTML")
+
+
+@router.message(Command("orderbook"))
+async def orderbook(message: Message):
+    symbol = _symbol_argument(message)
+    if not symbol:
+        await message.answer("Usage: <code>/orderbook BTCUSDT</code>", parse_mode="HTML")
+        return
+    row = market_repo.latest_microstructure(symbol)
+    if not row:
+        await message.answer("No bounded microstructure aggregate exists. Collection may be disabled.")
+        return
+    aggregate = row["aggregate"]
+    walls = aggregate.get("walls") or []
+    wall_lines = "\n".join(
+        f"• {escape(str(item.get('side')))} <code>{float(item.get('price') or 0):.8g}</code> · "
+        f"{escape(str(item.get('state')))} · persistence {float(item.get('persistence_ratio') or 0):.0%}"
+        for item in walls[:6]) or "• no qualified wall interaction"
+    await message.answer(
+        f"<b>Order-book Research · {escape(symbol)}</b>\n\n"
+        f"Status / stale: <code>{escape(str(aggregate.get('status') or 'UNKNOWN'))} / {row.get('stale')}</code>\n"
+        f"Samples / interaction quality: <b>{int(aggregate.get('sample_count') or 0)} / "
+        f"{float(aggregate.get('interaction_quality') or 0):.1f}</b>\n"
+        f"Spread: <b>{float(aggregate.get('spread_pct') or 0):.4f}%</b>\n"
+        f"Inference: <code>{escape(str(aggregate.get('absorption_inference') or 'UNCONFIRMED'))}</code>\n\n"
+        f"{wall_lines}\n\nResting walls remain untrusted until price interaction confirms them.", parse_mode="HTML")
+
+
+@router.message(Command("pump_reversals"))
+async def pump_reversals(message: Message):
+    rows = market_repo.recent_reversals(message.from_user.id, limit=12)
+    lines = []
+    for row in rows:
+        candidates = row.get("reversal") or {}
+        active = [candidate for candidate in candidates.values() if isinstance(candidate, dict)
+                  and not str(candidate.get("state") or "").endswith("_INVALID")]
+        for candidate in active:
+            lines.append(f"<b>#{row['signal_id']} {escape(row['symbol'])} {escape(row['timeframe'])}</b> · "
+                         f"<code>{escape(str(candidate.get('state')))}</code> · "
+                         f"{float(candidate.get('move_24h_pct') or 0):+.1f}%")
+    await message.answer(
+        "<b>Pump/Dump Reversal Research</b>\n\n" + ("\n".join(lines) or "No early/confirmed candidate snapshots yet.") +
+        "\n\nSHADOW/PAPER only. Continuation risk is reported explicitly; no trade is opened.", parse_mode="HTML")
+
+
+@router.message(Command("entry_research"))
+async def entry_research(message: Message):
+    report = market_repo.policy_report("ENTRY", message.from_user.id)
+    await message.answer(
+        "<b>Entry Research</b>\n\n"
+        f"Decision snapshots / resolved: <b>{report['decision_snapshots']} / {report['resolved_outcomes']}</b>\n"
+        f"Status: <code>{report['status']}</code>\n"
+        f"Policies: <code>{escape(', '.join(report['policies']))}</code>\n\n"
+        "Fill probability, MAE, missed winners, and avoided losses require ordered path data.", parse_mode="HTML")
+
+
+@router.message(Command("reentry_research"))
+async def reentry_research(message: Message):
+    report = market_repo.policy_report("REENTRY", message.from_user.id)
+    await message.answer(
+        "<b>Re-entry Research</b>\n\n"
+        f"Decision snapshots / resolved: <b>{report['decision_snapshots']} / {report['resolved_outcomes']}</b>\n"
+        f"Status: <code>{report['status']}</code>\n"
+        f"Maximum attempts: <b>{report['maximum_attempts']}</b>\n"
+        f"Martingale: <b>{'YES' if report['martingale'] else 'NO'}</b>\n\n"
+        "Each attempt requires new evidence, cooldown, a new identity, and bounded cumulative risk.", parse_mode="HTML")
+
+
+@router.message(Command("quality_report"))
+async def quality_report(message: Message):
+    report = market_repo.quality_threshold_report(message.from_user.id)
+    lines = [f"<b>{item['threshold']}</b> · n={item['trades']} · E {_number(item['expectancy_r'], 'R')} · "
+             f"missed W {item['missed_winners']} · avoided L {item['avoided_losses']}"
+             for item in report["threshold_curves"]]
+    await message.answer(
+        "<b>Quality Threshold Research</b>\n\n" + "\n".join(lines) +
+        f"\n\nResolved samples: <b>{report['resolved_samples']}</b> · <code>{report['status']}</code>\n"
+        "No threshold is applied automatically and no profitability claim is made.", parse_mode="HTML")

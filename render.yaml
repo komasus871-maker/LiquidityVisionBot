@@ -11,7 +11,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: APP_VERSION
-        value: 9.9.17
+        value: 9.9.18
       - key: BOT_MODE
         value: webhook
       - key: BOT_TOKEN
@@ -102,6 +102,20 @@ services:
         value: "0.03"
       - key: SCALPING_LATENCY_PENALTY_PCT
         value: "0.01"
+      - key: MICROSTRUCTURE_COLLECTION_ENABLED
+        value: "true"
+      - key: MICROSTRUCTURE_INTERVAL_SECONDS
+        value: "60"
+      - key: MICROSTRUCTURE_MAX_SYMBOLS
+        value: "8"
+      - key: MICROSTRUCTURE_SAMPLES_PER_SYMBOL
+        value: "5"
+      - key: MICROSTRUCTURE_SAMPLE_SPACING_MS
+        value: "400"
+      - key: MICROSTRUCTURE_MAX_LEVELS
+        value: "50"
+      - key: REVERSAL_EXTREME_MOVE_PCT
+        value: "12"
       - key: AI_TRADING_MODE
         value: AI_OFF
       - key: AI_PROVIDER

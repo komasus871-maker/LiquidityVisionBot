@@ -27,8 +27,8 @@ class StubBybit(BybitV5Adapter):
 def test_release_and_registry(monkeypatch):
     monkeypatch.setenv("BYBIT_TESTNET", "true")
     registry = build_exchange_registry()
-    assert APP_VERSION == "9.9.17"
-    assert RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
+    assert APP_VERSION == "9.9.18"
+    assert RELEASE_NAME == "Market Intelligence & Signal Quality"
     assert registry.available() == (ExchangeName.BINANCE, ExchangeName.BINGX, ExchangeName.BYBIT, ExchangeName.OKX)
     assert isinstance(registry.create(ExchangeName.BYBIT), BybitV5Adapter)
 

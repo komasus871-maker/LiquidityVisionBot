@@ -16,7 +16,7 @@ from database.database import connect
 from version import APP_VERSION
 
 
-FEATURE_VERSION = "research-features-v2"
+FEATURE_VERSION = "research-features-v3"
 ALGORITHM_VERSION = "edge-discovery-v1"
 MODEL_VERSION = "regularized-logit-v1"
 SELECTOR_VERSION = "regime-selector-v1"
@@ -211,6 +211,16 @@ class ResearchFeatureNormalizer:
             "entry": entry,
             "stop": stop,
             "stop_distance_pct": (risk / abs(entry) * 100 if risk is not None and entry else None),
+            "market_quality_v2": _number(_lookup(flat, "market_quality")),
+            "signal_quality_v2": _number(_lookup(flat, "overall_quality")),
+            "evidence_diversity_score": _number(_lookup(flat, "evidence_diversity_score")),
+            "evidence_family_count": _number(_lookup(flat, "evidence_family_count")),
+            "invalidation_quality": _number(_lookup(flat, "invalidation.score", "invalidation_quality")),
+            "market_story_state": _category(_lookup(flat, "market_story.state", "story_state")),
+            "momentum_state_v2": _category(_lookup(flat, "momentum.state", "momentum_state")),
+            "trend_maturity": _category(_lookup(flat, "trend_maturity.state", "trend_maturity")),
+            "microstructure_quality": _number(_lookup(flat, "interaction_quality", "microstructure_quality")),
+            "relative_strength_state": _category(_lookup(flat, "relative_strength.state", "relative_strength_state")),
         })
         targets = list(snapshot.get("take_profits") or [])[:3]
         targets += [None] * (3 - len(targets))

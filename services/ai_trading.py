@@ -203,6 +203,11 @@ class AIContextBuilder:
                           recurring_failures_json,regimes_json
                    FROM ai_learning_snapshots ORDER BY id DESC LIMIT 1"""
             ).fetchone()
+            market_intelligence_row = conn.execute(
+                """SELECT full_snapshot_json FROM market_intelligence_snapshots
+                   WHERE signal_id=? ORDER BY id DESC LIMIT 1""",
+                (signal_id,),
+            ).fetchone()
         try:
             features = json.loads(item.get("features_json") or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -253,6 +258,38 @@ class AIContextBuilder:
         safe_features["market_intelligence"] = {
             key: safe_features.pop(key, "UNAVAILABLE") for key in intelligence_keys
         }
+        if market_intelligence_row:
+            try:
+                rich = json.loads(market_intelligence_row["full_snapshot_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                rich = {}
+            quality = rich.get("signal_quality_v2") or {}
+            liquidity = rich.get("liquidity_map") or {}
+            safe_features["market_intelligence_v2"] = redact({
+                "market_story": rich.get("market_story") or {},
+                "structure_quality": rich.get("structure_quality") or {},
+                "momentum": rich.get("momentum") or {},
+                "trend_maturity": rich.get("trend_maturity") or {},
+                "quality": {
+                    "overall_quality": quality.get("overall_quality"),
+                    "market_quality": quality.get("market_quality"),
+                    "family_scores": quality.get("family_scores") or {},
+                    "supporting_evidence": quality.get("supporting_evidence") or [],
+                    "contradicting_evidence": quality.get("contradicting_evidence") or [],
+                    "critical_disqualifiers": quality.get("critical_disqualifiers") or [],
+                    "uncertainties": quality.get("uncertainties") or [],
+                    "invalidation": quality.get("invalidation") or {},
+                },
+                "liquidity": {
+                    "likely_attractor": liquidity.get("likely_attractor"),
+                    "above": (liquidity.get("above") or [])[:3],
+                    "below": (liquidity.get("below") or [])[:3],
+                },
+                "microstructure": rich.get("microstructure") or {},
+                "reversal_research": rich.get("reversal_research") or {},
+                "relative_strength": rich.get("relative_strength") or {},
+                "funding_open_interest": rich.get("funding_open_interest") or {},
+            })
         return AIContext(
             telegram_id=item.get("owner_telegram_id"), signal_id=signal_id,
             symbol=str(item["symbol"]).upper(), timeframe=str(item["timeframe"]),
@@ -886,13 +923,17 @@ RESPONSE_SCHEMA = {
     },
 }
 SCHEMA_CHECKSUM = checksum(RESPONSE_SCHEMA)
-PROMPT_VERSION = "ai-observation-v10-structured"
+PROMPT_VERSION = "ai-red-team-v11-structured"
 SYSTEM_PROMPT = """You are an advisory market-analysis component. Use only the supplied immutable snapshot.
 Return JSON matching the supplied schema. Disclose uncertainty and contradictions. Abstain when evidence is
 insufficient or stale. Never invent prices, indicators, tools, or external facts. Never issue an order command.
 Distinguish setup quality from deterministic portfolio admission. Rank concise observable evidence, classify all
 applicable market regimes, explain uncertainty without chain-of-thought, and use supplied historical observations
-only as bounded analogies. AI is counterfactual and must never influence sizing, risk, positions, or execution."""
+only as bounded analogies. Act primarily as a red-team analyst: identify the weakest evidence, false-signal paths,
+logical invalidation defects, unrealistic targets, late entries, incoherent market stories, missing context, and when
+the correct response is abstention. Do not reward multiple correlated indicators as independent evidence. Return
+only conclusions and concise evidence; never expose or request chain-of-thought. AI is counterfactual and must never
+influence sizing, risk, positions, or execution."""
 
 
 @dataclass(frozen=True, slots=True)

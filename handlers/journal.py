@@ -13,6 +13,7 @@ from database.candidate_history import CandidateHistory
 from database.signal_history import SignalHistory
 from utils.price import fmt_price
 from services.intelligence_layer import IntelligenceLayer
+from services.market_intelligence_repository import MarketIntelligenceRepository
 from services.replay_renderer import render_intelligence
 
 router = Router()
@@ -20,6 +21,7 @@ history = SignalHistory()
 observations = ObservationHistory()
 candidates = CandidateHistory()
 intelligence_layer = IntelligenceLayer()
+market_intelligence_repository = MarketIntelligenceRepository()
 
 
 def _status_icon(status: str) -> str:
@@ -327,6 +329,17 @@ async def trade_replay_handler(message: Message):
     replay = "\n".join(event_lines) if event_lines else "Событий пока нет."
     effective_stop = signal.get("effective_stop") or signal.get("stop")
     intelligence = intelligence_layer.build_for_signal(signal)
+    market_row = market_intelligence_repository.get_signal(signal_id, message.from_user.id)
+    market_snapshot = (market_row or {}).get("full_snapshot") or {}
+    market_quality = market_snapshot.get("signal_quality_v2") or {}
+    market_story = market_snapshot.get("market_story") or {}
+    market_summary = (
+        f"Market Story: <code>{html.escape(str(market_story.get('state') or 'UNKNOWN'))}</code>\n"
+        f"Market / Signal Quality V2: <b>{float(market_quality.get('market_quality') or 0):.0f} / "
+        f"{float(market_quality.get('overall_quality') or 0):.0f}</b>\n"
+        f"Evidence Diversity: <b>{float(market_quality.get('evidence_diversity_score') or 0):.0f}</b>\n"
+        if market_row else "Market Intelligence V2: <code>not captured for this legacy signal</code>\n"
+    )
     await message.answer(
         f"""
 🎞 <b>Trade Replay PRO #{signal_id}</b>
@@ -346,6 +359,7 @@ Realized: <b>{float(signal.get('realized_r') or 0):+.2f}R</b>
 Result: <b>{html.escape(str(signal.get('result') or 'OPEN'))}</b>
 Trade Health: <b>{html.escape(str(signal.get('trade_health') or '—'))}</b>
 Dynamic Confidence: <b>{float(signal.get('dynamic_confidence') or signal.get('confidence') or 0):.0f}%</b>
+{market_summary}
 
 ━━━━━━━━━━━━━━━━━━
 

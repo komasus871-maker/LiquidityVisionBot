@@ -857,6 +857,37 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS market_intelligence_snapshots(
+                id {id_col}, research_snapshot_id TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                owner_telegram_id BIGINT, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+                side TEXT NOT NULL, decision_at TEXT NOT NULL,
+                intelligence_version TEXT NOT NULL, story_version TEXT NOT NULL,
+                quality_version TEXT NOT NULL, snapshot_checksum TEXT NOT NULL,
+                story_state TEXT NOT NULL, market_quality DOUBLE PRECISION NOT NULL,
+                overall_quality DOUBLE PRECISION NOT NULL,
+                evidence_diversity DOUBLE PRECISION NOT NULL,
+                contradiction_count INTEGER NOT NULL, critical_count INTEGER NOT NULL,
+                story_json TEXT NOT NULL, level_map_json TEXT NOT NULL,
+                liquidity_map_json TEXT NOT NULL, microstructure_json TEXT NOT NULL,
+                reversal_json TEXT NOT NULL, quality_json TEXT NOT NULL,
+                strategy_suitability_json TEXT NOT NULL,
+                research_policies_json TEXT NOT NULL, full_snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(signal_id,intelligence_version),
+                UNIQUE(research_snapshot_id,intelligence_version)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS microstructure_aggregates(
+                id {id_col}, symbol TEXT NOT NULL, exchange TEXT NOT NULL,
+                environment TEXT NOT NULL, aggregate_version TEXT NOT NULL,
+                aggregate_checksum TEXT NOT NULL UNIQUE, sample_count INTEGER NOT NULL,
+                interaction_quality DOUBLE PRECISION NOT NULL, status TEXT NOT NULL,
+                aggregate_json TEXT NOT NULL, sampled_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS capability_entitlements(
                 id {id_col}, telegram_id BIGINT NOT NULL, capability TEXT NOT NULL,
                 enabled INTEGER NOT NULL, source TEXT NOT NULL, expires_at TEXT,
@@ -1146,6 +1177,12 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_research_hypothesis_eval ON research_hypothesis_evaluations(hypothesis_id,evaluation_cutoff)",
             "CREATE INDEX IF NOT EXISTS idx_research_model_time ON research_model_runs(model_version,validation_cutoff)",
             "CREATE INDEX IF NOT EXISTS idx_research_selector_regime ON research_strategy_recommendations(regime_key,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_intelligence_owner_time ON market_intelligence_snapshots(owner_telegram_id,decision_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_intelligence_symbol_time ON market_intelligence_snapshots(symbol,timeframe,decision_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_intelligence_quality ON market_intelligence_snapshots(overall_quality,decision_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_intelligence_story ON market_intelligence_snapshots(story_state,decision_at)",
+            "CREATE INDEX IF NOT EXISTS idx_microstructure_symbol_time ON microstructure_aggregates(symbol,sampled_at)",
+            "CREATE INDEX IF NOT EXISTS idx_microstructure_expiry ON microstructure_aggregates(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_capability_entitlements_user ON capability_entitlements(telegram_id,capability)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
+from services.market_intelligence import MarketIntelligenceEngine
 from services.trade_plan_integrity import TradePlanIntegrity, InvalidTradePlan
 from services.unified_core import unified_pipeline
 
@@ -656,6 +658,48 @@ class Analyzer:
             data["score"] = 0.0
             data["setup_score"] = 0.0
             data.setdefault("reasons", []).append(f"⛔ Invalid trade geometry: {exc}")
+        # Attach research metadata only after legacy decision fields are final.
+        # Nothing in planner/risk/sizing/execution consumes this envelope.
+        try:
+            microstructure_aggregate = None
+            try:
+                from services.market_intelligence_repository import MarketIntelligenceRepository
+                microstructure_row = MarketIntelligenceRepository().latest_microstructure(symbol)
+                if microstructure_row and not microstructure_row.get("stale"):
+                    microstructure_aggregate = dict(microstructure_row.get("aggregate") or {})
+                    microstructure_aggregate.update({
+                        "sampled_at": microstructure_row.get("sampled_at"),
+                        "expires_at": microstructure_row.get("expires_at"),
+                        "exchange": microstructure_row.get("exchange"),
+                        "environment": microstructure_row.get("environment"),
+                    })
+            except Exception:
+                logging.exception(
+                    "market_intelligence_microstructure_lookup_failed symbol=%s timeframe=%s",
+                    symbol,
+                    timeframe,
+                )
+            data["market_intelligence"] = MarketIntelligenceEngine().analyze_timeframe(
+                df,
+                timeframe=str(timeframe or "unknown"),
+                side=str(data.get("direction") or "NEUTRAL"),
+                plan=data,
+                microstructure_aggregate=microstructure_aggregate,
+            )
+        except Exception:
+            logging.exception(
+                "market_intelligence_analysis_failed symbol=%s timeframe=%s",
+                symbol,
+                timeframe,
+            )
+            data["market_intelligence"] = {
+                "version": "market-intelligence-v2",
+                "mode": "SHADOW_RESEARCH_ONLY",
+                "status": "DEGRADED",
+                "reason_codes": ["ANALYSIS_FAILURE"],
+                "economic_authority": False,
+                "execution_authority": False,
+            }
         context.decision.update(data)
         data["analysis_context"] = context.snapshot()
         data["trade_dna_foundation"] = dict(context.trade_dna)

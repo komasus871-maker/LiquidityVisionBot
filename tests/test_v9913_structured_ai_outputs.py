@@ -19,7 +19,7 @@ def _request(mode=AIOutputMode.STRICT_JSON_SCHEMA):
 
 
 def test_release_and_schema_checksum_are_stable():
-    assert APP_VERSION == "9.9.17" and RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
+    assert APP_VERSION == "9.9.18" and RELEASE_NAME == "Market Intelligence & Signal Quality"
     assert SCHEMA_CHECKSUM == checksum(RESPONSE_SCHEMA)
     assert RESPONSE_SCHEMA["additionalProperties"] is False
     assert set(RESPONSE_SCHEMA["required"]) <= set(RESPONSE_SCHEMA["properties"])

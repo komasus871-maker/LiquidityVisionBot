@@ -158,7 +158,7 @@ async def ai_mode(message: Message) -> None:
         await message.answer("Unknown AI mode. Use AI_OFF, AI_OBSERVE, AI_SHADOW, or AI_ASSIST.")
         return
     effective = set_user_ai_mode(message.from_user.id, requested)
-    suffix = " AI_GATED is fail-closed in v9.9.17." if requested is AITradingMode.AI_GATED else ""
+    suffix = " AI_GATED is fail-closed in v9.9.18." if requested is AITradingMode.AI_GATED else ""
     await message.answer(f"AI mode set to <code>{effective.value}</code>.{suffix}")
 
 

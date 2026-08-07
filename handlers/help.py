@@ -21,6 +21,12 @@ async def help_command(message: Message):
 /portfolio — позиции, effective risk и концентрация
 /dna — сильные и слабые торговые когорты
 /insights — единый краткий intelligence brief
+/market_story 105 — decision-time market story
+/signal_quality 105 — Signal Quality V2 decomposition
+/liquidity_map BTCUSDT — unresolved/consumed liquidity
+/orderbook BTCUSDT — bounded microstructure aggregate
+/contradictions 105 — supports, conflicts and uncertainty
+/quality_report — threshold curves with missed winners
 
 <b>📒 Journal & lifecycle</b>
 /journal — Trade Journal PRO

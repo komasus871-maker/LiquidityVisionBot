@@ -39,8 +39,8 @@ def _plan(telegram_id: int = 99550):
 
 
 def test_release_identity():
-    assert APP_VERSION == "9.9.17"
-    assert RELEASE_NAME == "Edge Discovery & Trading Intelligence Engine"
+    assert APP_VERSION == "9.9.18"
+    assert RELEASE_NAME == "Market Intelligence & Signal Quality"
 
 
 def test_execution_records_auditable_timeline(tmp_path, monkeypatch):

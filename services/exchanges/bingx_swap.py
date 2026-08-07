@@ -13,6 +13,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from version import APP_VERSION
+
 from services.exchanges.base import (
     ExchangeAdapter,
     ExchangeAuthenticationError,
@@ -161,7 +163,7 @@ class BingXSwapAdapter(ExchangeAdapter):
 
     async def _request_once(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False, method: str = "GET") -> Any:
         payload = {key: value for key, value in (params or {}).items() if value is not None}
-        headers = {"Accept": "application/json", "User-Agent": "LiquidityVisionBot/9.9.11"}
+        headers = {"Accept": "application/json", "User-Agent": f"LiquidityVisionBot/{APP_VERSION}"}
         request_params: list[tuple[str, Any]] = sorted(payload.items())
         body: str | None = None
         if signed:
@@ -270,6 +272,53 @@ class BingXSwapAdapter(ExchangeAdapter):
             raise ExchangeResponseError("BingX server time response was invalid")
         self._time_offset_ms = server_ms - int(time.time() * 1000)
         return server_ms
+
+    async def market_depth(self, symbol: str, limit: int = 50) -> dict[str, Any]:
+        """Return a bounded public futures depth snapshot for research observers."""
+        safe_limit = max(5, min(int(limit), 100))
+        data = await self._request(
+            "/openApi/swap/v2/quote/depth",
+            params={"symbol": _symbol(symbol), "limit": safe_limit},
+        )
+        row = data if isinstance(data, dict) else {}
+        bids, asks = row.get("bids"), row.get("asks")
+        if not isinstance(bids, list) or not isinstance(asks, list) or not bids or not asks:
+            raise ExchangeResponseError("BingX depth response did not contain bids and asks")
+        return {
+            "symbol": _symbol(symbol), "bids": bids[:safe_limit], "asks": asks[:safe_limit],
+            "timestamp": row.get("T") or row.get("timestamp") or row.get("time") or int(time.time() * 1000),
+            "source": "BINGX_PUBLIC_FUTURES_DEPTH",
+        }
+
+    async def funding_open_interest(self, symbol: str) -> dict[str, Any]:
+        """Return only exchange-reported public funding and open-interest context."""
+        normalized = _symbol(symbol)
+        premium, interest = await asyncio.gather(
+            self._request("/openApi/swap/v2/quote/premiumIndex", params={"symbol": normalized}),
+            self._request("/openApi/swap/v2/quote/openInterest", params={"symbol": normalized}),
+        )
+        premium_row = premium[0] if isinstance(premium, list) and premium else premium
+        interest_row = interest[0] if isinstance(interest, list) and interest else interest
+        premium_row = premium_row if isinstance(premium_row, dict) else {}
+        interest_row = interest_row if isinstance(interest_row, dict) else {}
+        funding = premium_row.get("lastFundingRate")
+        if funding is None:
+            funding = premium_row.get("fundingRate")
+        open_interest = interest_row.get("openInterest")
+        if open_interest is None:
+            open_interest = interest_row.get("openInterestAmount")
+        if funding is None and open_interest is None:
+            raise ExchangeResponseError("BingX funding/open-interest response was empty")
+        return {
+            "symbol": normalized,
+            "funding_rate": None if funding is None else str(funding),
+            "open_interest": None if open_interest is None else str(open_interest),
+            "mark_price": premium_row.get("markPrice"),
+            "index_price": premium_row.get("indexPrice"),
+            "next_funding_time": premium_row.get("nextFundingTime"),
+            "reported_at": premium_row.get("time") or interest_row.get("time") or int(time.time() * 1000),
+            "source": "BINGX_PUBLIC_FUTURES_MARKET",
+        }
 
     async def rate_limits(self) -> ExchangeRateLimits:
         return self._last_rate_limit
