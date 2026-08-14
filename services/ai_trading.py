@@ -263,7 +263,7 @@ class AIContextBuilder:
                 rich = json.loads(market_intelligence_row["full_snapshot_json"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 rich = {}
-            quality = rich.get("signal_quality_v2") or {}
+            quality = rich.get("signal_quality_v3") or rich.get("signal_quality_v2") or {}
             liquidity = rich.get("liquidity_map") or {}
             safe_features["market_intelligence_v2"] = redact({
                 "market_story": rich.get("market_story") or {},
@@ -1002,6 +1002,32 @@ class ValidatedDecision:
     validation_stage: str = "DOMAIN_VALIDATION"
 
 
+SCHEMA_FAILURE_STAGES = frozenset({
+    "PROVIDER_TRANSPORT", "STRUCTURED_EXTRACTION", "JSON_PARSING",
+    "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE", "PROVIDER_COMPLETION",
+})
+SCHEMA_NOT_EVALUABLE_STAGES = frozenset({
+    "PROVIDER_TRANSPORT", "STRUCTURED_EXTRACTION", "JSON_PARSING",
+    "HTTP_RESPONSE_SHAPE", "PROVIDER_COMPLETION",
+})
+LOCAL_CONTEXT_REJECTION_CODES = frozenset({
+    "MARKET_TIMESTAMP_INVALID", "STALE_CONTEXT", "FUTURE_CONTEXT",
+})
+
+
+def schema_pipeline_valid(stage: str | None) -> bool:
+    """Return the stable governance definition used by persistence and metrics."""
+    return str(stage or "") not in SCHEMA_FAILURE_STAGES
+
+
+def provider_health_failure(code: str | None, stage: str | None) -> bool:
+    """Classify provider faults without blaming local persisted-context freshness."""
+    normalized_code = str(code or "")
+    if normalized_code == "VALID" or normalized_code in LOCAL_CONTEXT_REJECTION_CODES:
+        return False
+    return str(stage or "") not in {"CACHE_REUSE", "PRE_REQUEST_VALIDATION"}
+
+
 class AIResponseValidator:
     def __init__(self, *, min_risk: float = 0.0, max_risk: float = 1.0, max_age_seconds: int = 300):
         self.min_risk, self.max_risk = min_risk, max_risk
@@ -1011,6 +1037,20 @@ class AIResponseValidator:
         return ValidatedDecision("UNKNOWN", "NEUTRAL", 0, 1, AIAction.ABSTAIN, 0, True,
                                  (), (code,), (), f"AI abstained: {code}", ("UNKNOWN",), 0,
                                  (), f"Provider observation unavailable: {code}", False, code, stage)
+
+    def validate_context(self, context: AIContext) -> ValidatedDecision | None:
+        """Validate immutable context freshness independently of provider output."""
+        try:
+            timestamp = datetime.fromisoformat(context.market_timestamp.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError):
+            return self.fallback("MARKET_TIMESTAMP_INVALID", "MARKET_TRUTH_VALIDATION")
+        timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - timestamp
+        if age > timedelta(seconds=self.max_age_seconds):
+            return self.fallback("STALE_CONTEXT", "MARKET_TRUTH_VALIDATION")
+        if age < -timedelta(seconds=_env_int("AI_CONTEXT_MAX_FUTURE_SECONDS", 5, 0, 300)):
+            return self.fallback("FUTURE_CONTEXT", "MARKET_TRUTH_VALIDATION")
+        return None
 
     @staticmethod
     def _schema_valid(value: Any, schema: dict[str, Any]) -> bool:
@@ -1098,16 +1138,9 @@ class AIResponseValidator:
                 return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
             if not isinstance(payload["abstention"], bool):
                 return self.fallback("SCHEMA_VALIDATION_FAILED", "JSON_SCHEMA_VALIDATION")
-            try:
-                timestamp = datetime.fromisoformat(context.market_timestamp.replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                return self.fallback("MARKET_TIMESTAMP_INVALID", "MARKET_TRUTH_VALIDATION")
-            timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-            age = datetime.now(timezone.utc) - timestamp
-            if age > timedelta(seconds=self.max_age_seconds):
-                return self.fallback("STALE_CONTEXT", "MARKET_TRUTH_VALIDATION")
-            if age < -timedelta(seconds=_env_int("AI_CONTEXT_MAX_FUTURE_SECONDS", 5, 0, 300)):
-                return self.fallback("FUTURE_CONTEXT", "MARKET_TRUTH_VALIDATION")
+            context_failure = self.validate_context(context)
+            if context_failure is not None:
+                return context_failure
             supporting_items = payload["supporting_factors"]
             conflicting_items = payload["conflicting_factors"]
             ranking_items = payload["evidence_ranking"]
@@ -1254,7 +1287,7 @@ class AIDecisionRepository:
             decision.uncertainty, decision.action.value, decision.risk_multiplier, int(decision.abstention),
             _canonical(decision.supporting), _canonical(decision.conflicting),
             _canonical(decision.invalidations), decision.explanation,
-            int(decision.validation_stage not in {"STRUCTURED_EXTRACTION", "JSON_SCHEMA_VALIDATION"}),
+            int(response.provider_invoked and schema_pipeline_valid(decision.validation_stage)),
             decision.code, latency_ms, response.input_tokens, response.output_tokens,
             str(response.estimated_cost_usd), response.raw_checksum,
             None if deterministic_accepted is None else int(deterministic_accepted),
@@ -1538,8 +1571,10 @@ class AITradingService:
                                       cost_status="PRICED" if priced else "UNPRICED",
                                       pricing_version=price_version or None,
                                       material_state_checksum=material_checksum), identity)
+        context_rejection = self.validator.validate_context(context)
         cached_row = (intelligence.reusable_decision(identity["identity_checksum"], material_checksum)
-                      if not block and self.provider.name != "disabled" else None)
+                      if not block and context_rejection is None and
+                      self.provider.name != "disabled" else None)
         attempt_count = retry_count = 0
         if cached_row:
             decision = intelligence.decision_from_row(cached_row)
@@ -1555,8 +1590,20 @@ class AITradingService:
                 provider_invoked=False, cache_hit=True,
                 cache_source_decision_id=str(cached_row["decision_id"]),
             )
-        elif block or self.provider.name == "disabled" or not self._provider_available():
-            decision = self.validator.fallback(block or ("PROVIDER_DISABLED" if self.provider.name == "disabled" else "CIRCUIT_OPEN"))
+        elif block:
+            decision = self.validator.fallback(block)
+        elif self.provider.name == "disabled":
+            decision = self.validator.fallback("PROVIDER_DISABLED")
+        elif context_rejection is not None:
+            decision = context_rejection
+            response = replace(
+                response,
+                extraction_valid=False,
+                extraction_code="PROVIDER_NOT_INVOKED",
+                extraction_stage="PRE_REQUEST_VALIDATION",
+            )
+        elif not self._provider_available():
+            decision = self.validator.fallback("CIRCUIT_OPEN")
         else:
             request = AIProviderRequest(SYSTEM_PROMPT, PROMPT_VERSION, prompt_payload,
                                         RESPONSE_SCHEMA, self.max_tokens, requested_output,
@@ -1564,28 +1611,36 @@ class AITradingService:
             try:
                 assert self._semaphore is not None
                 last_error: Exception | None = None
+                provider_latency_ms = queue_wait_ms = 0.0
                 for attempt in range(self.max_attempts):
                     attempt_count = attempt + 1
-                    attempt_started = time.perf_counter()
+                    queue_started = time.perf_counter()
+                    provider_started: float | None = None
                     try:
                         response = replace(response, provider_invoked=True)
                         async with self._semaphore:
+                            queue_wait_ms = (time.perf_counter() - queue_started) * 1000
+                            provider_started = time.perf_counter()
                             response = await asyncio.wait_for(self.provider.analyze(request), timeout=self.timeout)
-                        AIObservationIntelligence.record_request_event(
-                            identity_checksum=identity["identity_checksum"], signal_id=context.signal_id,
-                            attempt=attempt_count, status="COMPLETED", reason_code=response.extraction_code,
-                            latency_ms=(time.perf_counter() - attempt_started) * 1000,
-                            request_id=response.provider_request_id)
+                            provider_latency_ms = (time.perf_counter() - provider_started) * 1000
                         last_error = None
                         break
                     except asyncio.CancelledError:
+                        provider_latency_ms = ((time.perf_counter() - provider_started) * 1000
+                                               if provider_started is not None else 0.0)
                         AIObservationIntelligence.record_request_event(
                             identity_checksum=identity["identity_checksum"], signal_id=context.signal_id,
                             attempt=attempt_count, status="CANCELLED", reason_code="REQUEST_CANCELLED",
-                            latency_ms=(time.perf_counter() - attempt_started) * 1000)
+                            latency_ms=provider_latency_ms, queue_wait_ms=queue_wait_ms,
+                            validation_stage="PROVIDER_TRANSPORT",
+                            validation_code="REQUEST_CANCELLED",
+                            extraction_code="REQUEST_CANCELLED",
+                            schema_valid=False, semantic_valid=False)
                         self._release_claim(request_key)
                         raise
                     except (asyncio.TimeoutError, aiohttp.ClientError, AIProviderError) as exc:
+                        provider_latency_ms = ((time.perf_counter() - provider_started) * 1000
+                                               if provider_started is not None else 0.0)
                         last_error = exc
                         code = (exc.code if isinstance(exc, AIProviderError) else
                                 "PROVIDER_TIMEOUT" if isinstance(exc, asyncio.TimeoutError) else
@@ -1593,7 +1648,9 @@ class AITradingService:
                         AIObservationIntelligence.record_request_event(
                             identity_checksum=identity["identity_checksum"], signal_id=context.signal_id,
                             attempt=attempt_count, status="FAILED", reason_code=code,
-                            latency_ms=(time.perf_counter() - attempt_started) * 1000)
+                            latency_ms=provider_latency_ms, queue_wait_ms=queue_wait_ms,
+                            validation_stage="PROVIDER_TRANSPORT", validation_code=code,
+                            extraction_code=code, schema_valid=False, semantic_valid=False)
                         retryable = self.capabilities.supports_retryable_idempotent_requests and (
                             isinstance(exc, (asyncio.TimeoutError, aiohttp.ClientError)) or (
                             isinstance(exc, AIProviderError) and exc.retryable)
@@ -1610,7 +1667,18 @@ class AITradingService:
                     provider_invoked=True, provider_attempt_count=attempt_count,
                     retry_count=retry_count, material_state_checksum=material_checksum), identity)
                 decision = validate_provider_response(response, context, self.validator)
-                self._provider_result(success=decision.valid, code=None if decision.valid else decision.code,
+                AIObservationIntelligence.record_request_event(
+                    identity_checksum=identity["identity_checksum"], signal_id=context.signal_id,
+                    attempt=attempt_count, status="COMPLETED", reason_code=decision.code,
+                    latency_ms=provider_latency_ms, queue_wait_ms=queue_wait_ms,
+                    request_id=response.provider_request_id,
+                    validation_stage=decision.validation_stage, validation_code=decision.code,
+                    extraction_code=response.extraction_code,
+                    schema_valid=schema_pipeline_valid(decision.validation_stage),
+                    semantic_valid=decision.valid)
+                provider_failed = provider_health_failure(decision.code, decision.validation_stage)
+                self._provider_result(success=not provider_failed,
+                                      code=decision.code if provider_failed else None,
                                       latency_ms=(time.perf_counter() - started) * 1000,
                                       retry_count=retry_count)
             except (asyncio.TimeoutError, aiohttp.ClientError, AIProviderError) as exc:
@@ -1636,6 +1704,19 @@ class AITradingService:
                                       latency_ms=(time.perf_counter() - started) * 1000,
                                       retry_count=retry_count)
         latency = (time.perf_counter() - started) * 1000
+        logger.info(
+            "AI observation result signal_id=%s identity=%s provider_invoked=%s attempts=%s retries=%s "
+            "request_id=%s completion=%s extraction_path=%s extraction_code=%s validation_stage=%s "
+            "validation_code=%s schema_pipeline_valid=%s semantic_valid=%s action=%s quality=%.1f "
+            "latency_ms=%.1f context_timestamp=%s",
+            context.signal_id, identity["identity_checksum"][:16], response.provider_invoked,
+            attempt_count, retry_count, response.provider_request_id,
+            response.provider_completion_status, response.extraction_path, response.extraction_code,
+            decision.validation_stage, decision.code,
+            bool(response.provider_invoked and schema_pipeline_valid(decision.validation_stage)),
+            decision.valid,
+            decision.action.value, decision.opportunity_quality, latency, context.market_timestamp,
+        )
         row, _ = self.repository.save(context=context, response=response, decision=decision,
                                       mode=mode, latency_ms=latency,
                                       deterministic_accepted=deterministic_accepted)
@@ -1671,7 +1752,8 @@ class AIShadowWorker:
         if counterfactuals:
             intelligence.refresh_learning(self.service._identity()["identity_checksum"])
         if configured_ai_mode() is AITradingMode.AI_OFF:
-            return {"processed": 0, "failed": 0, "outcomes_attached": outcomes,
+            return {"processed": 0, "failed": 0, "validation_failed": 0,
+                    "outcomes_attached": outcomes,
                     "counterfactuals_evaluated": counterfactuals}
         queue_depth = _env_int("AI_OBSERVE_QUEUE_DEPTH", 10, 1, 100)
         drop_audit_limit = _env_int("AI_OBSERVE_DROP_AUDIT_LIMIT", 25, 1, 100)
@@ -1692,12 +1774,15 @@ class AIShadowWorker:
                 identity_checksum=identity["identity_checksum"], snapshot_checksum=overflow_snapshot,
                 status="SKIPPED", reason_code="OBSERVATION_QUEUE_FULL")
         # Snapshot-level duplicate suppression is enforced again by the ledger.
-        processed = failed = cancelled = 0
+        processed = failed = validation_failed = cancelled = 0
         for raw in queued:
             try:
-                await self.service.analyze_signal(int(raw["id"]), telegram_id=raw["owner_telegram_id"],
-                                                  deterministic_accepted=True)
+                result = await self.service.analyze_signal(
+                    int(raw["id"]), telegram_id=raw["owner_telegram_id"],
+                    deterministic_accepted=True)
                 processed += 1
+                if result and str(result.get("validation_code") or "") != "VALID":
+                    validation_failed += 1
             except asyncio.CancelledError:
                 cancelled += 1
                 raise
@@ -1706,10 +1791,12 @@ class AIShadowWorker:
                 logger.exception("AI shadow decision failed for signal_id=%s", raw["id"])
         intelligence.record_queue(
             identity_checksum=identity["identity_checksum"], queued=len(queued), processed=processed,
-            dropped=len(overflow), failed=failed, cancelled=cancelled,
+            dropped=len(overflow), failed=failed, validation_failed=validation_failed,
+            cancelled=cancelled,
             duration_ms=(time.perf_counter() - cycle_started) * 1000)
         return {"processed": processed, "failed": failed, "dropped": len(overflow),
-                "cancelled": cancelled, "outcomes_attached": outcomes,
+                "validation_failed": validation_failed, "cancelled": cancelled,
+                "outcomes_attached": outcomes,
                 "counterfactuals_evaluated": counterfactuals}
 
     async def run_forever(self) -> None:

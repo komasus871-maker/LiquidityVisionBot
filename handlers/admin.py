@@ -25,7 +25,7 @@ def _admin_ids() -> set[int]:
     return result
 
 
-@router.message(Command("admin_status"))
+@router.message(Command("admin_status", "system_health"))
 async def admin_status(message: Message) -> None:
     if not message.from_user or message.from_user.id not in _admin_ids():
         await message.answer("⛔ Admin command. Add your Telegram ID to <code>ADMIN_IDS</code> in Render.")

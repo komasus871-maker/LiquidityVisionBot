@@ -462,23 +462,38 @@ class AIObservationIntelligence:
     def record_request_event(*, identity_checksum: str, signal_id: int | None,
                              attempt: int, status: str, reason_code: str,
                              latency_ms: float | None = None,
-                             request_id: str | None = None) -> None:
+                             queue_wait_ms: float | None = None,
+                             request_id: str | None = None,
+                             validation_stage: str | None = None,
+                             validation_code: str | None = None,
+                             extraction_code: str | None = None,
+                             schema_valid: bool | None = None,
+                             semantic_valid: bool | None = None) -> None:
         event_key = str(uuid.uuid4())
         with connect() as conn:
             conn.execute("""INSERT INTO ai_provider_request_events(event_key,identity_checksum,signal_id,
-                attempt_number,status,reason_code,latency_ms,provider_request_id,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""", (event_key, identity_checksum, signal_id, attempt,
-                status, reason_code, latency_ms, request_id, _now()))
+                attempt_number,status,reason_code,latency_ms,queue_wait_ms,provider_request_id,
+                validation_stage,validation_code,extraction_code,schema_valid,semantic_valid,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (event_key, identity_checksum, signal_id, attempt,
+                status, reason_code, latency_ms, queue_wait_ms, request_id, validation_stage,
+                validation_code, extraction_code,
+                None if schema_valid is None else int(schema_valid),
+                None if semantic_valid is None else int(semantic_valid), _now()))
 
     @staticmethod
     def record_queue(*, identity_checksum: str, queued: int, processed: int,
-                     dropped: int, failed: int, cancelled: int, duration_ms: float) -> None:
+                     dropped: int, failed: int, validation_failed: int,
+                     cancelled: int, duration_ms: float) -> None:
         with connect() as conn:
             conn.execute("""INSERT INTO ai_observation_queue_snapshots(identity_checksum,queued,processed,
-                dropped,failed,cancelled,duration_ms,created_at) VALUES(?,?,?,?,?,?,?,?)""",
-                (identity_checksum, queued, processed, dropped, failed, cancelled, duration_ms, _now()))
+                dropped,failed,validation_failed,cancelled,duration_ms,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (identity_checksum, queued, processed, dropped, failed, validation_failed,
+                 cancelled, duration_ms, _now()))
 
     def provider_health(self, identity_checksum: str | None = None) -> dict[str, Any]:
+        from services.ai_trading import provider_health_failure
+
         with connect() as conn:
             state = conn.execute("""SELECT * FROM ai_provider_state
                 WHERE (? IS NULL OR identity_checksum=?) ORDER BY updated_at DESC LIMIT 1""",
@@ -489,13 +504,63 @@ class AIObservationIntelligence:
             queue = conn.execute("""SELECT * FROM ai_observation_queue_snapshots
                 WHERE (? IS NULL OR identity_checksum=?) ORDER BY id DESC LIMIT 1""",
                 (identity_checksum, identity_checksum)).fetchone()
+            decisions = [dict(row) for row in conn.execute("""SELECT validation_stage,validation_code,
+                recommended_action,opportunity_quality,provider_invoked,latency_ms
+                FROM ai_decisions WHERE (? IS NULL OR provider_identity_checksum=?)
+                ORDER BY id DESC LIMIT 100""", (identity_checksum, identity_checksum)).fetchall()]
         latencies = sorted(_safe_float(row.get("latency_ms")) for row in events if row.get("latency_ms") is not None)
+        queue_waits = sorted(_safe_float(row.get("queue_wait_ms")) for row in events
+                             if row.get("queue_wait_ms") is not None)
+        end_to_end = sorted(_safe_float(row.get("latency_ms")) for row in decisions
+                            if row.get("provider_invoked"))
+        validation_codes: dict[str, int] = {}
+        validation_stages: dict[str, int] = {}
+        for row in decisions:
+            code = str(row.get("validation_code") or "UNKNOWN")
+            stage = str(row.get("validation_stage") or "UNKNOWN")
+            validation_codes[code] = validation_codes.get(code, 0) + 1
+            validation_stages[stage] = validation_stages.get(stage, 0) + 1
+        observation_validation_failures = sum(
+            str(row.get("validation_code") or "") != "VALID" for row in decisions)
+        provider_response_validation_failures = sum(
+            bool(row.get("provider_invoked")) and
+            provider_health_failure(row.get("validation_code"), row.get("validation_stage")) and
+            str(row.get("validation_stage") or "") != "PROVIDER_TRANSPORT"
+            for row in decisions)
+        classified_provider_failures = sum(
+            bool(row.get("provider_invoked")) and
+            provider_health_failure(row.get("validation_code"), row.get("validation_stage"))
+            for row in decisions)
+        invoked_decisions = sum(bool(row.get("provider_invoked")) for row in decisions)
+        state_dict = dict(state) if state else None
+        state_scope_complete = bool(
+            state_dict and int(state_dict.get("total_requests") or 0) <= invoked_decisions)
+        counter_classification_drift = (
+            max(0, int(state_dict.get("total_failures") or 0) - classified_provider_failures)
+            if state_scope_complete and state_dict else None)
         return {
-            "circuit": dict(state) if state else None, "recent_events": len(events),
+            "circuit": state_dict, "recent_events": len(events),
             "failures": sum(row["status"] == "FAILED" for row in events),
+            "transport_failures": sum(row["status"] == "FAILED" for row in events),
             "retries": sum(int(row.get("attempt_number") or 1) > 1 for row in events),
             "cancellations": sum(row["reason_code"] == "REQUEST_CANCELLED" for row in events),
             "p95_latency_ms": latencies[max(0, math.ceil(len(latencies) * .95) - 1)] if latencies else 0,
+            "p95_queue_wait_ms": queue_waits[max(0, math.ceil(len(queue_waits) * .95) - 1)] if queue_waits else 0,
+            "p95_end_to_end_ms": end_to_end[max(0, math.ceil(len(end_to_end) * .95) - 1)] if end_to_end else 0,
+            "validation_codes": dict(sorted(validation_codes.items())),
+            "validation_stages": dict(sorted(validation_stages.items())),
+            "observation_validation_failures": observation_validation_failures,
+            "provider_response_validation_failures": provider_response_validation_failures,
+            "classified_provider_failures": classified_provider_failures,
+            "counter_classification_drift": counter_classification_drift,
+            "valid_abstentions": sum(row.get("recommended_action") == "ABSTAIN" and
+                                      row.get("validation_code") == "VALID" for row in decisions),
+            "fallback_abstentions": sum(row.get("recommended_action") == "ABSTAIN" and
+                                         row.get("validation_code") != "VALID" for row in decisions),
+            "zero_quality_valid": sum(row.get("validation_code") == "VALID" and
+                                      _safe_float(row.get("opportunity_quality")) == 0 for row in decisions),
+            "zero_quality_fallback": sum(row.get("validation_code") != "VALID" and
+                                         _safe_float(row.get("opportunity_quality")) == 0 for row in decisions),
             "queue": dict(queue) if queue else None,
         }
 

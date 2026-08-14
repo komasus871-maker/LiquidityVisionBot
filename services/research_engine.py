@@ -23,12 +23,16 @@ STRATEGY_VERSIONS = {
     "MEAN_REVERSION": "mean-reversion-v1",
 }
 INTELLIGENCE_STRATEGY_VERSIONS = {
+    "TREND_CONTINUATION": "trend-continuation-v1",
     "PUMP_REVERSAL": "pump-reversal-shadow-v1",
+    "PUMP_CONTINUATION": "pump-continuation-shadow-v1",
+    "LIQUIDITY_SWEEP_REVERSAL": "liquidity-sweep-reversal-shadow-v1",
     "DUMP_REVERSAL": "dump-reversal-shadow-v1",
     "SCALPING_TREND": "scalping-trend-shadow-v1",
     "SCALPING_BREAKOUT": "scalping-breakout-shadow-v1",
     "SCALPING_MEAN_REVERSION": "scalping-mean-reversion-shadow-v1",
     "SCALPING_LIQUIDITY": "scalping-liquidity-shadow-v1",
+    "SCALPING_LIQUIDITY_SWEEP": "scalping-liquidity-sweep-shadow-v1",
 }
 TERMINAL = {"TP3", "STOP", "BREAKEVEN", "MANUAL_STOP", "INVALIDATED", "EXPIRED", "CLOSED"}
 MANUAL_REASONS = {"MANUAL", "MANUAL_CLOSE", "MANUAL_STOP", "PANIC", "PANIC_CLOSE",
@@ -239,7 +243,7 @@ class ResearchEngine:
             action, evidence = "ACCEPT", ["unfiltered eligible-signal baseline"]
         elif strategy == "LIQUIDITY_SMC":
             action, evidence = "ACCEPT", ["production signal passed deterministic signal creation"]
-        elif strategy == "TREND_FOLLOWING":
+        elif strategy in {"TREND_FOLLOWING", "TREND_CONTINUATION"}:
             aligned = (side == "LONG" and "TREND_UP" in regimes) or (side == "SHORT" and "TREND_DOWN" in regimes)
             opposite = (side == "LONG" and "TREND_DOWN" in regimes) or (side == "SHORT" and "TREND_UP" in regimes)
             action = "ACCEPT" if aligned else "REJECT" if opposite else "WAIT"
@@ -263,6 +267,12 @@ class ResearchEngine:
                 direction = "SHORT"
                 evidence.extend(candidate.get("evidence") or [])
                 if candidate.get("continuation_risk"):
+                    action = "REJECT"
+            elif strategy == "PUMP_CONTINUATION":
+                candidate = (intelligence.get("reversal_research") or {}).get("pump") or {}
+                direction = "LONG"
+                evidence.extend(candidate.get("evidence") or [])
+                if "CONFIRMED" in str(candidate.get("state") or ""):
                     action = "REJECT"
             elif strategy == "DUMP_REVERSAL":
                 candidate = (intelligence.get("reversal_research") or {}).get("dump") or {}
@@ -589,7 +599,7 @@ class ResearchEngine:
         safe_limit = max(1, min(int(limit), 50))
         rows = []
         with connect() as conn:
-            for rank_version in ("signal-ranking-v3", "research-rank-v2", RANK_VERSION):
+            for rank_version in ("signal-ranking-v4", "signal-ranking-v3", "research-rank-v2", RANK_VERSION):
                 rows = conn.execute("""SELECT k.*,r.symbol,r.timeframe,r.side,r.primary_regime
                     FROM research_signal_rankings k JOIN research_signal_snapshots r ON r.snapshot_id=k.snapshot_id
                     WHERE k.rank_version=? AND r.capture_quality='DECISION_TIME'

@@ -22,9 +22,12 @@ async def help_command(message: Message):
 /dna — сильные и слабые торговые когорты
 /insights — единый краткий intelligence brief
 /market_story 105 — decision-time market story
-/signal_quality 105 — Signal Quality V2 decomposition
+/signal_quality 105 — Signal Quality V3 decomposition
 /liquidity_map BTCUSDT — unresolved/consumed liquidity
 /orderbook BTCUSDT — bounded microstructure aggregate
+/funding BTCUSDT — public funding snapshot
+/open_interest BTCUSDT — public OI snapshot
+/data_health BTCUSDT — feature-family availability
 /contradictions 105 — supports, conflicts and uncertainty
 /quality_report — threshold curves with missed winners
 

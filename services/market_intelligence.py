@@ -14,12 +14,12 @@ import numpy as np
 import pandas as pd
 
 
-INTELLIGENCE_VERSION = "market-intelligence-v2"
+INTELLIGENCE_VERSION = "market-intelligence-v3"
 STORY_VERSION = "market-story-v1"
 LEVEL_VERSION = "level-intelligence-v1"
 MICROSTRUCTURE_VERSION = "microstructure-v1"
-QUALITY_VERSION = "signal-quality-v2"
-RANK_VERSION = "signal-ranking-v3"
+QUALITY_VERSION = "signal-quality-v3"
+RANK_VERSION = "signal-ranking-v4"
 
 TIMEFRAME_SECONDS = {
     "1m": 60, "3m": 180, "5m": 300, "15m": 900,
@@ -729,14 +729,42 @@ class OrderBookMicrostructureEngine:
             classifications.add("ABSORPTION")
         if not classifications:
             classifications.add("UNKNOWN")
+        behavior_labels: set[str] = set()
+        for wall in walls:
+            prefix = "ASK" if wall["side"] == "ASK" else "BID"
+            label = {
+                "PERSISTENT_WALL": f"PERSISTENT_{prefix}_WALL",
+                "PULLED_WALL": f"{prefix}_WALL_REMOVED",
+                "REPLENISHING_WALL": f"{prefix}_REPLENISHMENT",
+                "SWEPT_WALL": f"{prefix}_SWEEP",
+            }.get(wall["state"])
+            if label:
+                behavior_labels.add(label)
+            if wall["spoof_like"]:
+                behavior_labels.add("SPOOF_LIKE_REMOVAL_PATTERN")
+        if latest_imbalance >= .2:
+            behavior_labels.add("DEPTH_IMBALANCE_BID")
+        elif latest_imbalance <= -.2:
+            behavior_labels.add("DEPTH_IMBALANCE_ASK")
+        if not behavior_labels:
+            behavior_labels.add("MICROSTRUCTURE_NEUTRAL" if len(books) >= 3 else "INSUFFICIENT_HISTORY")
         interaction_quality = _clip(min(len(books) / 5, 1) * 35 + min(len(walls), 3) * 10
                                     + sum(wall["touched"] for wall in walls) * 12)
+        best_bid = latest["bids"][0][0]
+        best_ask = latest["asks"][0][0]
         return {
             "version": MICROSTRUCTURE_VERSION, "status": "AVAILABLE", "sample_count": len(books),
+            "feature_schema_version": MICROSTRUCTURE_VERSION,
+            "observation_timestamp": latest.get("timestamp"),
+            "source": "BINGX_PUBLIC_FUTURES_DEPTH",
+            "freshness": "FRESH", "stale_state": False,
             "levels_per_side_max": max_levels, "mid_price": latest["mid"],
-            "spread_pct": round(latest["spread_pct"], 5), "depth_bands": bands,
+            "best_bid": best_bid, "best_ask": best_ask,
+            "spread_pct": round(latest["spread_pct"], 5),
+            "spread_bps": round(latest["spread_pct"] * 100, 3), "depth_bands": bands,
             "walls": sorted(walls, key=lambda wall: (-wall["persistence_ratio"], -wall["relative_size"]))[:12],
             "classifications": sorted(classifications), "absorption_inference": absorption,
+            "behavior_labels": sorted(behavior_labels),
             "executed_flow_available": executed_flow_available,
             "actor_identity_claimed": False, "interaction_quality": interaction_quality,
             "mid_change_pct": round(mid_change, 5), "depth_turnover": round(depth_turnover, 5),
@@ -1004,8 +1032,9 @@ class MarketIntelligenceEngine:
         state = str(story.get("state") or "UNCERTAIN")
         base = {key: market * .55 + 22 for key in (
             "LIQUIDITY_SMC", "TREND_CONTINUATION", "BREAKOUT", "MEAN_REVERSION",
-            "PUMP_REVERSAL", "DUMP_REVERSAL", "SCALPING_TREND", "SCALPING_BREAKOUT",
-            "SCALPING_MEAN_REVERSION", "SCALPING_LIQUIDITY")}
+            "PUMP_REVERSAL", "PUMP_CONTINUATION", "LIQUIDITY_SWEEP_REVERSAL",
+            "SCALPING_TREND", "SCALPING_BREAKOUT", "SCALPING_MEAN_REVERSION",
+            "SCALPING_LIQUIDITY_SWEEP")}
         if state == "TREND_CONTINUATION":
             base["TREND_CONTINUATION"] += 25
             base["MEAN_REVERSION"] -= 20
@@ -1016,12 +1045,49 @@ class MarketIntelligenceEngine:
             base["LIQUIDITY_SMC"] += 15
         if "CONFIRMED" in str((reversal.get("pump") or {}).get("state")):
             base["PUMP_REVERSAL"] += 35
+            base["PUMP_CONTINUATION"] -= 25
+        elif "CONTINUATION_RISK" in str((reversal.get("pump") or {}).get("state")):
+            base["PUMP_CONTINUATION"] += 30
+            base["PUMP_REVERSAL"] -= 20
         if "CONFIRMED" in str((reversal.get("dump") or {}).get("state")):
-            base["DUMP_REVERSAL"] += 35
+            base["LIQUIDITY_SWEEP_REVERSAL"] += 25
         if timeframe not in {"1m", "3m", "5m"}:
             for key in [name for name in base if name.startswith("SCALPING_")]:
                 base[key] = min(base[key], 20)
         return {key: _clip(value) for key, value in base.items()}
+
+    @staticmethod
+    def _entry_readiness(*, plan: Mapping[str, Any], quality: Mapping[str, Any],
+                         microstructure: Mapping[str, Any], momentum: Mapping[str, Any]) -> dict[str, Any]:
+        entry, stop = _number(plan.get("entry")), _number(plan.get("stop"))
+        geometry = bool((quality.get("invalidation") or {}).get("valid_geometry"))
+        rr = _number(plan.get("rr"))
+        location = _number((quality.get("family_scores") or {}).get("LOCATION"), 50)
+        momentum_score = _number((quality.get("family_scores") or {}).get("MOMENTUM"), 50)
+        micro_score = _number((quality.get("family_scores") or {}).get("MICROSTRUCTURE"), 45)
+        score = _clip(location * .35 + momentum_score * .3 + micro_score * .2 + (80 if 1 <= rr <= 3 else 35) * .15)
+        reasons: list[str] = []
+        if not geometry or entry <= 0 or stop <= 0:
+            state, score = "INVALID_ENTRY", min(score, 20)
+            reasons.append("INVALID_STOP_OR_ENTRY_GEOMETRY")
+        elif location < 35:
+            state = "CHASING"
+            reasons.append("POOR_LOCATION")
+        elif momentum.get("state") in {"EXHAUSTING", "REVERSING"}:
+            state = "WAIT_STRUCTURE"
+            reasons.append("MOMENTUM_NOT_CONFIRMED")
+        elif microstructure.get("status") != "AVAILABLE":
+            state = "WAIT_RECLAIM" if score < 60 else "READY"
+            reasons.append("MICROSTRUCTURE_UNAVAILABLE")
+        elif score >= 65:
+            state = "READY"
+        elif score >= 50:
+            state = "EARLY"
+        else:
+            state = "WAIT_PULLBACK"
+        return {"version": "entry-quality-v1", "state": state, "score": round(score, 3),
+                "reason_codes": reasons, "setup_quality_separate": True,
+                "score_is_probability": False, "execution_authority": False}
 
     @staticmethod
     def _research_policies(plan: Mapping[str, Any], quality: Mapping[str, Any], timeframe: str) -> dict[str, Any]:
@@ -1111,6 +1177,20 @@ class MarketIntelligenceEngine:
                                        funding_oi=funding_context)
         strategy = self._strategy_suitability(story=story, quality=quality, reversal=reversal,
                                                timeframe=timeframe)
+        strategy_assessments = {
+            name: {"suitability_score": score,
+                   "supporting_evidence": [story.get("state")],
+                   "contradictions": quality.get("contradicting_evidence") or [],
+                   "required_confirmation": ["fresh structure and momentum confirmation"],
+                   "invalidation": quality.get("invalidation") or {},
+                   "target_framework": "STRUCTURE_PLUS_1R_TO_3R",
+                   "uncertainty": quality.get("uncertainties") or [],
+                   "data_requirements": ["TRUSTWORTHY_DECISION_TIME"],
+                   "research_only": True}
+            for name, score in strategy.items()
+        }
+        entry_readiness = self._entry_readiness(plan=normalized_plan, quality=quality,
+                                                microstructure=microstructure, momentum=momentum)
         research = self._research_policies(normalized_plan, quality, timeframe)
         result = {
             "version": INTELLIGENCE_VERSION, "feature_version": "decision-features-v3",
@@ -1122,8 +1202,11 @@ class MarketIntelligenceEngine:
             "large_player_inference": {"classification": microstructure.get("absorption_inference", "UNCONFIRMED"),
                                        "actor_identity_claimed": False},
             "reversal_research": reversal, "relative_strength": relative,
-            "funding_open_interest": funding_context, "signal_quality_v2": quality,
-            "strategy_suitability": strategy, "research_policies": research,
+            "funding_open_interest": funding_context,
+            "signal_quality_v2": quality, "signal_quality_v3": quality,
+            "entry_readiness": entry_readiness,
+            "strategy_suitability": strategy, "strategy_assessments": strategy_assessments,
+            "research_policies": research,
             "economic_authority": False, "execution_authority": False,
             "future_data_used": False, "raw_order_book_persisted": False,
         }
@@ -1164,7 +1247,7 @@ def concise_market_story(snapshot: Mapping[str, Any]) -> str:
     trend = snapshot.get("trend_maturity") or {}
     structure = snapshot.get("structure_quality") or {}
     momentum = snapshot.get("momentum") or {}
-    quality = snapshot.get("signal_quality_v2") or {}
+    quality = snapshot.get("signal_quality_v3") or snapshot.get("signal_quality_v2") or {}
     facts = [f"Market state is {str(story.get('state') or 'unknown').replace('_', ' ').lower()}.",
              f"Trend is {str(trend.get('state') or 'unknown').lower()} ({str(trend.get('direction') or 'unknown').lower()}).",
              f"Structure is {str(structure.get('break') or 'unknown').replace('_', ' ').lower()}.",

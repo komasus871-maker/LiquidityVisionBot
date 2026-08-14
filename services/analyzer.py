@@ -693,7 +693,7 @@ class Analyzer:
                 timeframe,
             )
             data["market_intelligence"] = {
-                "version": "market-intelligence-v2",
+                "version": "market-intelligence-v3",
                 "mode": "SHADOW_RESEARCH_ONLY",
                 "status": "DEGRADED",
                 "reason_codes": ["ANALYSIS_FAILURE"],

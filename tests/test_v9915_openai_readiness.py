@@ -580,10 +580,17 @@ def test_additive_migration_is_idempotent_and_postgres_placeholder_safe(readines
     with connect() as conn:
         decision_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_decisions)").fetchall()}
         cert_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_provider_certifications)").fetchall()}
+        request_event_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(ai_provider_request_events)").fetchall()}
+        queue_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(ai_observation_queue_snapshots)").fetchall()}
     assert {"provider_identity_checksum", "reasoning_effort", "extraction_code", "provider_invoked",
             "cache_write_tokens"} <= decision_columns
     assert {"started_at", "completed_at", "validation_stage", "provider_request_id",
             "cache_write_tokens"} <= cert_columns
+    assert {"queue_wait_ms", "validation_stage", "validation_code", "extraction_code",
+            "schema_valid", "semantic_valid"} <= request_event_columns
+    assert "validation_failed" in queue_columns
     assert DBConnection._translate("VALUES(?,?) ON CONFLICT(x) DO UPDATE SET y=?") == \
            "VALUES(%s,%s) ON CONFLICT(x) DO UPDATE SET y=%s"
 

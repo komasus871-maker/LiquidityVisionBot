@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from database.database import connect
+from services.ai_trading import (SCHEMA_NOT_EVALUABLE_STAGES, schema_pipeline_valid)
 
 
 ACCEPT_ACTIONS = {"ACCEPT_REDUCED", "ACCEPT_STANDARD"}
@@ -126,9 +127,9 @@ class AIEvaluationService:
                 "requests": count,
                 "http_success_rate": sum(not code.startswith("AI_PROVIDER_HTTP_") and code not in
                     {"PROVIDER_TIMEOUT", "PROVIDER_TRANSPORT_ERROR", "PROVIDER_RATE_LIMIT"} for code in codes) / count if count else 0,
-                "schema_success_rate": sum(str(row.get("validation_stage")) not in
-                    {"PROVIDER_TRANSPORT", "STRUCTURED_EXTRACTION", "JSON_PARSING",
-                     "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"} for row in rows) / count if count else 0,
+                "schema_success_rate": sum(bool(row.get("provider_invoked")) and
+                                           schema_pipeline_valid(row.get("validation_stage"))
+                                           for row in rows) / count if count else 0,
                 "semantic_success_rate": codes.count("VALID") / count if count else 0,
                 "abstention_rate": sum(bool(row.get("abstention")) for row in rows) / count if count else 0,
                 "timeout_count": codes.count("PROVIDER_TIMEOUT"),
@@ -278,9 +279,15 @@ class AIEvaluationService:
             action = str(row["recommended_action"])
             actions[action] = actions.get(action, 0) + 1
         resolved = [row for row in rows if row.get("direction_correct") is not None]
-        schema_failure_stages = {"PROVIDER_TRANSPORT", "STRUCTURED_EXTRACTION", "JSON_PARSING",
-                                 "JSON_SCHEMA_VALIDATION", "HTTP_RESPONSE_SHAPE"}
-        schema_valid_count = sum(str(row.get("validation_stage") or "") not in schema_failure_stages for row in rows)
+        schema_valid_count = sum(bool(row.get("provider_invoked")) and
+                                 schema_pipeline_valid(row.get("validation_stage")) for row in rows)
+        schema_not_evaluable_count = sum(
+            not bool(row.get("provider_invoked")) or
+            str(row.get("validation_stage") or "") in SCHEMA_NOT_EVALUABLE_STAGES for row in rows)
+        structural_schema_invalid_count = sum(
+            str(row.get("validation_stage") or "") == "JSON_SCHEMA_VALIDATION" for row in rows)
+        schema_evaluable_count = count - schema_not_evaluable_count
+        structural_schema_valid_count = schema_evaluable_count - structural_schema_invalid_count
         semantic_valid_count = sum(str(row.get("validation_code") or "") == "VALID" for row in rows)
         transport_codes = {"PROVIDER_TIMEOUT", "PROVIDER_TRANSPORT_ERROR", "PROVIDER_FAILURE", "PROVIDER_RATE_LIMIT"}
         transport_failure_count = sum(str(row.get("validation_code") or "") in transport_codes or
@@ -307,6 +314,12 @@ class AIEvaluationService:
         return {
             "decision_count": count,
             "schema_valid_count": schema_valid_count,
+            "schema_evaluable_count": schema_evaluable_count,
+            "schema_not_evaluable_count": schema_not_evaluable_count,
+            "structural_schema_valid_count": structural_schema_valid_count,
+            "structural_schema_invalid_count": structural_schema_invalid_count,
+            "structural_schema_valid_rate": (
+                structural_schema_valid_count / schema_evaluable_count if schema_evaluable_count else 0),
             "semantic_valid_count": semantic_valid_count,
             "valid_schema_rate": schema_valid_count / count if count else 0,
             "semantic_valid_rate": semantic_valid_count / count if count else 0,

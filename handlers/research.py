@@ -318,7 +318,7 @@ async def market_story(message: Message):
         return
     row = market_repo.get_signal(signal_id, message.from_user.id)
     if not row:
-        await message.answer("No v9.9.18 decision-time market story exists for that signal.")
+        await message.answer("No decision-time market story exists for that signal.")
         return
     snapshot = row["full_snapshot"]
     story = snapshot.get("market_story") or {}
@@ -339,14 +339,14 @@ async def signal_quality(message: Message):
         return
     row = market_repo.get_signal(signal_id, message.from_user.id)
     if not row:
-        await message.answer("No v9.9.18 quality snapshot exists for that signal.")
+        await message.answer("No decision-time quality snapshot exists for that signal.")
         return
     quality = row["quality"]
     families = sorted((quality.get("family_scores") or {}).items(), key=lambda item: -float(item[1]))
     lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: {float(score):.1f}"
              for name, score in families[:8]]
     await message.answer(
-        f"<b>Signal Quality V2 · #{signal_id}</b>\n\n"
+        f"<b>Signal Quality V3 · #{signal_id}</b>\n\n"
         f"Overall / market: <b>{float(quality.get('overall_quality') or 0):.1f} / "
         f"{float(quality.get('market_quality') or 0):.1f}</b>\n"
         f"Evidence families / diversity: <b>{int(quality.get('evidence_family_count') or 0)} / "
@@ -363,7 +363,7 @@ async def contradictions(message: Message):
         return
     row = market_repo.get_signal(signal_id, message.from_user.id)
     if not row:
-        await message.answer("No v9.9.18 contradiction snapshot exists for that signal.")
+        await message.answer("No decision-time contradiction snapshot exists for that signal.")
         return
     quality = row["quality"]
     against = quality.get("contradicting_evidence") or []
@@ -427,6 +427,56 @@ async def orderbook(message: Message):
         f"Spread: <b>{float(aggregate.get('spread_pct') or 0):.4f}%</b>\n"
         f"Inference: <code>{escape(str(aggregate.get('absorption_inference') or 'UNCONFIRMED'))}</code>\n\n"
         f"{wall_lines}\n\nResting walls remain untrusted until price interaction confirms them.", parse_mode="HTML")
+
+
+@router.message(Command("data_health"))
+async def data_health(message: Message):
+    symbol = _symbol_argument(message)
+    if not symbol:
+        await message.answer("Usage: <code>/data_health BTCUSDT</code>", parse_mode="HTML")
+        return
+    report = market_repo.data_health(symbol, message.from_user.id)
+    fields = ("candles", "benchmark", "funding", "open_interest", "microstructure",
+              "liquidity_map", "ordered_path", "execution_costs")
+    lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: "
+             f"<code>{escape(str(report[name]))}</code>" for name in fields]
+    await message.answer(
+        f"<b>Decision Data Health · {escape(symbol)}</b>\n\n" + "\n".join(lines) +
+        "\n\nUnavailable inputs remain explicit and cannot be reconstructed with future data.",
+        parse_mode="HTML")
+
+
+async def _derivatives_context(message: Message, family: str) -> None:
+    symbol = _symbol_argument(message)
+    if not symbol:
+        await message.answer(f"Usage: <code>/{family} BTCUSDT</code>", parse_mode="HTML")
+        return
+    report = market_repo.data_health(symbol, message.from_user.id)
+    key = "funding_context" if family == "funding" else "open_interest_context"
+    context = report[key]
+    status = report[family]
+    if not context:
+        await message.answer(f"{family.replace('_', ' ').title()} is <code>{status}</code> for {escape(symbol)}.",
+                             parse_mode="HTML")
+        return
+    value_key = "funding_rate" if family == "funding" else "open_interest"
+    await message.answer(
+        f"<b>{family.replace('_', ' ').title()} · {escape(symbol)}</b>\n\n"
+        f"Status: <code>{status}</code>\nValue: <code>{escape(str(context.get(value_key)))}</code>\n"
+        f"Reported: <code>{escape(str(context.get('reported_at') or 'unknown'))}</code>\n"
+        f"Source: <code>{escape(str(context.get('source') or 'BINGX_PUBLIC_FUTURES_MARKET'))}</code>\n\n"
+        "Historical deltas and extremes remain unavailable until sufficient real snapshots accumulate.",
+        parse_mode="HTML")
+
+
+@router.message(Command("funding"))
+async def funding(message: Message):
+    await _derivatives_context(message, "funding")
+
+
+@router.message(Command("open_interest"))
+async def open_interest(message: Message):
+    await _derivatives_context(message, "open_interest")
 
 
 @router.message(Command("pump_reversals"))

@@ -11,6 +11,7 @@
 - Added symmetric quality-threshold reporting for expectancy, missed winners, avoided losses and drawdown proxies, with minimum-sample warnings and no profitability claim.
 - Reframed GPT as a bounded red-team analyst using immutable market-intelligence facts while preserving no-chain-of-thought storage and zero execution authority.
 - Replaced ambiguous free-form AI evidence ranking with the strict `ai-decision-v3` ID/rank contract: complete unique supporting-only ranks, deterministic strength ordering and evidence-ID tie-breaking, contradiction separation, shared certification/observation validation, and precise fail-closed semantic codes.
+- Corrected AI_OBSERVE diagnostics so stale persisted contexts are rejected before provider invocation, local freshness failures no longer poison provider-circuit counters, request telemetry records exact extraction/validation codes without payloads, provider/queue/end-to-end latency are separated, schema-not-evaluable timeouts are explicit, and valid versus fallback ABSTAIN/Q0 rows are distinguishable.
 - Added additive, repeatable SQLite/PostgreSQL schema for immutable intelligence snapshots and bounded microstructure aggregates, plus Telegram inspection commands and concise `/trade` quality context.
 - Preserved automatic PAPER copy, unified accounting, LIVE gates, and `AI_GATED=AI_OFF`; no economic authority was added.
 
@@ -413,3 +414,12 @@
 - Bound AI similarity and adaptive-learning indicators to immutable decision-time research snapshots; persisted manual/intervened counterfactuals but excluded them from headline learning metrics.
 - Hardened OpenAI Responses extraction for reasoning-first/reordered output, assistant message arrays, SDK aggregates, native parsed structured output, refusals and normalized incomplete reasons. No reasoning traces are persisted.
 - Preserved `AI_GATED` as `AI_OFF`, preserved LIVE fail-closed behavior and made no automatic paid provider request.
+## v10.0.0 — Autonomous Market Intelligence Platform
+
+- Repaired AI observation/certification parity diagnostics: stale local contexts are rejected before paid invocation, provider results are distinct from safe fallback ABSTAIN, schema/semantic stages are auditable, and valid ABSTAIN retains market quality.
+- Split provider transport, response-validation, local-validation, queue-wait and end-to-end latency accounting; local freshness defects no longer poison the provider circuit.
+- Made public depth persistence independent of funding/OI availability, preserving bounded aggregates with explicit partial-data status and no raw-book storage.
+- Added conservative microstructure provenance, best bid/ask, spread bps, depth imbalance and wall persistence/removal/replenishment/sweep labels without actor claims.
+- Added Signal Quality V3, entry readiness, research-only strategy assessments, and Signal Ranking V4 while retaining immutable V2 compatibility projections.
+- Added `/system_health`, `/data_health`, `/funding`, and `/open_interest` diagnostics with explicit availability states.
+- Preserved deterministic PAPER copy, unified accounting, research sample gates, `AI_GATED=AI_OFF`, and fail-closed LIVE behavior.

@@ -1,2 +1,2 @@
-APP_VERSION = "9.9.18"
-RELEASE_NAME = "Market Intelligence & Signal Quality"
+APP_VERSION = "10.0.0"
+RELEASE_NAME = "Autonomous Market Intelligence Platform"

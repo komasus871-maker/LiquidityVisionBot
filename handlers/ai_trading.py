@@ -158,7 +158,7 @@ async def ai_mode(message: Message) -> None:
         await message.answer("Unknown AI mode. Use AI_OFF, AI_OBSERVE, AI_SHADOW, or AI_ASSIST.")
         return
     effective = set_user_ai_mode(message.from_user.id, requested)
-    suffix = " AI_GATED is fail-closed in v9.9.18." if requested is AITradingMode.AI_GATED else ""
+    suffix = " AI_GATED is fail-closed." if requested is AITradingMode.AI_GATED else ""
     await message.answer(f"AI mode set to <code>{effective.value}</code>.{suffix}")
 
 
@@ -191,7 +191,8 @@ async def ai_metrics(message: Message) -> None:
     await message.answer(
         f"📊 <b>AI shadow metrics</b>\n\n<b>CURRENT PROVIDER IDENTITY</b> <code>{identity['identity_checksum'][:16]}</code>\n"
         f"Decisions: <b>{metrics['decision_count']}</b>\n"
-        f"Valid schema: <code>{metrics['valid_schema_rate']:.1%}</code>\n"
+        f"Schema pipeline valid: <code>{metrics['valid_schema_rate']:.1%}</code>\n"
+        f"Structural schema valid / invalid / not evaluable: <code>{metrics['structural_schema_valid_count']} / {metrics['structural_schema_invalid_count']} / {metrics['schema_not_evaluable_count']}</code>\n"
         f"Semantic valid: <code>{metrics['semantic_valid_rate']:.1%}</code>\n"
         f"Abstention: <code>{metrics['abstention_rate']:.1%}</code>\nDistribution: <code>{distribution}</code>\n"
         f"Agreement: <code>{metrics['agreement_rate'] if metrics['agreement_rate'] is not None else 'insufficient data'}</code>\n"
@@ -213,6 +214,11 @@ def _metric(value, *, percent: bool = False) -> str:
     return f"{float(value):.1%}" if percent else f"{float(value):.4f}"
 
 
+def _counts(values: dict | None, limit: int = 6) -> str:
+    items = sorted((values or {}).items(), key=lambda item: (-int(item[1]), str(item[0])))
+    return ", ".join(f"{key}={count}" for key, count in items[:limit]) or "none"
+
+
 @router.message(Command("ai_dashboard"))
 async def ai_dashboard(message: Message) -> None:
     identity = provider_identity(build_ai_provider())
@@ -228,9 +234,11 @@ async def ai_dashboard(message: Message) -> None:
         f"Resolved counterfactuals: <code>{counter['sample_size']}</code>\n"
         f"GPT expectancy / precision / recall: <code>{_metric(counter['gpt_expectancy_r'])} / "
         f"{_metric(counter['precision'], percent=True)} / {_metric(counter['recall'], percent=True)}</code>\n"
-        f"Recent provider failures / retries / cancellations: <code>{health['failures']} / {health['retries']} / {health['cancellations']}</code>\n"
-        f"Provider p95: <code>{health['p95_latency_ms']:.1f} ms</code>\n"
-        f"Last queue queued / dropped / failed: <code>{queue.get('queued', 0)} / {queue.get('dropped', 0)} / {queue.get('failed', 0)}</code>\n\n"
+        f"Transport / response-validation failures: <code>{health['transport_failures']} / {health['provider_response_validation_failures']}</code>\n"
+        f"Fallback / valid abstentions: <code>{health['fallback_abstentions']} / {health['valid_abstentions']}</code>\n"
+        f"Provider / queue / end-to-end p95: <code>{health['p95_latency_ms']:.1f} / {health['p95_queue_wait_ms']:.1f} / {health['p95_end_to_end_ms']:.1f} ms</code>\n"
+        f"Validation codes: <code>{escape(_counts(health['validation_codes']))}</code>\n"
+        f"Last queue queued / dropped / exceptions / validation: <code>{queue.get('queued', 0)} / {queue.get('dropped', 0)} / {queue.get('failed', 0)} / {queue.get('validation_failed', 0)}</code>\n\n"
         "All observations are advisory and have zero execution authority.")
 
 
@@ -246,7 +254,9 @@ async def ai_history(message: Message) -> None:
         lines.append(
             f"• <code>{row['signal_id']}</code> {escape(str(row['symbol']))} {escape(str(row['timeframe']))} · "
             f"<b>{escape(str(row['recommended_action']))}</b> · Q {float(row.get('opportunity_quality') or 0):.0f} · "
-            f"{escape(tags or str(row.get('regime') or 'UNKNOWN'))} · {escape(str(outcome))}")
+            f"{escape(tags or str(row.get('regime') or 'UNKNOWN'))} · "
+            f"<code>{escape(str(row.get('validation_stage') or 'UNKNOWN'))} / "
+            f"{escape(str(row.get('validation_code') or 'UNKNOWN'))}</code> · {escape(str(outcome))}")
     await message.answer("🧾 <b>AI observation history</b>\n\n" + ("\n".join(lines) if lines else "No observations found."))
 
 
@@ -326,10 +336,16 @@ async def ai_provider_health(message: Message) -> None:
     await message.answer(
         f"🩺 <b>AI provider health</b>\n\nCircuit: <code>{escape(str(state.get('state') or 'UNKNOWN'))}</code>\n"
         f"Consecutive / total failures: <code>{state.get('consecutive_failures', 0)} / {state.get('total_failures', 0)}</code>\n"
+        f"Classified provider failures / legacy-counter drift: <code>{report['classified_provider_failures']} / {report['counter_classification_drift'] if report['counter_classification_drift'] is not None else 'scope incomplete'}</code>\n"
         f"Total requests / retries: <code>{state.get('total_requests', 0)} / {state.get('total_retries', 0)}</code>\n"
-        f"Recent events / failures / cancellations: <code>{report['recent_events']} / {report['failures']} / {report['cancellations']}</code>\n"
-        f"p95 latency: <code>{report['p95_latency_ms']:.1f} ms</code>\n"
-        f"Queue processed / dropped / failed: <code>{queue.get('processed', 0)} / {queue.get('dropped', 0)} / {queue.get('failed', 0)}</code>\n"
+        f"Recent requests / transport failures / cancellations: <code>{report['recent_events']} / {report['transport_failures']} / {report['cancellations']}</code>\n"
+        f"Observation / response-validation failures: <code>{report['observation_validation_failures']} / {report['provider_response_validation_failures']}</code>\n"
+        f"Fallback / valid abstentions: <code>{report['fallback_abstentions']} / {report['valid_abstentions']}</code>\n"
+        f"Zero-Q fallback / valid: <code>{report['zero_quality_fallback']} / {report['zero_quality_valid']}</code>\n"
+        f"Provider / queue / end-to-end p95: <code>{report['p95_latency_ms']:.1f} / {report['p95_queue_wait_ms']:.1f} / {report['p95_end_to_end_ms']:.1f} ms</code>\n"
+        f"Validation codes: <code>{escape(_counts(report['validation_codes']))}</code>\n"
+        f"Validation stages: <code>{escape(_counts(report['validation_stages']))}</code>\n"
+        f"Queue processed / dropped / exceptions / validation: <code>{queue.get('processed', 0)} / {queue.get('dropped', 0)} / {queue.get('failed', 0)} / {queue.get('validation_failed', 0)}</code>\n"
         f"Last error: <code>{escape(str(state.get('last_error_code') or 'none'))}</code>")
 
 

@@ -49,8 +49,8 @@ def _journal_and_plan(tmp_path, monkeypatch):
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "9.9.18"
-    assert RELEASE_NAME == "Market Intelligence & Signal Quality"
+    assert APP_VERSION == "10.0.0"
+    assert RELEASE_NAME == "Autonomous Market Intelligence Platform"
 
 
 def test_transition_table_exposes_expected_execution_path() -> None:

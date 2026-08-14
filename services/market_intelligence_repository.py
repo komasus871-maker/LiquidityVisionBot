@@ -97,7 +97,7 @@ class MarketIntelligenceRepository:
                                      if previous_state != story.get("state") else "UNCHANGED")
         snapshot["market_story"] = story
         snapshot_checksum = _checksum(snapshot)
-        quality = snapshot.get("signal_quality_v2") or {}
+        quality = snapshot.get("signal_quality_v3") or snapshot.get("signal_quality_v2") or {}
         reversal = snapshot.get("reversal_research") or {}
         market_quality = _number(quality.get("market_quality"), 0) or 0
         overall_quality = _number(quality.get("overall_quality"), 0) or 0
@@ -251,6 +251,40 @@ class MarketIntelligenceRepository:
         except (TypeError, ValueError):
             result["stale"] = True
         return result
+
+    def data_health(self, symbol: str | None = None,
+                    owner_telegram_id: int | None = None) -> dict[str, Any]:
+        """Return bounded availability, never inferred values, for operator diagnostics."""
+        market = self.latest_symbol(symbol, owner_telegram_id) if symbol else None
+        micro = self.latest_microstructure(symbol) if symbol else None
+        snapshot = (market or {}).get("full_snapshot") or {}
+        derivatives = ((micro or {}).get("aggregate") or {}).get("funding_open_interest") or {}
+
+        def state(available: bool, *, stale: bool = False, insufficient: bool = False) -> str:
+            if stale:
+                return "STALE"
+            if available and insufficient:
+                return "INSUFFICIENT_HISTORY"
+            return "AVAILABLE" if available else "UNAVAILABLE"
+
+        funding_available = derivatives.get("funding_rate") is not None
+        oi_available = derivatives.get("open_interest") is not None
+        return {
+            "version": "data-availability-v1", "symbol": symbol,
+            "candles": state(bool(market)),
+            "benchmark": state((snapshot.get("relative_strength") or {}).get("status") == "AVAILABLE"),
+            "funding": state(funding_available, stale=bool(micro and micro.get("stale"))),
+            "open_interest": state(oi_available, stale=bool(micro and micro.get("stale")),
+                                   insufficient=oi_available and derivatives.get("open_interest_change_pct") is None),
+            "microstructure": state(bool(micro), stale=bool(micro and micro.get("stale"))),
+            "liquidity_map": state(bool(snapshot.get("liquidity_map"))),
+            "ordered_path": "INSUFFICIENT_HISTORY",
+            "execution_costs": state(bool((snapshot.get("research_policies") or {}).get(
+                "estimated_roundtrip_cost_pct") is not None)),
+            "funding_context": derivatives if funding_available else {},
+            "open_interest_context": derivatives if oi_available else {},
+            "automatic_policy_change": False,
+        }
 
     def quality_threshold_report(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
         with connect() as conn:

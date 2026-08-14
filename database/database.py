@@ -737,6 +737,7 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS ai_observation_queue_snapshots(
                 id {id_col}, identity_checksum TEXT, queued INTEGER NOT NULL,
                 processed INTEGER NOT NULL, dropped INTEGER NOT NULL, failed INTEGER NOT NULL,
+                validation_failed INTEGER NOT NULL DEFAULT 0,
                 cancelled INTEGER NOT NULL DEFAULT 0, duration_ms DOUBLE PRECISION NOT NULL,
                 created_at TEXT NOT NULL
             )
@@ -746,7 +747,9 @@ def create_tables() -> None:
                 id {id_col}, event_key TEXT NOT NULL UNIQUE, identity_checksum TEXT,
                 signal_id BIGINT, attempt_number INTEGER NOT NULL, status TEXT NOT NULL,
                 reason_code TEXT NOT NULL, latency_ms DOUBLE PRECISION,
-                provider_request_id TEXT, created_at TEXT NOT NULL
+                queue_wait_ms DOUBLE PRECISION, provider_request_id TEXT,
+                validation_stage TEXT, validation_code TEXT, extraction_code TEXT,
+                schema_valid INTEGER, semantic_valid INTEGER, created_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -1077,6 +1080,16 @@ def create_tables() -> None:
         }.items():
             _add_column(conn, "ai_provider_state", name, definition)
         for name, definition in {
+            "validation_failed": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            _add_column(conn, "ai_observation_queue_snapshots", name, definition)
+        for name, definition in {
+            "queue_wait_ms": "DOUBLE PRECISION", "validation_stage": "TEXT",
+            "validation_code": "TEXT", "extraction_code": "TEXT",
+            "schema_valid": "INTEGER", "semantic_valid": "INTEGER",
+        }.items():
+            _add_column(conn, "ai_provider_request_events", name, definition)
+        for name, definition in {
             "intervention_type": "TEXT",
             "evaluation_eligible": "INTEGER NOT NULL DEFAULT 1",
         }.items():
@@ -1088,6 +1101,12 @@ def create_tables() -> None:
             WHERE EXISTS(SELECT 1 FROM ai_decision_outcomes o
                 WHERE o.decision_id=ai_counterfactual_evaluations.decision_id
                   AND o.intervention_type IS NOT NULL)""")
+        conn.execute("""UPDATE ai_decisions SET schema_valid=CASE
+            WHEN provider_invoked=0 OR validation_stage IN
+                ('PROVIDER_TRANSPORT','STRUCTURED_EXTRACTION','JSON_PARSING',
+                'JSON_SCHEMA_VALIDATION','HTTP_RESPONSE_SHAPE','PROVIDER_COMPLETION') THEN 0
+            ELSE 1 END WHERE validation_stage IS NOT NULL
+                AND legacy_classification='CURRENT_IDENTITY'""")
         _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.

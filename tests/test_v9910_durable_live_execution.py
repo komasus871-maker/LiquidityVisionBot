@@ -80,8 +80,8 @@ def request(client_id="lv-client", *, reduce_only=False):
 
 
 def test_release_and_modes_default_fail_closed(monkeypatch):
-    assert APP_VERSION == "9.9.18"
-    assert RELEASE_NAME == "Market Intelligence & Signal Quality"
+    assert APP_VERSION == "10.0.0"
+    assert RELEASE_NAME == "Autonomous Market Intelligence Platform"
     monkeypatch.delenv("EXECUTION_MODE", raising=False)
     assert configured_mode() is ExecutionMode.PAPER
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")

@@ -136,11 +136,27 @@ class MicrostructureObserver:
                         if sample_index + 1 < self.samples_per_symbol:
                             await asyncio.sleep(self.sample_spacing_ms / 1000)
                     if aggregate is not None:
-                        context = await asyncio.wait_for(
-                            adapter.funding_open_interest(symbol),
-                            timeout=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")) + 2,
-                        )
-                        aggregate["funding_open_interest"] = context
+                        # Derivatives context is useful but must not make a valid
+                        # public depth aggregate disappear. BingX may degrade one
+                        # public endpoint independently of the other.
+                        try:
+                            context = await asyncio.wait_for(
+                                adapter.funding_open_interest(symbol),
+                                timeout=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")) + 2,
+                            )
+                            aggregate["funding_open_interest"] = {
+                                **context, "status": "AVAILABLE", "freshness": "FRESH",
+                            }
+                        except Exception as exc:
+                            aggregate["funding_open_interest"] = {
+                                "status": "UNAVAILABLE", "freshness": "UNAVAILABLE",
+                                "reason_code": f"{type(exc).__name__}",
+                                "source": "BINGX_PUBLIC_FUTURES_MARKET",
+                            }
+                            logging.warning(
+                                "microstructure_derivatives_stage=unavailable symbol=%s error_code=%s",
+                                symbol, type(exc).__name__,
+                            )
                         persisted += int(self.repository.persist_microstructure(
                             symbol=symbol,
                             exchange="bingx",

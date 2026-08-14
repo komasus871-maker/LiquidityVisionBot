@@ -78,4 +78,12 @@ Chat Completions remains a tested fallback. Use the full `https://api.openai.com
 
 Any prompt, schema-version, or schema-checksum change invalidates the prior provider identity. Certification is never automatic: after deploying `ai-decision-v3`, an operator may run exactly one paid `/ai_certification run` after the local and deployment checks pass.
 
+## Observation failure diagnostics
+
+Certification uses a fresh synthetic context; production observations use each signal's persisted `updated_at` as immutable market time. A certified provider can therefore pass certification while an old active signal fails `MARKET_TRUTH_VALIDATION / STALE_CONTEXT`. Stale/future/invalid persisted timestamps are rejected before a paid observation call and do not count against the provider circuit. They remain fail-closed advisory ABSTAIN rows with quality zero.
+
+`/ai_provider_health` separates provider transport failures, provider-response validation failures, local observation validation failures, valid versus fallback abstentions, provider latency, semaphore wait, end-to-end latency, and exact validation code/stage histograms. The existing schema-pipeline percentage retains its governance definition; structural schema valid/invalid/not-evaluable counts explain whether a fall came from malformed JSON Schema output or from requests such as timeouts where no schema was available. No prompt, schema semantics, token limits, retry policy, trading threshold, or execution authority is changed by these diagnostics.
+
+Historical circuit counters are not silently reset. If an older deployment counted local context failures as provider failures, `/ai_provider_health` reports the classification drift. The durable circuit remains fail-closed until its existing cooldown expires and the normal single half-open probe receives a provider result; future local freshness rejections do not increment it.
+
 Do not enable `AI_GATED`. `/ai_kill on` plus `AI_PROVIDER=disabled` and `AI_TRADING_MODE=AI_OFF` is the immediate rollback.
