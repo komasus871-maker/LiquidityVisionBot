@@ -246,11 +246,16 @@ class BingXCertificationService:
                     certification_expires_at=?,lifecycle_state=CASE
                         WHEN ?='VST_ECONOMIC_PASSED' THEN 'LIVE_CERTIFIED'
                         WHEN ? LIKE '%BLOCKED' THEN 'ERROR' ELSE lifecycle_state END,
+                    certification_invalidated_at=CASE WHEN ?='VST_ECONOMIC_PASSED' THEN NULL
+                        ELSE certification_invalidated_at END,
+                    certification_invalidation_reason=CASE WHEN ?='VST_ECONOMIC_PASSED' THEN NULL
+                        ELSE certification_invalidation_reason END,
                     updated_at=? WHERE id=? AND telegram_id=?
             """, (report.environment, report.adapter_version, report.account_mode, report.margin_mode,
                   report.server_time_drift_ms,
                   json.dumps(report.capabilities), json.dumps(permissions, sort_keys=True), report.status,
-                  report.expires_at, report.status, report.status, report.timestamp,
+                  report.expires_at, report.status, report.status, report.status, report.status,
+                  report.timestamp,
                   account_id, telegram_id))
 
     def _cache_rules(self, account_id: int, rules, expires: datetime) -> None:
@@ -285,7 +290,14 @@ def live_certification_valid(account_id: int, *, environment: str) -> bool:
     row = BingXCertificationService.latest(account_id)
     if not row or row["status"] != "VST_ECONOMIC_PASSED":
         return False
-    if row["environment"] != environment or not row["expires_at"]:
+    if (row["environment"] != environment or not row["expires_at"]
+            or row.get("adapter_version") != BingXSwapAdapter.ADAPTER_VERSION):
+        return False
+    with connect() as conn:
+        account = conn.execute("SELECT certification_invalidated_at FROM live_exchange_accounts WHERE id=?",
+                               (account_id,)).fetchone()
+    invalidated = account["certification_invalidated_at"] if account else None
+    if invalidated and str(row.get("started_at") or "") <= str(invalidated):
         return False
     expires = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
     if expires.tzinfo is None:

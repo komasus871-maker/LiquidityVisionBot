@@ -120,9 +120,10 @@ class UserExchangeCredentialStore:
             if existed:
                 conn.execute("""UPDATE live_exchange_accounts SET live_enabled=0,kill_switch=1,
                     execution_mode='DISABLED',confirmed_at=NULL,confirmation_hash=NULL,
-                    confirmation_expires_at=NULL,lifecycle_state='READ_ONLY_CONNECTED',updated_at=?
+                    confirmation_expires_at=NULL,lifecycle_state='READ_ONLY_CONNECTED',
+                    certification_invalidated_at=?,certification_invalidation_reason='CREDENTIAL_ROTATED',updated_at=?
                     WHERE telegram_id=? AND exchange=?""",
-                    (now, int(telegram_id), exchange.value))
+                    (now, now, int(telegram_id), exchange.value))
             else:
                 conn.execute("""UPDATE live_exchange_accounts SET lifecycle_state='READ_ONLY_CONNECTED',
                     updated_at=? WHERE telegram_id=? AND exchange=?""",
@@ -194,9 +195,11 @@ class UserExchangeCredentialStore:
                 (int(telegram_id), exchange.value),
             )
             conn.execute("""UPDATE live_exchange_accounts SET live_enabled=0,kill_switch=1,
-                execution_mode='DISABLED',lifecycle_state='REVOKED',updated_at=?
+                execution_mode='DISABLED',lifecycle_state='REVOKED',certification_invalidated_at=?,
+                certification_invalidation_reason='CREDENTIAL_REVOKED',updated_at=?
                 WHERE telegram_id=? AND exchange=?""",
-                (datetime.now(timezone.utc).isoformat(), int(telegram_id), exchange.value))
+                (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(),
+                 int(telegram_id), exchange.value))
             conn.commit()
             removed = bool(cursor.rowcount)
         if removed:

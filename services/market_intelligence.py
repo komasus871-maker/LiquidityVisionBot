@@ -17,7 +17,7 @@ import pandas as pd
 INTELLIGENCE_VERSION = "market-intelligence-v5"
 STORY_VERSION = "market-story-v2"
 LEVEL_VERSION = "level-intelligence-v1"
-MICROSTRUCTURE_VERSION = "microstructure-v2"
+MICROSTRUCTURE_VERSION = "microstructure-v3"
 QUALITY_VERSION = "signal-quality-v4"
 RANK_VERSION = "signal-ranking-v5"
 
@@ -595,13 +595,15 @@ class ReversalResearchEngine:
                       failed_retests: int, distance: float, invalidation: float,
                       time_away_from_extreme: int) -> dict[str, Any]:
             if continuation:
-                state = f"{kind}_CONTINUATION_RISK"
+                state = f"{kind}_CONTINUATION"
             elif confirmed:
-                state = f"{kind}_CONFIRMED"
+                state = f"{kind}_REVERSAL_CONFIRMED"
             elif early:
-                state = f"{kind}_EARLY"
+                state = f"{kind}_REVERSAL_EARLY"
+            elif extreme and momentum_state in {"DECELERATING", "EXHAUSTING"}:
+                state = f"{kind}_EXHAUSTION"
             else:
-                state = f"{kind}_INVALID"
+                state = f"{kind}_REVERSAL_INVALID"
             evidence = [
                 f"24h move {move_pct:+.2f}% ({move_atr:.2f} ATR)",
                 f"failed extreme retests {failed_retests}",
@@ -617,9 +619,9 @@ class ReversalResearchEngine:
                     "volume_decay_ratio": round(volume_decay_ratio, 4),
                     "hypothetical_invalidation": invalidation, "evidence": evidence,
                     "mode": "SHADOW_RESEARCH_ONLY", "martingale": False}
-        return {"pump": candidate("PUMP_REVERSAL", pump_confirmed, pump_early, pump_continuation,
+        return {"pump": candidate("PUMP", pump_confirmed, pump_early, pump_continuation,
                                   failed_high_retests, distance_high_pct, high, time_below_high),
-                "dump": candidate("DUMP_REVERSAL", dump_confirmed, dump_early, dump_continuation,
+                "dump": candidate("DUMP", dump_confirmed, dump_early, dump_continuation,
                                   failed_low_retests, distance_low_pct, low, time_above_low)}
 
 
@@ -662,7 +664,7 @@ class OrderBookMicrostructureEngine:
                     "reason_codes": ["NO_VALID_ORDER_BOOK_SNAPSHOTS"], "classifications": ["UNKNOWN"]}
         latest = books[-1]
         bands: dict[str, dict[str, float]] = {}
-        for pct in (.1, .25, .5, 1.0):
+        for pct in (.05, .1, .25, .5):
             lower, upper = latest["mid"] * (1 - pct / 100), latest["mid"] * (1 + pct / 100)
             bid_depth = sum(size for price, size in latest["bids"] if price >= lower)
             ask_depth = sum(size for price, size in latest["asks"] if price <= upper)
@@ -755,9 +757,13 @@ class OrderBookMicrostructureEngine:
         ) if walls else min(len(books) / 5, 1) * 55)
         spread_quality = _clip(100 - latest["spread_pct"] * 2200)
         depth_stability = _clip(100 - min(depth_turnover, 1) * 100)
+        sampling_completeness = _clip(len(books) / max(3, min(max_snapshots, 5)) * 100)
+        row_count = min(len(latest["bids"]), len(latest["asks"]))
+        row_quality = _clip(row_count / max(5, min(max_levels, 25)) * 100)
         microstructure_quality = _clip(
             interaction_quality * .40 + persistence_quality * .20
-            + spread_quality * .20 + depth_stability * .20
+            + spread_quality * .15 + depth_stability * .10
+            + sampling_completeness * .10 + row_quality * .05
         )
         imbalance_history = []
         for book in books:
@@ -771,12 +777,55 @@ class OrderBookMicrostructureEngine:
             imbalance_trend = "BID_STRENGTHENING" if delta >= .12 else "ASK_STRENGTHENING" if delta <= -.12 else "STABLE"
         best_bid = latest["bids"][0][0]
         best_ask = latest["asks"][0][0]
+        timestamp = latest.get("timestamp")
+        snapshot_age_seconds: float | None = None
+        try:
+            if isinstance(timestamp, (int, float)) or str(timestamp).isdigit():
+                raw_timestamp = float(timestamp)
+                snapshot_time = datetime.fromtimestamp(
+                    raw_timestamp / 1000 if raw_timestamp > 10_000_000_000 else raw_timestamp,
+                    tz=timezone.utc)
+            else:
+                snapshot_time = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                snapshot_time = snapshot_time if snapshot_time.tzinfo else snapshot_time.replace(tzinfo=timezone.utc)
+            snapshot_age_seconds = max(0.0, (datetime.now(timezone.utc) - snapshot_time).total_seconds())
+        except (TypeError, ValueError, OSError, OverflowError):
+            snapshot_age_seconds = None
+        stale = snapshot_age_seconds is None or snapshot_age_seconds > max(
+            180, int(os.getenv("MICROSTRUCTURE_STALE_SECONDS", "180")))
+        quality_state = ("STALE" if stale else
+                         "HIGH" if microstructure_quality >= 80 and len(books) >= 5 and row_count >= 20 else
+                         "MODERATE" if microstructure_quality >= 60 and len(books) >= 3 and row_count >= 10 else
+                         "LOW")
+        bounded_levels = {
+            "BID": [(price, size) for price, size in latest["bids"]
+                    if price >= latest["mid"] * (1 - .0025)],
+            "ASK": [(price, size) for price, size in latest["asks"]
+                    if price <= latest["mid"] * (1 + .0025)],
+        }
+        concentrations = {}
+        for side, values in bounded_levels.items():
+            total = sum(size for _, size in values)
+            largest = max(values, key=lambda item: item[1], default=(latest["mid"], 0.0))
+            concentrations[side] = {
+                "share": round(largest[1] / total, 5) if total else None,
+                "distance_bps": round(abs(largest[0] / latest["mid"] - 1) * 10_000, 3),
+            }
+        first_bid = sum(size for _, size in books[0]["bids"])
+        first_ask = sum(size for _, size in books[0]["asks"])
+        latest_bid = sum(size for _, size in latest["bids"])
+        latest_ask = sum(size for _, size in latest["asks"])
+        bid_change, ask_change = latest_bid - first_bid, latest_ask - first_ask
+        liquidity_migration = ("TOWARD_BID" if bid_change > abs(ask_change) else
+                               "TOWARD_ASK" if ask_change > abs(bid_change) else "STABLE")
         return {
             "version": MICROSTRUCTURE_VERSION, "status": "AVAILABLE", "sample_count": len(books),
             "feature_schema_version": MICROSTRUCTURE_VERSION,
-            "observation_timestamp": latest.get("timestamp"),
+            "observation_timestamp": timestamp,
             "source": "BINGX_PUBLIC_FUTURES_DEPTH",
-            "freshness": "FRESH", "stale_state": False,
+            "freshness": "STALE" if stale else "FRESH", "stale_state": stale,
+            "snapshot_age_seconds": (None if snapshot_age_seconds is None
+                                     else round(snapshot_age_seconds, 3)),
             "levels_per_side_max": max_levels, "mid_price": latest["mid"],
             "best_bid": best_bid, "best_ask": best_ask,
             "spread_pct": round(latest["spread_pct"], 5),
@@ -787,13 +836,24 @@ class OrderBookMicrostructureEngine:
             "executed_flow_available": executed_flow_available,
             "actor_identity_claimed": False, "interaction_quality": interaction_quality,
             "microstructure_quality": microstructure_quality,
+            "microstructure_quality_state": quality_state,
+            "sampling_completeness": sampling_completeness,
+            "valid_rows_per_side": row_count,
             "quality_components": {"interaction": interaction_quality,
                                    "persistence": persistence_quality,
                                    "spread": spread_quality,
-                                   "depth_stability": depth_stability},
+                                   "depth_stability": depth_stability,
+                                   "sampling_completeness": sampling_completeness,
+                                   "row_sufficiency": row_quality},
             "imbalance_trend": imbalance_trend,
+            "spread_trend": ("WIDENING" if len(books) >= 3 and latest["spread_pct"] > books[0]["spread_pct"] * 1.15
+                             else "TIGHTENING" if len(books) >= 3 and latest["spread_pct"] < books[0]["spread_pct"] * .85
+                             else "STABLE"),
+            "liquidity_migration": liquidity_migration,
+            "largest_bounded_concentration": concentrations,
             "mid_change_pct": round(mid_change, 5), "depth_turnover": round(depth_turnover, 5),
             "raw_book_persisted": False, "spoofing_caveat": "Resting liquidity is untrusted until interaction confirms it.",
+            "manipulation_claimed": False,
         }
 
 
@@ -978,10 +1038,15 @@ class SignalQualityEngine:
             max(values) + (sum(values) - max(values)) * .25
             for values in contradiction_families.values()
         ), 3)
+        micro_quality_state = str((microstructure or {}).get("microstructure_quality_state") or
+                                  ("LOW" if (microstructure or {}).get("status") == "AVAILABLE" else "INVALID"))
+        micro_weight_factor = {"HIGH": 1.0, "MODERATE": .7, "LOW": .35,
+                               "STALE": .15, "INVALID": 0.0}.get(micro_quality_state, .35)
         weights = {"MARKET_QUALITY": .13, "STRUCTURE": .12, "LIQUIDITY": .10, "LOCATION": .08,
                    "MOMENTUM": .10, "VOLATILITY": .06, "MICROSTRUCTURE": .07, "HTF_CONTEXT": .06,
                    "RELATIVE_STRENGTH": .04, "DERIVATIVES": .04, "INVALIDATION": .10,
                    "TARGET_REALISM": .06, "EXECUTION_COST": .03, "PORTFOLIO_CONTEXT": .01}
+        weights["MICROSTRUCTURE"] *= micro_weight_factor
         available_weight = sum(weight for key, weight in weights.items() if family_scores.get(key) is not None)
         raw_score = (sum(float(family_scores[key]) * weights[key] for key in weights
                          if family_scores.get(key) is not None) / max(available_weight, 1e-12))
@@ -990,6 +1055,7 @@ class SignalQualityEngine:
             overall = min(overall, 35.0)
         market_parts = {"MARKET_QUALITY": .30, "LIQUIDITY": .20, "STRUCTURE": .20,
                         "VOLATILITY": .10, "MICROSTRUCTURE": .10, "EXECUTION_COST": .10}
+        market_parts["MICROSTRUCTURE"] *= micro_weight_factor
         market_weight = sum(weight for key, weight in market_parts.items() if family_scores.get(key) is not None)
         market_quality = _clip(sum(float(family_scores[key]) * weight for key, weight in market_parts.items()
                                    if family_scores.get(key) is not None) / max(market_weight, 1e-12)
@@ -1019,12 +1085,14 @@ class SignalQualityEngine:
         )
         entry_parts = {"LOCATION": .32, "MICROSTRUCTURE": .28,
                        "INVALIDATION": .25, "EXECUTION_COST": .15}
+        entry_parts["MICROSTRUCTURE"] *= micro_weight_factor
         entry_weight = sum(weight for key, weight in entry_parts.items() if family_scores.get(key) is not None)
         entry_quality = _clip(sum(float(family_scores[key]) * weight for key, weight in entry_parts.items()
                                   if family_scores.get(key) is not None) / max(entry_weight, 1e-12)
                               - min(penalty, 25))
         execution_parts = {"INVALIDATION": .35, "TARGET_REALISM": .25,
                            "EXECUTION_COST": .25, "MICROSTRUCTURE": .15}
+        execution_parts["MICROSTRUCTURE"] *= micro_weight_factor
         execution_weight = sum(weight for key, weight in execution_parts.items() if family_scores.get(key) is not None)
         execution_quality = _clip(sum(float(family_scores[key]) * weight for key, weight in execution_parts.items()
                                       if family_scores.get(key) is not None) / max(execution_weight, 1e-12))
@@ -1038,6 +1106,8 @@ class SignalQualityEngine:
             "family_scores": family_scores, "normalized_components": dict(family_scores),
             "raw_components": raw_components,
             "family_aggregation": "INDEPENDENT_FAMILY_MAX_65_PLUS_MEAN_35_COVERAGE_NORMALIZED",
+            "microstructure_quality_state": micro_quality_state,
+            "microstructure_weight_factor": micro_weight_factor,
             "evidence_family_count": family_count, "evidence_diversity_score": diversity,
             "evidence_coverage": round(coverage, 4), "unavailable_families": unavailable,
             "evaluation_state": "EVALUATED",
@@ -1155,7 +1225,7 @@ class MarketIntelligenceEngine:
         if "CONFIRMED" in str((reversal.get("pump") or {}).get("state")):
             base["PUMP_REVERSAL"] += 35
             base["PUMP_CONTINUATION"] -= 25
-        elif "CONTINUATION_RISK" in str((reversal.get("pump") or {}).get("state")):
+        elif str((reversal.get("pump") or {}).get("state")) == "PUMP_CONTINUATION":
             base["PUMP_CONTINUATION"] += 30
             base["PUMP_REVERSAL"] -= 20
         if "CONFIRMED" in str((reversal.get("dump") or {}).get("state")):
@@ -1194,6 +1264,10 @@ class MarketIntelligenceEngine:
         weights = {"LOCATION": .20, "TRIGGER": .18, "MOMENTUM": .17,
                    "MICROSTRUCTURE": .12, "INVALIDATION": .18,
                    "REWARD_AFTER_COST": .15}
+        micro_state = str(microstructure.get("microstructure_quality_state") or
+                          ("LOW" if microstructure.get("status") == "AVAILABLE" else "INVALID"))
+        weights["MICROSTRUCTURE"] *= {"HIGH": 1.0, "MODERATE": .7, "LOW": .35,
+                                      "STALE": .15, "INVALID": 0.0}.get(micro_state, .35)
         available_weight = sum(weight for key, weight in weights.items() if components[key] is not None)
         score = _clip(sum(float(components[key]) * weight for key, weight in weights.items()
                           if components[key] is not None) / max(available_weight, 1e-12))
@@ -1229,8 +1303,17 @@ class MarketIntelligenceEngine:
         available_components = {key: value for key, value in components.items() if value is not None}
         weakest = sorted(available_components, key=available_components.get)[:2]
         data_state = "COMPLETE" if data_confidence >= 80 else "INCOMPLETE" if data_confidence >= 45 else "INSUFFICIENT"
-        return {"version": "entry-readiness-v3", "state": state, "score": round(score, 3),
+        component_details = {
+            key: {"score": value, "available": value is not None,
+                  "effective_weight": weights[key],
+                  "source": ("BOUNDED_PUBLIC_DEPTH" if key == "MICROSTRUCTURE" else
+                             "DETERMINISTIC_DECISION_FEATURES")}
+            for key, value in components.items()
+        }
+        component_details["MICROSTRUCTURE"]["quality_state"] = micro_state
+        return {"version": "entry-readiness-v4", "state": state, "score": round(score, 3),
                 "components": components, "weights": weights, "weakest_components": weakest,
+                "component_details": component_details,
                 "reason_codes": reasons, "setup_quality": quality.get("setup_quality"),
                 "data_confidence": data_confidence, "data_confidence_state": data_state,
                 "component_coverage": round(len(available_components) / max(1, len(components)), 4),
@@ -1245,10 +1328,10 @@ class MarketIntelligenceEngine:
         secondary = ranked[1] if len(ranked) > 1 else ("NONE", 0.0)
         gap = primary[1] - secondary[1]
         tied = [name for name, score in ranked if abs(score - primary[1]) <= .5]
-        state = ("LOW_CLASSIFICATION_CONFIDENCE" if primary[1] < 45 else
+        state = ("LOW_CONFIDENCE" if primary[1] < 45 else
                  "TIE" if len(tied) > 1 else
                  "HYBRID" if gap < 5 else "PRIMARY")
-        return {"version": "strategy-fusion-v2",
+        return {"version": "strategy-fusion-v3",
                 "primary": {"strategy": None if state == "TIE" else primary[0],
                             "suitability": round(primary[1], 3),
                             "classification": state},
@@ -1300,12 +1383,18 @@ class MarketIntelligenceEngine:
         structure_confirmed = structure.get("break") == "CLOSE_CONFIRMED_BREAK"
         reaccelerating = acceleration >= 1.25 and directional >= .65
         explosive = reaccelerating and acceleration >= 1.8 and structure_confirmed and trend.get("state") not in {"EXHAUSTED"}
-        state = "EXPLOSIVE_CONTINUATION_CANDIDATE" if explosive else "REACCELERATING" if reaccelerating else "NO_REACCELERATION"
+        supplied_state = str(momentum.get("state") or "UNKNOWN")
+        state = ("REACCELERATING" if reaccelerating else
+                 "EXHAUSTED" if supplied_state in {"EXHAUSTING", "EXHAUSTED"} else
+                 "REVERSING" if supplied_state == "REVERSING" else
+                 "ACCELERATING" if acceleration >= 1.08 and directional >= .55 else
+                 "DECELERATING")
         return {"version": "momentum-reacceleration-v2", "state": state,
                 "acceleration_ratio": round(acceleration, 4), "directional_efficiency": round(directional, 4),
                 "structure_confirmed": structure_confirmed,
                 "quality": _clip(min(acceleration, 2.5) / 2.5 * 60 + directional * 40),
                 "explosive_continuation": explosive,
+                "explosive_continuation_state": "CANDIDATE" if explosive else "NOT_CONFIRMED",
                 "research_only": True, "execution_authority": False}
 
     @staticmethod
@@ -1432,7 +1521,8 @@ class MarketIntelligenceEngine:
             "signal_quality_v2": quality, "signal_quality_v3": quality,
             "signal_quality_v4": quality,
             "entry_readiness": entry_readiness,
-            "strategy_suitability": strategy, "strategy_fusion_v2": strategy_fusion,
+            "strategy_suitability": strategy, "strategy_fusion_v3": strategy_fusion,
+            "strategy_fusion_v2": strategy_fusion,
             "strategy_assessments": strategy_assessments,
             "market_regime_v2": regime, "momentum_reacceleration": reacceleration,
             "research_policies": research,

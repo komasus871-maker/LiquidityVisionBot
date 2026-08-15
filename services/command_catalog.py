@@ -153,6 +153,7 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("live_account", "Detailed LIVE account state", "/live_account bingx"),
         ("live_sync", "Read-only account synchronization", "/live_sync bingx BTCUSDT"),
         ("live_readiness", "Fail-closed readiness reasons", "/live_readiness bingx"),
+        ("live_preflight", "Alias for the complete LIVE preflight", "/live_preflight bingx"),
         ("live_certify", "Structural certification without production orders", "/live_certify bingx"),
         ("live_dry_run", "Validate adapter paths without economic orders", "/live_dry_run bingx on"),
         ("live_confirm", "Record a private two-step consent token", "/live_confirm bingx"),
@@ -160,6 +161,18 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("live_disable", "Immediately block new LIVE entries", "/live_disable bingx"),
         ("live_risk", "View or replace the complete deterministic risk policy",
          "/live_risk bingx set max_positions=2 max_order=50 max_portfolio=200 max_symbol=100 max_realized_loss=20 max_total_loss=30 max_slippage_bps=20 cooldown=60 leverage=2 symbols=BTCUSDT blocked_symbols= timeframes=5m,15m strategies=SMC directions=BUY,SELL"),
+        ("live_copy_settings", "Per-connection consent, filters and deterministic sizing",
+         "/live_copy_settings bingx"),
+        ("live_daily_pnl", "Authoritative UTC exchange PnL and fee guard", "/live_daily_pnl bingx"),
+        ("live_positions", "Current exchange LIVE positions", "/live_positions bingx"),
+        ("live_orders", "Current exchange LIVE orders", "/live_orders bingx"),
+        ("live_performance", "Separate LIVE queue, execution and fee analytics"),
+        ("live_execution", "Alias for LIVE execution analytics"),
+        ("live_history", "Alias for LIVE execution history"),
+        ("live_emergency_close", "Preview a user-owned reduce-only emergency close",
+         "/live_emergency_close bingx"),
+        ("live_emergency_confirm", "Confirm an unexpired emergency-close preview token",
+         "/live_emergency_confirm TOKEN"),
         ("live_reconciliation", "Exchange-vs-local mismatch check", "/live_reconciliation bingx"),
         ("recovery", "Unresolved LIVE execution states", "/recovery bingx"),
         ("demo_order", "Explicit BingX demo-account order", "/demo_order bingx BTCUSDT BUY MARKET 0.001 60000 3"),
@@ -231,6 +244,13 @@ def category_text(category: str, language: str = "en") -> str | None:
     i18n = LocalizationService()
     lines = [f"<b>{category.title()} · {i18n.t('help.title', language=language)}</b>",
              i18n.t(f"help.{category}", language=language), ""]
+    if category == "live":
+        lines.extend([
+            i18n.t("help.live.lifecycle", language=language),
+            i18n.t("help.live.boundary", language=language),
+            i18n.t("live.risk_warning", language=language),
+            "",
+        ])
     for entry in entries:
         command = i18n.market_token(f"/{entry.command}", language=language)
         usage = i18n.market_token(entry.usage or "/" + entry.command, language=language)

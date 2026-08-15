@@ -84,7 +84,7 @@ class BingXSwapAdapter(ExchangeAdapter):
 
     BASE_URL = "https://open-api.bingx.com"
     VST_URL = "https://open-api-vst.bingx.com"
-    ADAPTER_VERSION = "9.9.11"
+    ADAPTER_VERSION = "10.4.0"
 
     def __init__(
         self,
@@ -115,6 +115,57 @@ class BingXSwapAdapter(ExchangeAdapter):
         self._last_rate_limit: ExchangeRateLimits = ExchangeRateLimits()
         self._request_semaphore = asyncio.Semaphore(8)
         self._max_leverage_by_symbol: dict[str, int] = {}
+        self._public_diagnostics: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def public_diagnostics(self, source_type: str, symbol: str) -> dict[str, Any]:
+        """Return bounded stage flags only; public response payloads are never retained."""
+        return dict(self._public_diagnostics.get((str(source_type).upper(), _symbol(symbol)), {}))
+
+    def _mark_public(self, source_type: str, symbol: str, **changes: Any) -> None:
+        key = (str(source_type).upper(), _symbol(symbol))
+        current = self._public_diagnostics.setdefault(key, {})
+        current.update(changes)
+
+    @staticmethod
+    def _depth_container(data: Any) -> Mapping[str, Any]:
+        row = data
+        # BingX has returned both a direct book and a nested book envelope across
+        # endpoint revisions. Unwrap only known bounded containers.
+        for _ in range(3):
+            if isinstance(row, Mapping) and isinstance(row.get("bids"), list) and isinstance(row.get("asks"), list):
+                return row
+            if not isinstance(row, Mapping):
+                break
+            child = next((row.get(key) for key in ("data", "depth", "orderBook", "orderbook")
+                          if isinstance(row.get(key), Mapping)), None)
+            if child is None:
+                break
+            row = child
+        return {}
+
+    @staticmethod
+    def _normalize_depth_side(rows: Any, *, descending: bool, limit: int) -> list[list[str]]:
+        if not isinstance(rows, list):
+            return []
+        normalized: list[tuple[Decimal, Decimal]] = []
+        for item in rows[:limit]:
+            if isinstance(item, Mapping):
+                price = item.get("price") if item.get("price") is not None else item.get("p")
+                quantity = next((item.get(key) for key in ("quantity", "qty", "size", "q")
+                                 if item.get(key) is not None), None)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                price, quantity = item[0], item[1]
+            else:
+                continue
+            try:
+                price_value, quantity_value = Decimal(str(price)), Decimal(str(quantity))
+            except (ArithmeticError, ValueError):
+                continue
+            if not price_value.is_finite() or not quantity_value.is_finite() or price_value <= 0 or quantity_value <= 0:
+                continue
+            normalized.append((price_value, quantity_value))
+        normalized.sort(key=lambda item: item[0], reverse=descending)
+        return [[_plain(price), _plain(quantity)] for price, quantity in normalized]
 
     def capabilities(self) -> ExchangeCapabilities:
         return ExchangeCapabilities(frozenset({
@@ -276,16 +327,38 @@ class BingXSwapAdapter(ExchangeAdapter):
     async def market_depth(self, symbol: str, limit: int = 50) -> dict[str, Any]:
         """Return a bounded public futures depth snapshot for research observers."""
         safe_limit = max(5, min(int(limit), 100))
-        data = await self._request(
-            "/openApi/swap/v2/quote/depth",
-            params={"symbol": _symbol(symbol), "limit": safe_limit},
-        )
-        row = data if isinstance(data, dict) else {}
-        bids, asks = row.get("bids"), row.get("asks")
-        if not isinstance(bids, list) or not isinstance(asks, list) or not bids or not asks:
-            raise ExchangeResponseError("BingX depth response did not contain bids and asks")
+        normalized_symbol = _symbol(symbol)
+        self._public_diagnostics[("DEPTH", normalized_symbol)] = {"request_attempted": True}
+        try:
+            data = await self._request(
+                "/openApi/swap/v2/quote/depth",
+                params={"symbol": normalized_symbol, "limit": safe_limit},
+            )
+        except Exception:
+            self._mark_public("DEPTH", normalized_symbol, http_success=False,
+                              rejection_code="DEPTH_HTTP_REQUEST_FAILED")
+            raise
+        self._mark_public("DEPTH", normalized_symbol, http_success=True)
+        row = self._depth_container(data)
+        payload_valid = bool(row)
+        self._mark_public("DEPTH", normalized_symbol, payload_valid=payload_valid)
+        if not payload_valid:
+            self._mark_public("DEPTH", normalized_symbol, rejection_code="DEPTH_PAYLOAD_SCHEMA_INVALID")
+            raise ExchangeResponseError("BingX depth response schema was invalid")
+        bids = self._normalize_depth_side(row.get("bids"), descending=True, limit=safe_limit)
+        asks = self._normalize_depth_side(row.get("asks"), descending=False, limit=safe_limit)
+        rows_valid = bool(bids and asks)
+        crossed = rows_valid and Decimal(bids[0][0]) >= Decimal(asks[0][0])
+        self._mark_public("DEPTH", normalized_symbol, rows_valid=rows_valid and not crossed,
+                          normalized=rows_valid and not crossed)
+        if not rows_valid:
+            self._mark_public("DEPTH", normalized_symbol, rejection_code="DEPTH_ROWS_EMPTY_OR_INVALID")
+            raise ExchangeResponseError("BingX depth response contained no valid price levels")
+        if crossed:
+            self._mark_public("DEPTH", normalized_symbol, rejection_code="DEPTH_BOOK_CROSSED")
+            raise ExchangeResponseError("BingX depth response contained a crossed book")
         return {
-            "symbol": _symbol(symbol), "bids": bids[:safe_limit], "asks": asks[:safe_limit],
+            "symbol": normalized_symbol, "bids": bids, "asks": asks,
             "timestamp": row.get("T") or row.get("timestamp") or row.get("time") or int(time.time() * 1000),
             "source": "BINGX_PUBLIC_FUTURES_DEPTH",
         }
@@ -293,15 +366,36 @@ class BingXSwapAdapter(ExchangeAdapter):
     async def funding_snapshot(self, symbol: str) -> dict[str, Any]:
         """Return one independently validated public funding observation."""
         normalized = _symbol(symbol)
-        premium = await self._request(
-            "/openApi/swap/v2/quote/premiumIndex", params={"symbol": normalized})
+        self._public_diagnostics[("FUNDING", normalized)] = {"request_attempted": True}
+        try:
+            premium = await self._request(
+                "/openApi/swap/v2/quote/premiumIndex", params={"symbol": normalized})
+        except Exception:
+            self._mark_public("FUNDING", normalized, http_success=False,
+                              rejection_code="FUNDING_HTTP_REQUEST_FAILED")
+            raise
+        self._mark_public("FUNDING", normalized, http_success=True)
         premium_row = premium[0] if isinstance(premium, list) and premium else premium
         premium_row = premium_row if isinstance(premium_row, dict) else {}
+        self._mark_public("FUNDING", normalized, payload_valid=bool(premium_row))
         funding = premium_row.get("lastFundingRate")
         if funding is None:
             funding = premium_row.get("fundingRate")
         if funding is None:
+            self._mark_public("FUNDING", normalized, rows_valid=False,
+                              rejection_code="FUNDING_VALUE_MISSING")
             raise ExchangeResponseError("BingX funding response was empty")
+        try:
+            funding_value = Decimal(str(funding))
+        except (ArithmeticError, ValueError) as exc:
+            self._mark_public("FUNDING", normalized, rows_valid=False,
+                              rejection_code="FUNDING_VALUE_INVALID")
+            raise ExchangeResponseError("BingX funding response was invalid") from exc
+        if not funding_value.is_finite():
+            self._mark_public("FUNDING", normalized, rows_valid=False,
+                              rejection_code="FUNDING_VALUE_INVALID")
+            raise ExchangeResponseError("BingX funding response was invalid")
+        self._mark_public("FUNDING", normalized, rows_valid=True, normalized=True)
         return {
             "symbol": normalized, "funding_rate": str(funding),
             "mark_price": premium_row.get("markPrice"),
@@ -314,15 +408,36 @@ class BingXSwapAdapter(ExchangeAdapter):
     async def open_interest_snapshot(self, symbol: str) -> dict[str, Any]:
         """Return one independently validated public open-interest observation."""
         normalized = _symbol(symbol)
-        interest = await self._request(
-            "/openApi/swap/v2/quote/openInterest", params={"symbol": normalized})
+        self._public_diagnostics[("OPEN_INTEREST", normalized)] = {"request_attempted": True}
+        try:
+            interest = await self._request(
+                "/openApi/swap/v2/quote/openInterest", params={"symbol": normalized})
+        except Exception:
+            self._mark_public("OPEN_INTEREST", normalized, http_success=False,
+                              rejection_code="OPEN_INTEREST_HTTP_REQUEST_FAILED")
+            raise
+        self._mark_public("OPEN_INTEREST", normalized, http_success=True)
         interest_row = interest[0] if isinstance(interest, list) and interest else interest
         interest_row = interest_row if isinstance(interest_row, dict) else {}
+        self._mark_public("OPEN_INTEREST", normalized, payload_valid=bool(interest_row))
         open_interest = interest_row.get("openInterest")
         if open_interest is None:
             open_interest = interest_row.get("openInterestAmount")
         if open_interest is None:
+            self._mark_public("OPEN_INTEREST", normalized, rows_valid=False,
+                              rejection_code="OPEN_INTEREST_VALUE_MISSING")
             raise ExchangeResponseError("BingX open-interest response was empty")
+        try:
+            oi_value = Decimal(str(open_interest))
+        except (ArithmeticError, ValueError) as exc:
+            self._mark_public("OPEN_INTEREST", normalized, rows_valid=False,
+                              rejection_code="OPEN_INTEREST_VALUE_INVALID")
+            raise ExchangeResponseError("BingX open-interest response was invalid") from exc
+        if not oi_value.is_finite() or oi_value < 0:
+            self._mark_public("OPEN_INTEREST", normalized, rows_valid=False,
+                              rejection_code="OPEN_INTEREST_VALUE_INVALID")
+            raise ExchangeResponseError("BingX open-interest response was invalid")
+        self._mark_public("OPEN_INTEREST", normalized, rows_valid=True, normalized=True)
         return {
             "symbol": normalized, "open_interest": str(open_interest),
             "reported_at": interest_row.get("time") or int(time.time() * 1000),

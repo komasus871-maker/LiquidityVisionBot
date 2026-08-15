@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 from datetime import datetime, timezone
 from typing import Any
+import logging
 
 from services.user_preferences import UserPreferenceService
 
@@ -283,7 +284,255 @@ AR.update({
     "scanner.disclaimer": "ترتيب تحليلي فقط؛ الدرجات ليست احتمالات أو تعليمات تنفيذ.",
 })
 
+EN.update({
+    "lifecycle.TRIGGERED": "Price entered the preferred entry zone",
+    "lifecycle.ACTIVE": "Setup activated", "lifecycle.TP1": "TP1 reached",
+    "lifecycle.TP2": "TP2 reached", "lifecycle.TP3": "TP3 reached — lifecycle complete",
+    "lifecycle.STOP": "Stop Loss reached", "lifecycle.BREAKEVEN": "Closed at break even",
+    "lifecycle.INVALIDATED": "Setup invalidated before activation",
+    "lifecycle.EXPIRED": "Setup expired without activation",
+    "notify.signal_id": "Signal ID", "notify.price": "Price", "notify.status": "Status",
+    "notify.current_move": "Current move", "notify.current_r": "Current R",
+    "notify.duration": "Duration", "notify.next_reaction": "Next: waiting for a directional reaction candle.",
+    "notify.entry": "Entry", "notify.stop": "Stop", "notify.targets": "Targets",
+    "notify.next_target": "Next target", "notify.final_target": "Final target",
+    "notify.break_even_active": "Stop automatically moved to Break Even.",
+    "notify.realized": "Realized result", "notify.history": "Historical exact-setup context",
+    "notify.samples": "Samples", "notify.reliability": "Reliability",
+    "notify.state": "State", "notify.action": "Action", "notify.risk_used": "Risk used",
+    "notify.to_stop": "Remaining to stop", "notify.risk_protected": "Risk protection",
+    "notify.capital_at_risk": "Capital at risk", "notify.historical_model": "Historical model",
+    "notify.commentary": "Commentary", "notify.update": "UPDATE",
+    "notify.confidence": "Confidence", "notify.full_history": "Full history",
+    "notify.monitoring": "The trade remains under live monitoring.",
+    "alert.provider.title": "Market-data degradation",
+    "alert.provider.body": "{symbol} · {source} is temporarily degraded. Independent sources remain usable; missing evidence is shown as unavailable.",
+    "alert.live.title": "LIVE safety alert · {exchange}",
+    "alert.live.body": "Connection {account} is suspended. Reason: {reason}. New entries are blocked; existing positions were not auto-closed.",
+    "help.live.lifecycle": "Safe lifecycle: NOT_CONNECTED → READ_ONLY_CONNECTED → PREFLIGHT_READY → LIVE_CERTIFIED → LIVE_ENABLED.",
+    "help.live.boundary": "Connecting keys, certification, Premium, owner access, or AI does not enable trading. Only explicit user activation after every gate can enable LIVE.",
+    "live.risk_warning": "Trading can lose money. Leverage magnifies losses. API automation can act quickly. Never grant withdrawal permission; you control the exchange account.",
+})
+
+RU.update({
+    "lifecycle.TRIGGERED": "Цена вошла в предпочтительную зону входа", "lifecycle.ACTIVE": "Сетап активирован",
+    "lifecycle.TP1": "TP1 достигнут", "lifecycle.TP2": "TP2 достигнут",
+    "lifecycle.TP3": "TP3 достигнут — цикл завершён", "lifecycle.STOP": "Достигнут Stop Loss",
+    "lifecycle.BREAKEVEN": "Закрыто в безубыток", "lifecycle.INVALIDATED": "Сетап отменён до активации",
+    "lifecycle.EXPIRED": "Сетап истёк без активации", "notify.signal_id": "ID сигнала",
+    "notify.price": "Цена", "notify.status": "Статус", "notify.current_move": "Текущее движение",
+    "notify.current_r": "Текущий R", "notify.duration": "Длительность", "notify.entry": "Вход",
+    "notify.stop": "Стоп", "notify.targets": "Цели", "notify.next_target": "Следующая цель",
+    "notify.final_target": "Финальная цель", "notify.state": "Состояние", "notify.action": "Действие",
+    "notify.risk_used": "Использованный риск", "notify.to_stop": "До стопа",
+    "notify.historical_model": "Историческая модель", "notify.commentary": "Комментарий",
+    "notify.update": "ОБНОВЛЕНИЕ", "notify.confidence": "Уверенность", "notify.full_history": "Полная история",
+    "notify.monitoring": "Сделка остаётся под наблюдением.", "alert.provider.title": "Ухудшение рыночных данных",
+    "alert.provider.body": "{symbol} · {source} временно недоступен. Независимые источники продолжают работать; отсутствующие данные отмечаются как недоступные.",
+    "alert.live.title": "Предупреждение безопасности LIVE · {exchange}",
+    "alert.live.body": "Подключение {account} приостановлено. Причина: {reason}. Новые входы заблокированы; открытые позиции не закрывались автоматически.",
+    "help.live.lifecycle": "Безопасный цикл: NOT_CONNECTED → READ_ONLY_CONNECTED → PREFLIGHT_READY → LIVE_CERTIFIED → LIVE_ENABLED.",
+    "help.live.boundary": "Подключение ключей, сертификация, Premium, владелец или AI не включают торговлю. LIVE включается только явным действием пользователя после всех проверок.",
+    "live.risk_warning": "Торговля может привести к убыткам. Плечо увеличивает потери. API действует быстро. Никогда не давайте право вывода средств; счёт контролируете вы.",
+})
+
+UK.update({
+    "lifecycle.TRIGGERED": "Ціна увійшла в бажану зону входу", "lifecycle.ACTIVE": "Сетап активовано",
+    "lifecycle.TP1": "TP1 досягнуто", "lifecycle.TP2": "TP2 досягнуто",
+    "lifecycle.TP3": "TP3 досягнуто — цикл завершено", "lifecycle.STOP": "Досягнуто Stop Loss",
+    "lifecycle.BREAKEVEN": "Закрито в беззбиток", "lifecycle.INVALIDATED": "Сетап скасовано до активації",
+    "lifecycle.EXPIRED": "Сетап завершився без активації", "notify.signal_id": "ID сигналу",
+    "notify.price": "Ціна", "notify.status": "Статус", "notify.current_move": "Поточний рух",
+    "notify.current_r": "Поточний R", "notify.duration": "Тривалість", "notify.entry": "Вхід",
+    "notify.stop": "Стоп", "notify.targets": "Цілі", "notify.next_target": "Наступна ціль",
+    "notify.final_target": "Фінальна ціль", "notify.state": "Стан", "notify.action": "Дія",
+    "notify.risk_used": "Використаний ризик", "notify.to_stop": "До стопа",
+    "notify.historical_model": "Історична модель", "notify.commentary": "Коментар",
+    "notify.update": "ОНОВЛЕННЯ", "notify.confidence": "Впевненість", "notify.full_history": "Повна історія",
+    "notify.monitoring": "Угода залишається під наглядом.", "alert.provider.title": "Погіршення ринкових даних",
+    "alert.provider.body": "{symbol} · {source} тимчасово недоступне. Незалежні джерела працюють; відсутні дані позначено як недоступні.",
+    "alert.live.title": "Попередження безпеки LIVE · {exchange}",
+    "alert.live.body": "Підключення {account} призупинено. Причина: {reason}. Нові входи заблоковано; відкриті позиції автоматично не закривались.",
+    "help.live.lifecycle": "Безпечний цикл: NOT_CONNECTED → READ_ONLY_CONNECTED → PREFLIGHT_READY → LIVE_CERTIFIED → LIVE_ENABLED.",
+    "help.live.boundary": "Ключі, сертифікація, Premium, власник або AI не вмикають торгівлю. LIVE вмикає лише користувач після всіх перевірок.",
+    "live.risk_warning": "Торгівля може спричинити збитки. Плече їх збільшує. API діє швидко. Ніколи не надавайте право виведення; рахунок контролюєте ви.",
+})
+
+HE.update({
+    "lifecycle.TRIGGERED": "המחיר נכנס לאזור הכניסה המועדף", "lifecycle.ACTIVE": "התרחיש הופעל",
+    "lifecycle.TP1": "TP1 הושג", "lifecycle.TP2": "TP2 הושג", "lifecycle.TP3": "TP3 הושג — המחזור הושלם",
+    "lifecycle.STOP": "Stop Loss הושג", "lifecycle.BREAKEVEN": "נסגר באיזון",
+    "lifecycle.INVALIDATED": "התרחיש נפסל לפני הפעלה", "lifecycle.EXPIRED": "התרחיש פג ללא הפעלה",
+    "notify.signal_id": "מזהה אות", "notify.price": "מחיר", "notify.status": "מצב",
+    "notify.current_move": "תנועה נוכחית", "notify.current_r": "R נוכחי", "notify.duration": "משך",
+    "notify.entry": "כניסה", "notify.stop": "עצירה", "notify.targets": "יעדים",
+    "notify.next_target": "היעד הבא", "notify.final_target": "היעד האחרון", "notify.state": "מצב",
+    "notify.action": "פעולה", "notify.risk_used": "סיכון שנוצל", "notify.to_stop": "מרחק לעצירה",
+    "notify.historical_model": "מודל היסטורי", "notify.commentary": "הערה", "notify.update": "עדכון",
+    "notify.confidence": "ביטחון", "notify.full_history": "היסטוריה מלאה",
+    "notify.monitoring": "העסקה נשארת במעקב.", "alert.provider.title": "פגיעה בנתוני השוק",
+    "alert.provider.body": "{symbol} · {source} אינו זמין זמנית. מקורות עצמאיים נשארים פעילים; מידע חסר מסומן כלא זמין.",
+    "alert.live.title": "התראת בטיחות LIVE · {exchange}",
+    "alert.live.body": "החיבור {account} הושעה. סיבה: {reason}. כניסות חדשות חסומות; פוזיציות קיימות לא נסגרו אוטומטית.",
+    "help.live.lifecycle": "מחזור בטוח: NOT_CONNECTED → READ_ONLY_CONNECTED → PREFLIGHT_READY → LIVE_CERTIFIED → LIVE_ENABLED.",
+    "help.live.boundary": "חיבור מפתחות, הסמכה, Premium, בעלים או AI אינם מפעילים מסחר. רק המשתמש מפעיל LIVE לאחר כל הבדיקות.",
+    "live.risk_warning": "מסחר עלול לגרום להפסד. מינוף מגדיל הפסדים. API פועל במהירות. אין לתת הרשאת משיכה; החשבון בשליטתך.",
+})
+
+AR.update({
+    "lifecycle.TRIGGERED": "دخل السعر منطقة الدخول المفضلة", "lifecycle.ACTIVE": "تم تفعيل الإعداد",
+    "lifecycle.TP1": "تم بلوغ TP1", "lifecycle.TP2": "تم بلوغ TP2", "lifecycle.TP3": "تم بلوغ TP3 — اكتملت الدورة",
+    "lifecycle.STOP": "تم بلوغ Stop Loss", "lifecycle.BREAKEVEN": "أُغلق عند التعادل",
+    "lifecycle.INVALIDATED": "أُلغي الإعداد قبل التفعيل", "lifecycle.EXPIRED": "انتهى الإعداد دون تفعيل",
+    "notify.signal_id": "معرّف الإشارة", "notify.price": "السعر", "notify.status": "الحالة",
+    "notify.current_move": "الحركة الحالية", "notify.current_r": "R الحالي", "notify.duration": "المدة",
+    "notify.entry": "الدخول", "notify.stop": "الإيقاف", "notify.targets": "الأهداف",
+    "notify.next_target": "الهدف التالي", "notify.final_target": "الهدف الأخير", "notify.state": "الحالة",
+    "notify.action": "الإجراء", "notify.risk_used": "المخاطرة المستخدمة", "notify.to_stop": "المتبقي للإيقاف",
+    "notify.historical_model": "النموذج التاريخي", "notify.commentary": "تعليق", "notify.update": "تحديث",
+    "notify.confidence": "الثقة", "notify.full_history": "السجل الكامل",
+    "notify.monitoring": "تظل الصفقة قيد المراقبة.", "alert.provider.title": "تدهور بيانات السوق",
+    "alert.provider.body": "{symbol} · {source} غير متاح مؤقتاً. تبقى المصادر المستقلة صالحة؛ وتُعرض البيانات المفقودة كغير متاحة.",
+    "alert.live.title": "تنبيه أمان LIVE · {exchange}",
+    "alert.live.body": "تم تعليق الاتصال {account}. السبب: {reason}. مُنعت المداخل الجديدة؛ ولم تُغلق المراكز الحالية تلقائياً.",
+    "help.live.lifecycle": "المسار الآمن: NOT_CONNECTED → READ_ONLY_CONNECTED → PREFLIGHT_READY → LIVE_CERTIFIED → LIVE_ENABLED.",
+    "help.live.boundary": "ربط المفاتيح أو الاعتماد أو Premium أو المالك أو AI لا يفعّل التداول. لا يفعّل LIVE إلا المستخدم بعد اجتياز كل الضوابط.",
+    "live.risk_warning": "قد يسبب التداول خسائر. الرافعة تضخمها. يعمل API بسرعة. لا تمنح إذن السحب أبداً؛ أنت تتحكم في حسابك.",
+})
+
+# v10.4 safety-critical LIVE and asynchronous alert surfaces. Technical state,
+# command and strategy identifiers remain stable and are rendered as LTR islands.
+EN.update({
+    "live.private_only": "This LIVE action is available only in a private chat.",
+    "live.fail_closed": "The request failed closed. No new exposure was created.",
+    "live.copy.title": "LIVE copy settings · {exchange}",
+    "live.copy.enabled": "Enabled", "live.copy.symbols": "Symbols",
+    "live.copy.filters": "Strategies / timeframes / directions",
+    "live.copy.minimum_quality": "Minimum Quality", "live.copy.sizing": "Sizing",
+    "live.copy.ceilings": "Exposure / leverage ceilings",
+    "live.copy.boundary": "These preferences are subordinate to server risk, authoritative daily PnL, reconciliation and kill switches.",
+    "live.daily.title": "LIVE daily PnL · UTC {bucket}", "live.state": "State",
+    "live.daily.values": "Realized / fees / unrealized", "live.daily.loss_basis": "Loss basis",
+    "live.source": "Source", "live.observed": "Observed",
+    "live.performance.title": "LIVE performance · separate from PAPER",
+    "live.performance.executions": "Executions / filled / rejected",
+    "live.performance.fees": "Known execution fees",
+    "live.performance.authoritative": "Latest authoritative realized / fees",
+    "live.performance.queue": "Queue states",
+    "live.performance.boundary": "PAPER and LIVE metrics are never merged.",
+    "live.emergency.preview": "LIVE emergency-close preview · {exchange}",
+    "live.emergency.fingerprint": "Account fingerprint",
+    "live.emergency.exposure": "Estimated exposure",
+    "live.emergency.warning": "This attempts reduce-only closure and is separate from the kill switch. Confirm before expiry:",
+    "live.emergency.no_pending": "No matching pending emergency-close confirmation.",
+    "live.emergency.result": "Emergency-close result", "live.emergency.submissions": "Submissions",
+    "live.emergency.remaining": "remaining positions",
+    "live.emergency.truth": "No closure is assumed until exchange state confirms it.",
+    "live.preflight.title": "LIVE preflight · {exchange}",
+    "live.preflight.credentials": "Credentials present", "live.preflight.confirmed": "Two-step confirmed",
+    "live.preflight.enabled": "Account enabled", "live.preflight.kill": "Connection safety switch",
+    "live.preflight.unresolved": "Unresolved/retry executions",
+    "live.preflight.limits": "Max order / exposure / leverage", "live.preflight.readiness": "Readiness",
+    "live.preflight.reasons": "Reasons",
+    "live.preflight.boundary": "LIVE remains fail-closed until every server-side gate passes. The connection safety switch remains armed before activation.",
+    "live.reconciliation.title": "LIVE reconciliation · {exchange}",
+    "live.reconciliation.mismatches": "Mismatches", "live.reconciliation.blocked": "New entries blocked",
+    "live.reconciliation.truth": "Exchange state is authoritative; economic mismatches are never silently repaired.",
+    "live.enable.title": "Explicit LIVE activation · {exchange}",
+    "live.enable.boundary": "Connecting credentials, Premium, PAPER copy and certification do not activate LIVE.",
+    "live.enable.on": "LIVE is now ON for connection {account}.",
+    "live.enable.off": "LIVE remains OFF: {reason}",
+    "notify.position_secured": "Position secured", "notify.stop_to_break_even": "Stop moved to Break Even",
+    "notify.break_even_explainer": "If price returns to entry, the lifecycle closes as BREAKEVEN instead of STOP.",
+    "alert.watch.title": "Watch update", "alert.watch.bias": "Bias",
+    "alert.watch.recommendation": "Recommendation", "alert.watch.quality": "Quality / Readiness",
+    "alert.watch.strategy": "Strategy", "alert.watch.regime": "Regime",
+    "alert.watch.PRICE_MOVE": "Material price move detected", "alert.watch.DIRECTION_CHANGE": "Directional bias changed",
+    "alert.watch.READINESS_CHANGE": "Entry readiness changed", "alert.watch.QUALITY_CHANGE": "Signal Quality changed",
+    "alert.watch.WALL_REMOVED": "A bounded liquidity wall disappeared", "alert.watch.WALL_REPLENISHED": "A bounded liquidity wall replenished",
+    "alert.watch.LIQUIDITY_SWEEP": "A bounded liquidity sweep was observed", "alert.watch.ORDER_BOOK_WALL_APPEARS": "A bounded liquidity concentration appeared",
+    "alert.watch.MICROSTRUCTURE_CHANGE": "Microstructure state changed", "alert.watch.FUNDING_EXTREME": "Funding entered an extreme percentile",
+    "alert.watch.OI_ACCELERATION": "Open interest is accelerating", "alert.watch.STRUCTURE_BREAK": "Market structure changed",
+    "alert.watch.ENTRY_ZONE": "Price entered the preferred entry zone",
+})
+
+RU.update({
+    "live.private_only": "Это действие LIVE доступно только в личном чате.", "live.fail_closed": "Запрос отклонён безопасно. Новая позиция не создана.",
+    "live.copy.title": "Настройки LIVE-копирования · {exchange}", "live.copy.enabled": "Включено", "live.copy.symbols": "Символы",
+    "live.copy.filters": "Стратегии / таймфреймы / направления", "live.copy.minimum_quality": "Минимальное качество", "live.copy.sizing": "Размер",
+    "live.copy.ceilings": "Лимиты экспозиции / плеча", "live.copy.boundary": "Настройки подчиняются серверному риску, подтверждённому дневному PnL, сверке и аварийным переключателям.",
+    "live.daily.title": "Дневной PnL LIVE · UTC {bucket}", "live.state": "Состояние", "live.daily.values": "Реализовано / комиссии / нереализовано",
+    "live.daily.loss_basis": "База дневного убытка", "live.source": "Источник", "live.observed": "Время наблюдения",
+    "live.performance.title": "Результаты LIVE · отдельно от PAPER", "live.performance.executions": "Исполнения / заполнено / отклонено",
+    "live.performance.fees": "Известные комиссии", "live.performance.authoritative": "Последние подтверждённые реализовано / комиссии",
+    "live.performance.queue": "Состояния очереди", "live.performance.boundary": "Метрики PAPER и LIVE не объединяются.",
+    "live.emergency.preview": "Предпросмотр аварийного закрытия LIVE · {exchange}", "live.emergency.fingerprint": "Отпечаток счёта",
+    "live.emergency.exposure": "Оценочная экспозиция", "live.emergency.warning": "Будет предпринята только reduce-only попытка закрытия, отдельно от kill switch. Подтвердите до истечения срока:",
+    "live.emergency.no_pending": "Подходящего ожидающего подтверждения нет.", "live.emergency.result": "Результат аварийного закрытия",
+    "live.emergency.submissions": "Отправлено", "live.emergency.remaining": "оставшиеся позиции", "live.emergency.truth": "Закрытие не считается выполненным до подтверждения состояния биржей.",
+    "live.preflight.title": "Проверка LIVE · {exchange}", "live.preflight.credentials": "Ключи подключены", "live.preflight.confirmed": "Двухэтапное подтверждение",
+    "live.preflight.enabled": "Счёт активирован", "live.preflight.kill": "Защитный переключатель подключения", "live.preflight.unresolved": "Неразрешённые/повторные исполнения",
+    "live.preflight.limits": "Макс. ордер / экспозиция / плечо", "live.preflight.readiness": "Готовность", "live.preflight.reasons": "Причины",
+    "live.preflight.boundary": "LIVE остаётся заблокированным до прохождения всех серверных проверок. До активации защитный переключатель подключения остаётся включён.",
+    "live.reconciliation.title": "Сверка LIVE · {exchange}", "live.reconciliation.mismatches": "Расхождения", "live.reconciliation.blocked": "Новые входы заблокированы",
+    "live.reconciliation.truth": "Состояние биржи авторитетно; экономические расхождения не исправляются молча.",
+    "live.enable.title": "Явная активация LIVE · {exchange}", "live.enable.boundary": "Ключи, Premium, PAPER-копирование и сертификация не активируют LIVE.",
+    "live.enable.on": "LIVE включён для подключения {account}.", "live.enable.off": "LIVE остаётся выключенным: {reason}",
+    "notify.position_secured": "Позиция защищена", "notify.stop_to_break_even": "Стоп перенесён в безубыток", "notify.break_even_explainer": "При возврате к входу цикл завершится как BREAKEVEN, а не STOP.",
+    "alert.watch.title": "Обновление наблюдения", "alert.watch.bias": "Смещение", "alert.watch.recommendation": "Рекомендация", "alert.watch.quality": "Качество / готовность",
+    "alert.watch.strategy": "Стратегия", "alert.watch.regime": "Режим", "alert.watch.PRICE_MOVE": "Обнаружено существенное движение цены", "alert.watch.DIRECTION_CHANGE": "Изменилось направление",
+    "alert.watch.READINESS_CHANGE": "Изменилась готовность входа", "alert.watch.QUALITY_CHANGE": "Изменилось качество сигнала", "alert.watch.WALL_REMOVED": "Ограниченная стена ликвидности исчезла",
+    "alert.watch.WALL_REPLENISHED": "Стена ликвидности пополнилась", "alert.watch.LIQUIDITY_SWEEP": "Наблюдался ограниченный съём ликвидности", "alert.watch.ORDER_BOOK_WALL_APPEARS": "Появилась концентрация ликвидности",
+    "alert.watch.MICROSTRUCTURE_CHANGE": "Изменилась микроструктура", "alert.watch.FUNDING_EXTREME": "Фандинг вошёл в экстремальный процентиль", "alert.watch.OI_ACCELERATION": "Открытый интерес ускоряется",
+    "alert.watch.STRUCTURE_BREAK": "Изменилась структура рынка", "alert.watch.ENTRY_ZONE": "Цена вошла в предпочтительную зону входа",
+})
+
+UK.update({
+    "live.private_only": "Ця дія LIVE доступна лише в приватному чаті.", "live.fail_closed": "Запит безпечно відхилено. Нову позицію не створено.",
+    "live.copy.title": "Налаштування LIVE-копіювання · {exchange}", "live.copy.enabled": "Увімкнено", "live.copy.symbols": "Символи", "live.copy.filters": "Стратегії / таймфрейми / напрямки",
+    "live.copy.minimum_quality": "Мінімальна якість", "live.copy.sizing": "Розмір", "live.copy.ceilings": "Ліміти експозиції / плеча", "live.copy.boundary": "Налаштування підпорядковані серверному ризику, підтвердженому денному PnL, звірці та аварійним перемикачам.",
+    "live.daily.title": "Денний PnL LIVE · UTC {bucket}", "live.state": "Стан", "live.daily.values": "Реалізовано / комісії / нереалізовано", "live.daily.loss_basis": "База денного збитку", "live.source": "Джерело", "live.observed": "Час спостереження",
+    "live.performance.title": "Результати LIVE · окремо від PAPER", "live.performance.executions": "Виконання / заповнено / відхилено", "live.performance.fees": "Відомі комісії", "live.performance.authoritative": "Останні підтверджені реалізовано / комісії", "live.performance.queue": "Стани черги", "live.performance.boundary": "Метрики PAPER та LIVE не об’єднуються.",
+    "live.emergency.preview": "Перегляд аварійного закриття LIVE · {exchange}", "live.emergency.fingerprint": "Відбиток рахунку", "live.emergency.exposure": "Орієнтовна експозиція", "live.emergency.warning": "Буде виконано лише reduce-only спробу закриття, окремо від kill switch. Підтвердьте до завершення строку:", "live.emergency.no_pending": "Відповідного очікуваного підтвердження немає.", "live.emergency.result": "Результат аварійного закриття", "live.emergency.submissions": "Надіслано", "live.emergency.remaining": "позицій залишилось", "live.emergency.truth": "Закриття не вважається виконаним до підтвердження біржею.",
+    "live.preflight.title": "Перевірка LIVE · {exchange}", "live.preflight.credentials": "Ключі підключено", "live.preflight.confirmed": "Двоетапне підтвердження", "live.preflight.enabled": "Рахунок активовано", "live.preflight.kill": "Захисний перемикач підключення", "live.preflight.unresolved": "Невирішені/повторні виконання", "live.preflight.limits": "Макс. ордер / експозиція / плече", "live.preflight.readiness": "Готовність", "live.preflight.reasons": "Причини", "live.preflight.boundary": "LIVE залишається заблокованим до проходження всіх серверних перевірок. До активації захисний перемикач підключення залишається ввімкненим.",
+    "live.reconciliation.title": "Звірка LIVE · {exchange}", "live.reconciliation.mismatches": "Розбіжності", "live.reconciliation.blocked": "Нові входи заблоковано", "live.reconciliation.truth": "Стан біржі авторитетний; економічні розбіжності не виправляються мовчки.",
+    "live.enable.title": "Явна активація LIVE · {exchange}", "live.enable.boundary": "Ключі, Premium, PAPER-копіювання та сертифікація не активують LIVE.", "live.enable.on": "LIVE увімкнено для підключення {account}.", "live.enable.off": "LIVE залишається вимкненим: {reason}",
+    "notify.position_secured": "Позицію захищено", "notify.stop_to_break_even": "Стоп перенесено в беззбиток", "notify.break_even_explainer": "При поверненні до входу цикл завершиться як BREAKEVEN, а не STOP.",
+    "alert.watch.title": "Оновлення спостереження", "alert.watch.bias": "Ухил", "alert.watch.recommendation": "Рекомендація", "alert.watch.quality": "Якість / готовність", "alert.watch.strategy": "Стратегія", "alert.watch.regime": "Режим", "alert.watch.PRICE_MOVE": "Виявлено істотний рух ціни", "alert.watch.DIRECTION_CHANGE": "Змінився напрямок", "alert.watch.READINESS_CHANGE": "Змінилася готовність входу", "alert.watch.QUALITY_CHANGE": "Змінилася якість сигналу", "alert.watch.WALL_REMOVED": "Обмежена стіна ліквідності зникла", "alert.watch.WALL_REPLENISHED": "Стіна ліквідності поповнилась", "alert.watch.LIQUIDITY_SWEEP": "Спостерігався обмежений знім ліквідності", "alert.watch.ORDER_BOOK_WALL_APPEARS": "З’явилась концентрація ліквідності", "alert.watch.MICROSTRUCTURE_CHANGE": "Змінилась мікроструктура", "alert.watch.FUNDING_EXTREME": "Фандинг увійшов в екстремальний процентиль", "alert.watch.OI_ACCELERATION": "Відкритий інтерес прискорюється", "alert.watch.STRUCTURE_BREAK": "Змінилась структура ринку", "alert.watch.ENTRY_ZONE": "Ціна увійшла в бажану зону входу",
+})
+
+HE.update({
+    "live.private_only": "פעולת LIVE זו זמינה רק בצ׳אט פרטי.", "live.fail_closed": "הבקשה נחסמה בבטחה. לא נוצרה חשיפה חדשה.",
+    "live.copy.title": "הגדרות העתקת LIVE · {exchange}", "live.copy.enabled": "מופעל", "live.copy.symbols": "סמלים", "live.copy.filters": "אסטרטגיות / טווחים / כיוונים", "live.copy.minimum_quality": "איכות מינימלית", "live.copy.sizing": "גודל", "live.copy.ceilings": "תקרות חשיפה / מינוף", "live.copy.boundary": "ההעדפות כפופות לסיכון השרת, PnL יומי מאומת, התאמה ומתגי חירום.",
+    "live.daily.title": "PnL יומי של LIVE · UTC {bucket}", "live.state": "מצב", "live.daily.values": "ממומש / עמלות / לא ממומש", "live.daily.loss_basis": "בסיס הפסד יומי", "live.source": "מקור", "live.observed": "נצפה",
+    "live.performance.title": "ביצועי LIVE · בנפרד מ־PAPER", "live.performance.executions": "ביצועים / מולאו / נדחו", "live.performance.fees": "עמלות ידועות", "live.performance.authoritative": "מימוש / עמלות מאומתים אחרונים", "live.performance.queue": "מצבי תור", "live.performance.boundary": "מדדי PAPER ו־LIVE אינם מתמזגים.",
+    "live.emergency.preview": "תצוגת סגירת חירום LIVE · {exchange}", "live.emergency.fingerprint": "טביעת חשבון", "live.emergency.exposure": "חשיפה משוערת", "live.emergency.warning": "זהו ניסיון סגירה reduce-only, בנפרד ממתג החסימה. יש לאשר לפני התפוגה:", "live.emergency.no_pending": "לא נמצא אישור חירום ממתין מתאים.", "live.emergency.result": "תוצאת סגירת חירום", "live.emergency.submissions": "שליחות", "live.emergency.remaining": "פוזיציות שנותרו", "live.emergency.truth": "אין להניח שהסגירה הושלמה עד שאמת הבורסה מאשרת זאת.",
+    "live.preflight.title": "בדיקת LIVE · {exchange}", "live.preflight.credentials": "פרטי גישה קיימים", "live.preflight.confirmed": "אישור דו־שלבי", "live.preflight.enabled": "חשבון מופעל", "live.preflight.kill": "מתג בטיחות חיבור", "live.preflight.unresolved": "ביצועים לא פתורים/חוזרים", "live.preflight.limits": "מקס׳ הוראה / חשיפה / מינוף", "live.preflight.readiness": "מוכנות", "live.preflight.reasons": "סיבות", "live.preflight.boundary": "LIVE נשאר חסום עד שכל בדיקות השרת עוברות. מתג בטיחות החיבור נשאר פעיל לפני ההפעלה.",
+    "live.reconciliation.title": "התאמת LIVE · {exchange}", "live.reconciliation.mismatches": "אי־התאמות", "live.reconciliation.blocked": "כניסות חדשות חסומות", "live.reconciliation.truth": "מצב הבורסה הוא המקור הקובע; אי־התאמות כלכליות אינן מתוקנות בשקט.",
+    "live.enable.title": "הפעלת LIVE מפורשת · {exchange}", "live.enable.boundary": "חיבור פרטים, Premium, העתקת PAPER והסמכה אינם מפעילים LIVE.", "live.enable.on": "LIVE הופעל עבור חיבור {account}.", "live.enable.off": "LIVE נשאר כבוי: {reason}",
+    "notify.position_secured": "הפוזיציה מוגנת", "notify.stop_to_break_even": "העצירה הועברה לאיזון", "notify.break_even_explainer": "אם המחיר יחזור לכניסה, המחזור ייסגר כ־BREAKEVEN ולא STOP.",
+    "alert.watch.title": "עדכון מעקב", "alert.watch.bias": "הטיה", "alert.watch.recommendation": "המלצה", "alert.watch.quality": "איכות / מוכנות", "alert.watch.strategy": "אסטרטגיה", "alert.watch.regime": "משטר", "alert.watch.PRICE_MOVE": "זוהתה תנועת מחיר מהותית", "alert.watch.DIRECTION_CHANGE": "הכיוון השתנה", "alert.watch.READINESS_CHANGE": "מוכנות הכניסה השתנתה", "alert.watch.QUALITY_CHANGE": "איכות האות השתנתה", "alert.watch.WALL_REMOVED": "קיר נזילות תחום נעלם", "alert.watch.WALL_REPLENISHED": "קיר נזילות התמלא מחדש", "alert.watch.LIQUIDITY_SWEEP": "נצפתה סריקת נזילות תחומה", "alert.watch.ORDER_BOOK_WALL_APPEARS": "הופיע ריכוז נזילות תחום", "alert.watch.MICROSTRUCTURE_CHANGE": "מצב המיקרו־מבנה השתנה", "alert.watch.FUNDING_EXTREME": "המימון נכנס לאחוזון קיצון", "alert.watch.OI_ACCELERATION": "הריבית הפתוחה מואצת", "alert.watch.STRUCTURE_BREAK": "מבנה השוק השתנה", "alert.watch.ENTRY_ZONE": "המחיר נכנס לאזור הכניסה המועדף",
+})
+
+AR.update({
+    "live.private_only": "إجراء LIVE هذا متاح في محادثة خاصة فقط.", "live.fail_closed": "فشل الطلب بأمان. لم يتم إنشاء تعرض جديد.",
+    "live.copy.title": "إعدادات نسخ LIVE · {exchange}", "live.copy.enabled": "مفعّل", "live.copy.symbols": "الرموز", "live.copy.filters": "الاستراتيجيات / الأطر / الاتجاهات", "live.copy.minimum_quality": "الحد الأدنى للجودة", "live.copy.sizing": "الحجم", "live.copy.ceilings": "حدود التعرض / الرافعة", "live.copy.boundary": "تخضع التفضيلات لمخاطر الخادم وPnL اليومي الموثوق والتسوية ومفاتيح الإيقاف.",
+    "live.daily.title": "PnL اليومي لـ LIVE · UTC {bucket}", "live.state": "الحالة", "live.daily.values": "المحقق / الرسوم / غير المحقق", "live.daily.loss_basis": "أساس الخسارة اليومية", "live.source": "المصدر", "live.observed": "وقت الرصد",
+    "live.performance.title": "أداء LIVE · منفصل عن PAPER", "live.performance.executions": "التنفيذات / الممتلئة / المرفوضة", "live.performance.fees": "رسوم التنفيذ المعروفة", "live.performance.authoritative": "آخر محقق / رسوم موثوقة", "live.performance.queue": "حالات الطابور", "live.performance.boundary": "لا تُدمج مقاييس PAPER وLIVE.",
+    "live.emergency.preview": "معاينة الإغلاق الطارئ LIVE · {exchange}", "live.emergency.fingerprint": "بصمة الحساب", "live.emergency.exposure": "التعرض المقدر", "live.emergency.warning": "هذه محاولة إغلاق reduce-only منفصلة عن مفتاح الإيقاف. أكّد قبل انتهاء الصلاحية:", "live.emergency.no_pending": "لا يوجد تأكيد طارئ معلّق مطابق.", "live.emergency.result": "نتيجة الإغلاق الطارئ", "live.emergency.submissions": "الإرسالات", "live.emergency.remaining": "المراكز المتبقية", "live.emergency.truth": "لا يُفترض الإغلاق حتى تؤكده حالة المنصة.",
+    "live.preflight.title": "فحص LIVE · {exchange}", "live.preflight.credentials": "بيانات الاعتماد موجودة", "live.preflight.confirmed": "تأكيد بخطوتين", "live.preflight.enabled": "الحساب مفعّل", "live.preflight.kill": "مفتاح أمان الاتصال", "live.preflight.unresolved": "تنفيذات غير محلولة/معادة", "live.preflight.limits": "أقصى أمر / تعرض / رافعة", "live.preflight.readiness": "الجاهزية", "live.preflight.reasons": "الأسباب", "live.preflight.boundary": "يبقى LIVE مغلقاً حتى تمر كل ضوابط الخادم. يبقى مفتاح أمان الاتصال مفعلاً قبل التنشيط.",
+    "live.reconciliation.title": "تسوية LIVE · {exchange}", "live.reconciliation.mismatches": "عدم التطابق", "live.reconciliation.blocked": "المداخل الجديدة محظورة", "live.reconciliation.truth": "حالة المنصة هي المرجع؛ ولا تُصلح الفروق الاقتصادية بصمت.",
+    "live.enable.title": "تنشيط LIVE الصريح · {exchange}", "live.enable.boundary": "ربط البيانات أو Premium أو نسخ PAPER أو الاعتماد لا ينشّط LIVE.", "live.enable.on": "تم تشغيل LIVE للاتصال {account}.", "live.enable.off": "يبقى LIVE متوقفاً: {reason}",
+    "notify.position_secured": "تم تأمين المركز", "notify.stop_to_break_even": "نُقل الإيقاف إلى التعادل", "notify.break_even_explainer": "إذا عاد السعر للدخول تُغلق الدورة كـ BREAKEVEN بدلاً من STOP.",
+    "alert.watch.title": "تحديث المراقبة", "alert.watch.bias": "التحيز", "alert.watch.recommendation": "التوصية", "alert.watch.quality": "الجودة / الجاهزية", "alert.watch.strategy": "الاستراتيجية", "alert.watch.regime": "النظام", "alert.watch.PRICE_MOVE": "رُصد تحرك سعري جوهري", "alert.watch.DIRECTION_CHANGE": "تغير الاتجاه", "alert.watch.READINESS_CHANGE": "تغيرت جاهزية الدخول", "alert.watch.QUALITY_CHANGE": "تغيرت جودة الإشارة", "alert.watch.WALL_REMOVED": "اختفى جدار سيولة محدود", "alert.watch.WALL_REPLENISHED": "تجدد جدار السيولة", "alert.watch.LIQUIDITY_SWEEP": "رُصد مسح سيولة محدود", "alert.watch.ORDER_BOOK_WALL_APPEARS": "ظهر تركز سيولة محدود", "alert.watch.MICROSTRUCTURE_CHANGE": "تغيرت حالة البنية الدقيقة", "alert.watch.FUNDING_EXTREME": "دخل التمويل نطاقاً مئوياً متطرفاً", "alert.watch.OI_ACCELERATION": "الفائدة المفتوحة تتسارع", "alert.watch.STRUCTURE_BREAK": "تغير هيكل السوق", "alert.watch.ENTRY_ZONE": "دخل السعر منطقة الدخول المفضلة",
+})
+
 TRANSLATIONS: dict[str, dict[str, str]] = {"en": EN, "ru": RU, "uk": UK, "he": HE, "ar": AR}
+V104_PRIMARY_KEYS = frozenset(
+    key for key in EN
+    if key.startswith(("live.", "lifecycle.", "alert.watch.", "alert.provider.",
+                       "alert.live.", "help.live."))
+)
 
 
 class LocalizationService:
@@ -310,7 +559,12 @@ class LocalizationService:
 
     def t(self, key: str, *, language: str = "en", **values: Any) -> str:
         locale = self.normalize_language(language) or "en"
-        template = TRANSLATIONS.get(locale, {}).get(key) or EN.get(key) or EN["common.unavailable"]
+        localized = TRANSLATIONS.get(locale, {}).get(key)
+        template = localized or EN.get(key) or EN["common.unavailable"]
+        if localized is None and locale != "en":
+            logging.warning("localization_missing_key locale=%s key=%s fallback=en", locale, key)
+        if key not in EN:
+            logging.warning("localization_unknown_key locale=%s key=%s", locale, key)
         try:
             return template.format_map(_SafeValues(values))
         except (ValueError, KeyError):
@@ -328,6 +582,9 @@ class LocalizationService:
         if self.is_rtl(language):
             rendered = f"\u2066{rendered}\u2069"
         return f"<code>{rendered}</code>" if html else rendered
+
+    def ltr(self, value: Any, *, language: str, html: bool = False) -> str:
+        return self.market_token(value, language=language, html=html)
 
     def freshness(self, value: str | None, *, language: str) -> str:
         if not value:
@@ -350,6 +607,19 @@ class LocalizationService:
             return 100.0
         translated = sum(key in TRANSLATIONS.get(language, {}) for key in selected)
         return round(translated / len(selected) * 100, 2)
+
+    @staticmethod
+    def coverage_report(keys: set[str] | frozenset[str] | None = None) -> dict[str, Any]:
+        selected = sorted(set(keys or EN))
+        locales = {}
+        for locale in SUPPORTED_LANGUAGES:
+            missing = [key for key in selected if key not in TRANSLATIONS.get(locale, {})]
+            locales[locale] = {"translated": len(selected) - len(missing),
+                               "total": len(selected),
+                               "coverage_pct": round((len(selected) - len(missing)) / max(1, len(selected)) * 100, 2),
+                               "missing": missing}
+        return {"total_core_keys": len(selected), "locales": locales,
+                "fallback_order": "SELECTED_LOCALE_THEN_ENGLISH", "translation_key_leak": False}
 
 
 class _SafeValues(dict):

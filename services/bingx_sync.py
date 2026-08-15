@@ -59,6 +59,12 @@ class BingXAccountSyncService:
         now = datetime.now(timezone.utc).isoformat()
         try:
             with connect() as conn:
+                previous = conn.execute("SELECT account_mode,adapter_version FROM live_exchange_accounts WHERE id=?",
+                                        (account_id,)).fetchone()
+                material_change = bool(previous and (
+                    (values.get("account_mode") and previous["account_mode"]
+                     and values.get("account_mode") != previous["account_mode"])
+                    or (previous["adapter_version"] and previous["adapter_version"] != self.adapter.ADAPTER_VERSION)))
                 conn.execute("""
                 UPDATE live_exchange_accounts SET adapter_environment=?,adapter_version=?,sync_stage=?,
                     sync_status=?,sync_error_code=?,sync_error_message=?,account_mode=COALESCE(?,account_mode),
@@ -75,6 +81,11 @@ class BingXAccountSyncService:
                 values.get("server_time_drift_ms"), values.get("capabilities"), values.get("permissions"),
                 status, now, status, status, now, account_id, telegram_id,
                 ))
+                if material_change:
+                    conn.execute("""UPDATE live_exchange_accounts SET certification_invalidated_at=?,
+                        certification_invalidation_reason='ACCOUNT_MODE_OR_ADAPTER_CHANGED',
+                        live_enabled=0,kill_switch=1 WHERE id=? AND telegram_id=?""",
+                        (now, account_id, telegram_id))
         except Exception as exc:
             raise BingXSyncPersistenceError("BingX synchronization state could not be persisted") from exc
 

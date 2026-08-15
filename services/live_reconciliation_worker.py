@@ -17,6 +17,8 @@ from services.exchanges.registry import build_exchange_registry
 from services.intelligence_alerts import IntelligenceAlertService
 from services.live_reconciliation import LiveReconciliationService
 from services.live_safety import LiveAuditRepository, LiveKillSwitchRepository
+from services.localization import LocalizationService
+from services.operator_authorization import OWNER_TELEGRAM_ID
 
 
 class LiveReconciliationWorker:
@@ -62,18 +64,33 @@ class LiveReconciliationWorker:
         if decision["status"] != "ELIGIBLE" or self.bot is None:
             return
         try:
+            i18n = LocalizationService()
+            language = i18n.language(telegram_id)
             await self.bot.send_message(
                 telegram_id,
-                f"🛑 <b>LIVE safety alert · {escape(exchange)}</b>\n\n"
-                f"Connection <code>#{account_id}</code> is suspended. "
-                f"Reason: <code>{escape(alert_type)}</code>.\n"
-                "New entries are blocked; existing positions were not auto-closed.",
+                f"🛑 <b>{i18n.t('alert.live.title', language=language, exchange=i18n.market_token(exchange, language=language))}</b>\n\n"
+                + i18n.t("alert.live.body", language=language,
+                         account=i18n.market_token(f"#{account_id}", language=language),
+                         reason=i18n.market_token(alert_type, language=language)),
                 parse_mode="HTML")
         except Exception:
             IntelligenceAlertService.mark_delivery_failed(decision["alert_key"])
             logging.exception("live_reconciliation_alert_delivery_failed account_id=%s", account_id)
         else:
             IntelligenceAlertService.mark_delivered(decision["alert_key"])
+        if telegram_id != OWNER_TELEGRAM_ID and alert_type in {
+                "RECONCILIATION_MISMATCH", "LIVE_RISK_EVENT"}:
+            owner_language = i18n.language(OWNER_TELEGRAM_ID)
+            try:
+                await self.bot.send_message(
+                    OWNER_TELEGRAM_ID,
+                    f"🛑 <b>{i18n.t('alert.live.title', language=owner_language, exchange=i18n.market_token(exchange, language=owner_language))}</b>\n\n"
+                    + i18n.t("alert.live.body", language=owner_language,
+                             account=i18n.market_token(f"#{account_id}", language=owner_language),
+                             reason=i18n.market_token(alert_type, language=owner_language)),
+                    parse_mode="HTML")
+            except Exception:
+                logging.exception("live_operator_alert_delivery_failed account_id=%s", account_id)
 
     async def _suspend_unavailable(self, account: dict, *, reason_code: str) -> None:
         now = datetime.now(timezone.utc).isoformat()

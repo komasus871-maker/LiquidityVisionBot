@@ -69,6 +69,18 @@ class LiveReconciliationService:
                                        "symbol": order.symbol, "local_quantity": str(local_executed),
                                        "exchange_quantity": str(exchange_fill_quantity),
                                        "evidence": "EXCHANGE_FILL_AGGREGATE"})
+                with connect() as conn:
+                    local_fee_row = conn.execute("""SELECT COALESCE(SUM(commission),0) fee
+                        FROM live_execution_fills WHERE execution_id=?""", (local["id"],)).fetchone()
+                local_fees = Decimal(str(local_fee_row["fee"] or 0))
+                exchange_fees = sum((abs(Decimal(fill.commission)) for fill in exchange_fills),
+                                    Decimal("0"))
+                if abs(local_fees - exchange_fees) > Decimal("0.00000001"):
+                    mismatches.append({"type": "FEE_MISMATCH", "severity": "CRITICAL",
+                                       "local_ref": str(local["id"]), "exchange_ref": order.order_id,
+                                       "symbol": order.symbol, "local_quantity": str(local_fees),
+                                       "exchange_quantity": str(exchange_fees),
+                                       "evidence": "EXCHANGE_FILL_FEES"})
         canonical = lambda value: "".join(char for char in str(value).upper() if char.isalnum())
         local_positions: dict[tuple[str, str], Decimal] = {
             (canonical(row["symbol"]), str(row["position_side"]).upper()): Decimal(str(row["quantity"]))

@@ -285,13 +285,22 @@ class WatchEngine:
                     readiness_text = (f"{current['readiness']:.1f}" if current.get("readiness") is not None else "—")
                     lines = [
                         f"🔔 <b>{self.i18n.market_token(symbol, language=language)} · "
-                        f"{self.i18n.market_token(timeframe.upper(), language=language)} WATCH UPDATE</b>", "",
-                        *[f"• {candidate['text']}" for candidate, _ in eligible], "",
-                        f"Bias: {current.get('market_bias')}",
-                        f"Recommendation: {current.get('recommendation')}",
-                        f"Quality / Readiness: {quality_text} / {readiness_text}",
-                        f"Strategy: {current['strategy']} · Regime: {current['regime']}",
-                        f"Price: <code>{current['price']}</code>",
+                        f"{self.i18n.market_token(timeframe.upper(), language=language)} "
+                        f"{self.i18n.t('alert.watch.title', language=language)}</b>", "",
+                        *[f"• {self.i18n.t('alert.watch.' + candidate['type'], language=language)}"
+                          for candidate, _ in eligible], "",
+                        f"{self.i18n.t('alert.watch.bias', language=language)}: "
+                        f"{self.i18n.market_token(current.get('market_bias'), language=language)}",
+                        f"{self.i18n.t('alert.watch.recommendation', language=language)}: "
+                        f"{self.i18n.market_token(current.get('recommendation'), language=language)}",
+                        f"{self.i18n.t('alert.watch.quality', language=language)}: "
+                        f"{self.i18n.market_token(quality_text + ' / ' + readiness_text, language=language)}",
+                        f"{self.i18n.t('alert.watch.strategy', language=language)}: "
+                        f"{self.i18n.market_token(current['strategy'], language=language)} · "
+                        f"{self.i18n.t('alert.watch.regime', language=language)}: "
+                        f"{self.i18n.market_token(current['regime'], language=language)}",
+                        f"{self.i18n.t('notify.price', language=language)}: "
+                        f"<code>{self.i18n.market_token(current['price'], language=language)}</code>",
                     ]
                     try:
                         await self.bot.send_message(row["telegram_id"], "\n".join(lines), parse_mode="HTML")

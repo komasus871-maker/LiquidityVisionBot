@@ -47,6 +47,7 @@ from services.ai_intelligence import AIObservationIntelligence
 from services.research_worker import ResearchWorker
 from services.microstructure_observer import MicrostructureObserver
 from services.live_reconciliation_worker import LiveReconciliationWorker
+from services.live_copy import LiveCopyWorker
 from services.command_catalog import MAIN_MENU_COMMANDS
 from services.localization import LocalizationService, SUPPORTED_LANGUAGES
 from services.operational_retention import OperationalRetentionService
@@ -165,8 +166,9 @@ async def main() -> None:
     research = ResearchWorker()
     microstructure = MicrostructureObserver(bot=bot)
     live_reconciliation = LiveReconciliationWorker(bot=bot)
+    live_copy = LiveCopyWorker(adapter_factory=LiveReconciliationWorker._adapter, bot=bot)
     workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research,
-               microstructure, live_reconciliation]
+               microstructure, live_reconciliation, live_copy]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
@@ -176,6 +178,7 @@ async def main() -> None:
         asyncio.create_task(research.run_forever(), name="research-engine"),
         asyncio.create_task(microstructure.run_forever(), name="microstructure-observer"),
         asyncio.create_task(live_reconciliation.run_forever(), name="live-reconciliation"),
+        asyncio.create_task(live_copy.run_forever(), name="live-copy-dispatcher"),
     ]
 
     mode = deployment_mode()
@@ -196,6 +199,7 @@ async def main() -> None:
                 research_result = await research.check_once()
                 microstructure_result = await microstructure.check_once()
                 live_reconciliation_result = await live_reconciliation.check_once()
+                live_copy_result = await live_copy.check_once()
                 return {
                     "database_backend": database_backend(),
                     "persistent_database": persistent_database(),
@@ -207,6 +211,7 @@ async def main() -> None:
                     "research_engine": research_result,
                     "microstructure_observer": microstructure_result,
                     "live_reconciliation": live_reconciliation_result,
+                    "live_copy_dispatcher": live_copy_result,
                 }
 
             webhook_server = WebhookServer(

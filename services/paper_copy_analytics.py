@@ -92,6 +92,13 @@ class PaperCopyAnalyticsService:
             counterfactuals[code] = {
                 "sample": len(values), "avoided_losses": sum(value < 0 for value in values),
                 "missed_wins": sum(value > 0 for value in values),
+                "classifications": {
+                    "AVOIDED_LOSER": sum(value < -.1 for value in values),
+                    "MISSED_WINNER": sum(value > .1 for value in values),
+                    "NEUTRAL_REJECTION": sum(-.1 <= value <= .1 for value in values),
+                    "INSUFFICIENT_PATH_DATA": sum(item.get("shadow_closed_at") is None
+                                                  for item in selected),
+                },
                 "net_shadow_r": round(sum(values), 4),
                 "average_shadow_r": round(sum(values) / len(values), 4) if values else 0.0,
                 "average_future_mfe_pct": round(sum(mfe) / len(mfe), 4) if mfe else None,
@@ -104,8 +111,15 @@ class PaperCopyAnalyticsService:
                 "by_liquidity": _groups(selected, "liquidity"),
                 "by_volatility": _groups(selected, "volatility"),
                 "policy_change_authority": False,
+                "adaptive_slippage_research": {
+                    "dimensions": ["symbol", "depth", "spread", "volatility",
+                                   "market_quality", "order_size"],
+                    "sample": len(selected),
+                    "status": "SUFFICIENT" if len(selected) >= 50 else "INSUFFICIENT",
+                    "production_threshold_changed": False,
+                },
             }
-        return {"version": "paper-copy-analytics-v2", "days": safe_days,
+        return {"version": "paper-copy-analytics-v3", "days": safe_days,
                 "resolved": len(normalized),
                 "executed": sum(item["outcome_kind"] == "EXECUTED" for item in normalized),
                 "counterfactual": sum(item["outcome_kind"] == "REJECTED_COUNTERFACTUAL" for item in normalized),

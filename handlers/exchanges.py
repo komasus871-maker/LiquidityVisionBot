@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
 import json
 import logging
 from decimal import Decimal
@@ -31,8 +33,14 @@ from services.bingx_certification import BingXCertificationService, live_certifi
 from services.execution_portfolio import ExecutionPortfolioEngine
 from services.bingx_sync import BingXAccountSyncService, BingXSyncReport
 from services.public_errors import public_error_message
-from services.live_safety import LiveRiskRepository
+from services.live_safety import LiveKillSwitchRepository, LiveRiskRepository
 from services.live_reconciliation import LiveReconciliationService
+from services.live_copy import (
+    LiveCopySettingsRepository, LiveDailyPnlService, LiveEmergencyCloseService,
+    LiveExecutionQueueRepository, LiveRecoveryService,
+)
+from services.localization import LocalizationService
+from services.intelligence_alerts import IntelligenceAlertService
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -49,6 +57,11 @@ execution_manager = DemoExecutionManager(
     registry, timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25"))
 )
 live_accounts = LiveAccountRepository()
+i18n = LocalizationService()
+
+
+def _locale(message: Message) -> str:
+    return i18n.language(message.from_user.id if message.from_user else None)
 
 
 _LIVE_RISK_FIELDS = frozenset({
@@ -274,35 +287,252 @@ async def live_risk(message: Message) -> None:
         parse_mode="HTML")
 
 
+@router.message(Command("live_copy_settings"))
+async def live_copy_settings(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key, **values: i18n.t(key, language=language, **values)
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    repository = LiveCopySettingsRepository()
+    if args and args[0].lower() == "set":
+        if getattr(message.chat, "type", "private") != "private":
+            await message.answer("⛔ " + t("live.private_only"))
+            return
+        pairs = {}
+        for item in args[1:]:
+            key, separator, value = item.partition("=")
+            if not separator or key in pairs:
+                await message.answer("⛔ Invalid LIVE copy setting.")
+                return
+            pairs[key.lower()] = value
+        required = {"enabled", "symbols", "strategies", "timeframes", "directions",
+                    "min_quality", "sizing", "value", "max_exposure", "leverage"}
+        if required - pairs.keys():
+            await message.answer(
+                "Usage: <code>/live_copy_settings bingx set enabled=off symbols=BTCUSDT "
+                "strategies=BREAKOUT timeframes=1h directions=BUY min_quality=70 "
+                "sizing=FIXED_NOTIONAL value=25 max_exposure=100 leverage=2</code>", parse_mode="HTML")
+            return
+        try:
+            settings = repository.configure(
+                telegram_id=message.from_user.id, account_id=account.id,
+                enabled=pairs["enabled"].lower() in {"on", "true", "1", "enabled"},
+                symbols=pairs["symbols"].split(","), strategies=pairs["strategies"].split(","),
+                timeframes=pairs["timeframes"].split(","), directions=pairs["directions"].split(","),
+                minimum_quality=Decimal(pairs["min_quality"]), sizing_mode=pairs["sizing"],
+                sizing_value=Decimal(pairs["value"]), max_exposure=Decimal(pairs["max_exposure"]),
+                max_leverage=int(pairs["leverage"]))
+        except (ValueError, PermissionError, ArithmeticError) as exc:
+            await message.answer(f"⛔ Settings unchanged: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+            return
+    else:
+        settings = repository.ensure(
+            telegram_id=message.from_user.id, account_id=account.id, exchange=exchange.value)
+    await message.answer(
+        f"⚙️ <b>{t('live.copy.title', exchange=i18n.market_token(exchange.value, language=language))}</b>\n\n"
+        f"{t('live.copy.enabled')}: <b>{i18n.market_token('YES' if settings.get('enabled') else 'NO', language=language)}</b>\n"
+        f"{t('live.copy.symbols')}: <code>{i18n.market_token(','.join(settings.get('symbols') or []) or 'unset', language=language)}</code>\n"
+        f"{t('live.copy.filters')}: <code>{i18n.market_token(','.join(settings.get('strategies') or []) or 'any', language=language)} / "
+        f"{escape(','.join(settings.get('timeframes') or []) or 'any')} / {escape(','.join(settings.get('directions') or []) or 'any')}</code>\n"
+        f"{t('live.copy.minimum_quality')}: <code>{i18n.market_token(settings.get('minimum_quality'), language=language)}</code>\n"
+        f"{t('live.copy.sizing')}: <code>{i18n.market_token(str(settings.get('sizing_mode')) + ' ' + str(settings.get('sizing_value') or 'unset'), language=language)}</code>\n"
+        f"{t('live.copy.ceilings')}: <code>{i18n.market_token(str(settings.get('max_exposure') or 'unset') + ' / ' + str(settings.get('max_leverage')) + 'x', language=language)}</code>\n\n"
+        + t("live.copy.boundary"),
+        parse_mode="HTML")
+
+
+@router.message(Command("live_daily_pnl"))
+async def live_daily_pnl(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key, **values: i18n.t(key, language=language, **values)
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    settings = LiveCopySettingsRepository().ensure(
+        telegram_id=message.from_user.id, account_id=account.id, exchange=exchange.value)
+    adapter = None
+    try:
+        adapter = _user_registry(message.from_user.id, exchange).create(exchange)
+        report = await LiveDailyPnlService().refresh(
+            adapter=adapter, telegram_id=message.from_user.id, account_id=account.id,
+            exchange=exchange.value, symbols=settings.get("symbols") or [])
+    except (ExchangeError, PermissionError) as exc:
+        await message.answer(f"⚠️ {public_error_message(exc, context='ACCOUNT')}")
+        return
+    finally:
+        if adapter is not None:
+            await adapter.close()
+    await message.answer(
+        f"📊 <b>{t('live.daily.title', bucket=i18n.market_token(report.get('bucket_utc'), language=language))}</b>\n\n"
+        f"{t('live.state')}: <code>{i18n.market_token(report.get('state'), language=language)}</code>\n"
+        f"{t('live.daily.values')}: <code>{i18n.market_token(str(report.get('realized_pnl')) + ' / ' + str(report.get('fees')) + ' / ' + str(report.get('unrealized_pnl')), language=language)}</code>\n"
+        f"{t('live.daily.loss_basis')}: <code>{i18n.market_token(report.get('total_loss_basis'), language=language)}</code>\n"
+        f"{t('live.source')}: <code>{i18n.market_token(report.get('source_identity'), language=language)}</code>\n"
+        f"{t('live.observed')}: <code>{i18n.market_token(report.get('observed_at'), language=language)}</code>", parse_mode="HTML")
+
+
+@router.message(Command("live_positions"))
+async def live_positions(message: Message) -> None:
+    await exchange_positions(message)
+
+
+@router.message(Command("live_orders"))
+async def live_orders(message: Message) -> None:
+    await exchange_orders(message)
+
+
+@router.message(Command("live_performance", "live_execution", "live_history"))
+async def live_performance(message: Message) -> None:
+    telegram_id = message.from_user.id
+    language = _locale(message)
+    t = lambda key: i18n.t(key, language=language)
+    queue = LiveExecutionQueueRepository().recent(telegram_id, limit=20)
+    with connect() as conn:
+        executions = dict(conn.execute("""SELECT COUNT(*) total,
+            SUM(CASE WHEN state='FILLED' THEN 1 ELSE 0 END) filled,
+            SUM(CASE WHEN state IN ('FAILED','REJECTED') THEN 1 ELSE 0 END) rejected,
+            COALESCE(SUM(commission),0) fees FROM live_executions WHERE telegram_id=?""",
+            (telegram_id,)).fetchone())
+        pnl = conn.execute("""SELECT realized_pnl,fees FROM live_daily_pnl_snapshots
+            WHERE telegram_id=? AND state='HEALTHY' ORDER BY observed_at DESC LIMIT 1""",
+            (telegram_id,)).fetchone()
+    states = {}
+    for item in queue:
+        states[item["state"]] = states.get(item["state"], 0) + 1
+    await message.answer(
+        f"📈 <b>{t('live.performance.title')}</b>\n\n"
+        f"{t('live.performance.executions')}: <code>{i18n.market_token(str(executions.get('total') or 0) + ' / ' + str(executions.get('filled') or 0) + ' / ' + str(executions.get('rejected') or 0), language=language)}</code>\n"
+        f"{t('live.performance.fees')}: <code>{i18n.market_token(executions.get('fees') or 0, language=language)}</code>\n"
+        f"{t('live.performance.authoritative')}: <code>{i18n.market_token(str(pnl['realized_pnl'] if pnl else 'unavailable') + ' / ' + str(pnl['fees'] if pnl else 'unavailable'), language=language)}</code>\n"
+        f"{t('live.performance.queue')}: <code>{i18n.market_token(json.dumps(states, sort_keys=True), language=language)}</code>\n"
+        + t("live.performance.boundary"), parse_mode="HTML")
+
+
+@router.message(Command("live_emergency_close"))
+async def live_emergency_close(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key, **values: i18n.t(key, language=language, **values)
+    if getattr(message.chat, "type", "private") != "private":
+        await message.answer("⛔ " + t("live.private_only"))
+        return
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    adapter = None
+    try:
+        adapter = _user_registry(message.from_user.id, exchange).create(exchange)
+        preview = await LiveEmergencyCloseService().begin(
+            adapter=adapter, telegram_id=message.from_user.id,
+            account_id=account.id, exchange=exchange.value)
+    except (ExchangeError, PermissionError) as exc:
+        await message.answer(f"⛔ Emergency-close preview unavailable: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    finally:
+        if adapter is not None:
+            await adapter.close()
+    rows = "\n".join(f"• <code>{escape(item['symbol'])} {escape(item['side'])} {escape(item['quantity'])}</code>"
+                     for item in preview["positions"])
+    alert = IntelligenceAlertService().evaluate(
+        message.from_user.id, symbol=exchange.value.upper(), timeframe="account",
+        alert_type="EMERGENCY_CLOSE_INITIATED",
+        state_identity=str(preview["confirmation_key"]), severity="CRITICAL",
+        details={"account_id": account.id, "position_count": len(preview["positions"])})
+    await message.answer(
+        f"🛑 <b>{t('live.emergency.preview', exchange=i18n.market_token(exchange.value, language=language))}</b>\n\n"
+        f"{t('live.emergency.fingerprint')}: <code>{i18n.market_token(preview['account_fingerprint'], language=language)}</code>\n"
+        f"{t('live.emergency.exposure')}: <code>{i18n.market_token(preview['estimated_exposure'], language=language)}</code>\n{rows}\n\n"
+        f"{t('live.emergency.warning')}\n"
+        f"<code>/live_emergency_confirm {escape(preview['token'])}</code>", parse_mode="HTML")
+    if alert["status"] == "ELIGIBLE":
+        IntelligenceAlertService.mark_delivered(alert["alert_key"])
+
+
+@router.message(Command("live_emergency_confirm"))
+async def live_emergency_confirm(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key: i18n.t(key, language=language)
+    if getattr(message.chat, "type", "private") != "private":
+        await message.answer("⛔ " + t("live.private_only"))
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Usage: <code>/live_emergency_confirm TOKEN</code>", parse_mode="HTML")
+        return
+    token_digest = hashlib.sha256(parts[1].strip().encode()).hexdigest()
+    with connect() as conn:
+        pending = conn.execute("""SELECT exchange,token_hash FROM live_emergency_confirmations
+            WHERE telegram_id=? AND state='PENDING' ORDER BY id DESC LIMIT 20""",
+            (message.from_user.id,)).fetchall()
+    row = next((item for item in pending
+                if hmac.compare_digest(str(item["token_hash"]), token_digest)), None)
+    if not row:
+        await message.answer("⛔ " + t("live.emergency.no_pending"))
+        return
+    exchange = ExchangeName(str(row["exchange"]))
+    adapter = None
+    try:
+        adapter = _user_registry(message.from_user.id, exchange).create(exchange)
+        result = await LiveEmergencyCloseService().confirm(
+            adapter=adapter, telegram_id=message.from_user.id, token=parts[1])
+    except (ExchangeError, PermissionError, ValueError) as exc:
+        failed = IntelligenceAlertService().evaluate(
+            message.from_user.id, symbol=exchange.value.upper(), timeframe="account",
+            alert_type="EMERGENCY_CLOSE_FAILURE", state_identity=type(exc).__name__,
+            severity="CRITICAL", details={"code": str(exc)[:80]})
+        await message.answer(f"⛔ Emergency close failed closed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        if failed["status"] == "ELIGIBLE":
+            IntelligenceAlertService.mark_delivered(failed["alert_key"])
+        return
+    finally:
+        if adapter is not None:
+            await adapter.close()
+    complete = IntelligenceAlertService().evaluate(
+        message.from_user.id, symbol=exchange.value.upper(), timeframe="account",
+        alert_type=("EMERGENCY_CLOSE_COMPLETE" if result["state"] == "COMPLETE"
+                    else "EMERGENCY_CLOSE_FAILURE"),
+        state_identity=str(result["state"]),
+        severity="INFO" if result["state"] == "COMPLETE" else "CRITICAL",
+        details={"state": result["state"], "remaining": result["remaining_positions"]})
+    await message.answer(
+        f"🛑 <b>{t('live.emergency.result')}</b>\n\n{t('live.state')}: <code>{i18n.market_token(result['state'], language=language)}</code>\n"
+        f"{t('live.emergency.submissions')}: <code>{len(result['submissions'])}</code> · {t('live.emergency.remaining')}: "
+        f"<code>{result['remaining_positions']}</code>\n{t('live.emergency.truth')}",
+        parse_mode="HTML")
+    if complete["status"] == "ELIGIBLE":
+        IntelligenceAlertService.mark_delivered(complete["alert_key"])
+
+
 @router.message(Command("live_enable"))
 async def live_enable(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key, **values: i18n.t(key, language=language, **values)
     if getattr(message.chat, "type", "private") != "private":
-        await message.answer("⛔ LIVE enablement is available only in a private chat.")
+        await message.answer("⛔ " + t("live.private_only"))
         return
     exchange, args = _parse_exchange((message.text or "").split()[1:])
     account = live_accounts.ensure(message.from_user.id, exchange.value)
     if not args:
         risk = LiveRiskRepository().get(account.id) or {}
         await message.answer(
-            f"⚠️ <b>Explicit LIVE enablement · {escape(exchange.value)}</b>\n\n"
+            f"⚠️ <b>{t('live.enable.title', exchange=i18n.market_token(exchange.value, language=language))}</b>\n\n"
             f"Connection: <code>#{account.id}</code> · LIVE <b>{'ON' if account.live_enabled else 'OFF'}</b>\n"
             f"Risk: <code>{escape(str(risk.get('status') or 'BLOCKED'))}</code> · "
             f"certification <code>{escape(account.certification_status or 'none')}</code>\n"
             f"Only after every server-side gate passes, confirm exactly:\n"
             f"<code>/live_enable {escape(exchange.value)} ENABLE_LIVE_{account.id}</code>\n\n"
-            "This is separate from connecting credentials, Premium, PAPER copy, and certification.",
+            + t("live.risk_warning") + "\n" + t("live.enable.boundary"),
             parse_mode="HTML")
         return
     try:
         enabled = live_accounts.enable_live(message.from_user.id, exchange.value, args[0])
     except PermissionError as exc:
-        await message.answer(f"⛔ LIVE remains OFF: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer("⛔ " + t("live.enable.off", reason=i18n.market_token(str(exc), language=language)), parse_mode="HTML")
         return
-    await message.answer(f"⚠️ LIVE is now <b>ON</b> for connection <code>#{enabled.id}</code>.", parse_mode="HTML")
+    await message.answer("⚠️ " + t("live.enable.on", account=i18n.market_token(f"#{enabled.id}", language=language)), parse_mode="HTML")
 
 
 @router.message(Command("live_reconciliation"))
 async def live_reconciliation(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key, **values: i18n.t(key, language=language, **values)
     exchange, _ = _parse_exchange((message.text or "").split()[1:])
     account = live_accounts.ensure(message.from_user.id, exchange.value)
     adapter = None
@@ -319,10 +549,11 @@ async def live_reconciliation(message: Message) -> None:
             await adapter.close()
     kinds = ", ".join(item["type"] for item in report["mismatches"]) or "none"
     await message.answer(
-        f"🔎 <b>LIVE reconciliation · {escape(exchange.value)}</b>\n\n"
-        f"Status: <b>{escape(report['status'])}</b>\nMismatches: <code>{escape(kinds)}</code>\n"
-        f"New entries blocked: <b>{'YES' if report['new_entries_blocked'] else 'NO'}</b>\n"
-        "Exchange state is authoritative; economic mismatches are never silently repaired.",
+        f"🔎 <b>{t('live.reconciliation.title', exchange=i18n.market_token(exchange.value, language=language))}</b>\n\n"
+        f"{t('live.state')}: <b>{i18n.market_token(report['status'], language=language)}</b>\n"
+        f"{t('live.reconciliation.mismatches')}: <code>{i18n.market_token(kinds, language=language)}</code>\n"
+        f"{t('live.reconciliation.blocked')}: <b>{i18n.market_token('YES' if report['new_entries_blocked'] else 'NO', language=language)}</b>\n"
+        + t("live.reconciliation.truth"),
         parse_mode="HTML")
 
 
@@ -378,7 +609,10 @@ async def recovery_status(message: Message) -> None:
 
 
 @router.message(Command("live_readiness"))
+@router.message(Command("live_preflight"))
 async def live_readiness(message: Message) -> None:
+    language = _locale(message)
+    t = lambda key, **values: i18n.t(key, language=language, **values)
     exchange, _ = _parse_exchange((message.text or "").split()[1:])
     account = live_accounts.ensure(message.from_user.id, exchange.value)
     metadata = live_accounts.readiness_metadata(account.id)
@@ -400,27 +634,54 @@ async def live_readiness(message: Message) -> None:
     sync_fresh = bool(synced_at and (datetime.now(timezone.utc) - synced_at).total_seconds()
                       <= int(os.getenv("BINGX_SYNC_MAX_AGE_SECONDS", "900")))
     portfolio = ExecutionPortfolioEngine().snapshot(message.from_user.id)
-    with connect() as conn:
-        profile = conn.execute("SELECT daily_loss_pct FROM copy_profiles WHERE telegram_id=?",
-                               (message.from_user.id,)).fetchone()
-    daily_loss_guard = bool(profile and float(profile["daily_loss_pct"] or 0) > 0)
+    external_kill_blockers = LiveKillSwitchRepository().blockers(
+        exchange=exchange.value, telegram_id=message.from_user.id, account_id=account.id)
+    settings = LiveCopySettingsRepository().ensure(
+        telegram_id=message.from_user.id, account_id=account.id, exchange=exchange.value)
+    daily_loss_guard = False
+    recovery_ready = False
+    balances_available = False
+    if credentials and settings.get("symbols"):
+        private_adapter = None
+        try:
+            private_adapter = _user_registry(message.from_user.id, exchange).create(exchange)
+            balances_available = bool(await private_adapter.balances())
+            recovery = await LiveRecoveryService().recover(
+                adapter=private_adapter, telegram_id=message.from_user.id,
+                account_id=account.id, exchange=exchange.value)
+            recovery_ready = recovery.get("state") == "READY"
+            pnl = await LiveDailyPnlService().refresh(
+                adapter=private_adapter, telegram_id=message.from_user.id,
+                account_id=account.id, exchange=exchange.value,
+                symbols=settings.get("symbols") or [])
+            daily_loss_guard = pnl.get("state") == "HEALTHY" and bool(pnl.get("source_complete"))
+        except (ExchangeError, PermissionError, ValueError):
+            daily_loss_guard = False
+        finally:
+            if private_adapter is not None:
+                await private_adapter.close()
     readiness = audit_readiness(
         telegram_id=message.from_user.id, account_id=account.id, exchange=exchange.value,
         mode=ExecutionMode.LIVE, context=ReadinessContext(
         environment=os.getenv("ENVIRONMENT", "local"),
         feature_flag=os.getenv("LIVE_EXECUTION_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
-        account_enabled=account.live_enabled, confirmed=bool(account.confirmed_at),
+        account_enabled=account.lifecycle_state in {"PREFLIGHT_READY", "LIVE_CERTIFIED", "LIVE_ENABLED"},
+        confirmed=bool(account.confirmed_at),
         credentials_present=credentials, trading_permission=bool(permissions.get("trading")),
-        withdrawal_enabled=permissions.get("withdrawal"), account_synced=sync_fresh,
+        withdrawal_enabled=permissions.get("withdrawal"), balances_available=balances_available,
+        risk_profile_complete=(LiveRiskRepository().get(account.id) or {}).get("status") == "ACTIVE",
+        account_synced=sync_fresh,
         server_time_synced=(account.server_time_drift_ms is not None and
                             abs(account.server_time_drift_ms) <= int(os.getenv("BINGX_MAX_SERVER_DRIFT_MS", "1500"))),
         symbol_rules_valid=bool(metadata.get("valid_symbol_rules")),
-        portfolio_resolved=portfolio.resolved, recovery_required=len(unresolved),
-        reconciliation_safe=portfolio.resolved and not unresolved,
+        portfolio_resolved=portfolio.resolved, recovery_required=len(unresolved) + int(not recovery_ready),
+        reconciliation_safe=portfolio.resolved and not unresolved and recovery_ready,
         daily_loss_protection=daily_loss_guard,
         max_order_notional=account.max_order_notional,
         max_account_exposure=account.max_account_exposure, max_leverage=account.max_leverage,
-        kill_switch_available=True, kill_switch_active=account.kill_switch,
+        # The connection switch is intentionally armed until enable_live commits.
+        # Preflight evaluates the independent global/exchange/user/connection gates.
+        kill_switch_available=True, kill_switch_active=bool(external_kill_blockers),
         recent_certification=live_certification_valid(
             account.id, environment=os.getenv("BINGX_LIVE_CERTIFICATION_ENVIRONMENT", "prod-vst")
         ) if exchange is ExchangeName.BINGX else False,
@@ -431,18 +692,18 @@ async def live_readiness(message: Message) -> None:
     ))
     reasons = ", ".join(readiness.reason_codes[:8]) or "READY"
     await message.answer(
-        f"🛡 <b>Live readiness · {escape(exchange.value)}</b>\n\n"
+        f"🛡 <b>{t('live.preflight.title', exchange=i18n.market_token(exchange.value, language=language))}</b>\n\n"
         f"Mode: <code>{account.execution_mode.value}</code>\n"
-        f"Credentials present: <b>{'YES' if credentials else 'NO'}</b>\n"
-        f"Two-step confirmed: <b>{'YES' if account.confirmed_at else 'NO'}</b>\n"
-        f"Account enabled: <b>{'YES' if account.live_enabled else 'NO'}</b>\n"
-        f"Kill switch: <b>{'ACTIVE' if account.kill_switch else 'RELEASED'}</b>\n"
-        f"Unresolved/retry executions: <b>{len(unresolved)}</b>\n"
-        f"Max order / exposure / leverage: <code>{account.max_order_notional or 'unset'} / "
+        f"{t('live.preflight.credentials')}: <b>{i18n.market_token('YES' if credentials else 'NO', language=language)}</b>\n"
+        f"{t('live.preflight.confirmed')}: <b>{i18n.market_token('YES' if account.confirmed_at else 'NO', language=language)}</b>\n"
+        f"{t('live.preflight.enabled')}: <b>{i18n.market_token('YES' if account.live_enabled else 'NO', language=language)}</b>\n"
+        f"{t('live.preflight.kill')}: <b>{i18n.market_token('ARMED' if account.kill_switch else 'RELEASED', language=language)}</b>\n"
+        f"{t('live.preflight.unresolved')}: <b>{len(unresolved)}</b>\n"
+        f"{t('live.preflight.limits')}: <code>{account.max_order_notional or 'unset'} / "
         f"{account.max_account_exposure or 'unset'} / {account.max_leverage or 'unset'}</code>\n\n"
-        f"Readiness: <b>{'READY' if readiness.ready else 'BLOCKED'}</b>\n"
-        f"Reasons: <code>{escape(reasons)}</code>\n\n"
-        "LIVE is fail-closed until every server-side readiness gate passes.", parse_mode="HTML")
+        f"{t('live.preflight.readiness')}: <b>{i18n.market_token('READY' if readiness.ready else 'BLOCKED', language=language)}</b>\n"
+        f"{t('live.preflight.reasons')}: <code>{i18n.market_token(reasons, language=language)}</code>\n\n"
+        + t("live.preflight.boundary"), parse_mode="HTML")
 
 
 def _credential_store() -> UserExchangeCredentialStore:

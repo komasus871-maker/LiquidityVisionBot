@@ -66,9 +66,12 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             item["details"] = {}
         item.pop("details_json", None)
         configured_enabled = not (
-            item.get("worker_name") == "microstructure_observer" and
-            os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower()
-            not in {"1", "true", "yes", "on"}
+            (item.get("worker_name") == "microstructure_observer" and
+             os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower()
+             not in {"1", "true", "yes", "on"})
+            or (item.get("worker_name") == "live_copy_dispatcher" and
+                os.getenv("LIVE_DISPATCHER_ENABLED", "false").strip().lower()
+                not in {"1", "true", "yes", "on"})
         )
         item["enabled"] = configured_enabled
         item["configuration_reason"] = (
@@ -93,6 +96,18 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "stale": bool(micro_enabled), "running": False, "age_seconds": None,
             "cycle_seconds": None, "processed_count": 0, "error_count": 0,
             "last_error": None, "details": {},
+        })
+    if not any(item.get("worker_name") == "live_copy_dispatcher" for item in workers):
+        dispatcher_enabled = os.getenv("LIVE_DISPATCHER_ENABLED", "false").strip().lower() in {
+            "1", "true", "yes", "on"}
+        workers.append({
+            "worker_name": "live_copy_dispatcher", "enabled": dispatcher_enabled,
+            "configuration_reason": ("ENABLED_BY_CONFIGURATION" if dispatcher_enabled else
+                                     "DISABLED_BY_DEFAULT"),
+            "health_status": "NOT_STARTED" if dispatcher_enabled else "DISABLED",
+            "stale": bool(dispatcher_enabled), "running": False, "age_seconds": None,
+            "cycle_seconds": None, "processed_count": 0, "error_count": 0,
+            "last_error": None, "details": {"economic_calls_made": False},
         })
 
     micro_health = MarketIntelligenceRepository().worker_health() or {}
@@ -149,9 +164,17 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "exchange_connections": _scalar(conn, "SELECT COUNT(*) FROM user_exchange_credentials WHERE status='connected'"),
             "live_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts"),
             "live_enabled_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts WHERE live_enabled=1"),
+            "live_read_only_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts WHERE lifecycle_state='READ_ONLY_CONNECTED'"),
+            "live_certified_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts WHERE lifecycle_state='LIVE_CERTIFIED'"),
+            "live_suspended_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts WHERE lifecycle_state='SUSPENDED'"),
             "live_risk_profiles_active": _scalar(conn, "SELECT COUNT(*) FROM live_risk_profiles WHERE status='ACTIVE'"),
             "live_reconciliation_unresolved": _scalar(conn, "SELECT COUNT(*) FROM live_reconciliation_events WHERE resolved_at IS NULL"),
             "live_order_intents": _scalar(conn, "SELECT COUNT(*) FROM live_order_intents"),
+            "live_queue_planned": _scalar(conn, "SELECT COUNT(*) FROM live_execution_queue WHERE state IN ('PLANNED','RETRY_WAIT')"),
+            "live_queue_claimed": _scalar(conn, "SELECT COUNT(*) FROM live_execution_queue WHERE state IN ('CLAIMED','SUBMITTING')"),
+            "live_queue_recovery": _scalar(conn, "SELECT COUNT(*) FROM live_execution_queue WHERE state IN ('UNKNOWN','RECOVERY_REQUIRED')"),
+            "live_daily_pnl_failures": _scalar(conn, "SELECT COUNT(*) FROM live_daily_pnl_snapshots WHERE state='FAILED'"),
+            "live_active_kill_switches": _scalar(conn, "SELECT COUNT(*) FROM live_kill_switches WHERE active=1"),
             "bingx_certification_passed": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_PASSED'"),
             "bingx_certification_running": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_RUNNING'"),
             "ai_decisions": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions"),
@@ -232,6 +255,10 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
                 "ENABLED_BY_CONFIGURATION" if os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower()
                 in {"1", "true", "yes", "on"} else "DISABLED_BY_CONFIGURATION"),
             "required_render_variable": "MICROSTRUCTURE_COLLECTION_ENABLED=true",
+            "source_diagnostics": {
+                source.lower(): MarketIntelligenceRepository().pipeline_diagnostics("BTCUSDT", source)
+                for source in ("DEPTH", "FUNDING", "OPEN_INTEREST")
+            },
         },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "live": {
@@ -239,6 +266,12 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "bingx_exchange_enabled": os.getenv("LIVE_EXCHANGE_BINGX_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
             "production_adapter_allowed": os.getenv("BINGX_PRODUCTION_ADAPTER_ALLOWED", "false").strip().lower() in {"1", "true", "yes", "on"},
             "default_state": "DISABLED_BY_DEFAULT",
+            "dispatcher_enabled": os.getenv("LIVE_DISPATCHER_ENABLED", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
+            "daily_pnl_timezone": "UTC",
+            "queue": {"planned": counts["live_queue_planned"],
+                      "claimed": counts["live_queue_claimed"],
+                      "recovery_required": counts["live_queue_recovery"]},
             "ai_execution_authority": False, "research_execution_authority": False,
         },
         "environment": os.getenv("RENDER_SERVICE_NAME") or os.getenv("ENVIRONMENT", "local"),

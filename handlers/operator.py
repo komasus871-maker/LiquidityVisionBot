@@ -210,6 +210,9 @@ async def admin_dashboard(message: Message) -> None:
                          f"Plans: <code>{escape(json.dumps(usage['plans'], sort_keys=True))}</code>\n"
                          f"AI decisions / invalid: <b>{counts['ai_decisions']} / {counts['ai_invalid_responses']}</b>\n"
                          f"Copy queue retry/dead: <b>{counts['execution_retry_wait']} / {counts['execution_dead_letter']}</b>\n"
+                         f"LIVE accounts read-only/certified/enabled/suspended: <b>{counts['live_read_only_accounts']} / {counts['live_certified_accounts']} / {counts['live_enabled_accounts']} / {counts['live_suspended_accounts']}</b>\n"
+                         f"LIVE queue planned/claimed/recovery: <b>{counts['live_queue_planned']} / {counts['live_queue_claimed']} / {counts['live_queue_recovery']}</b>\n"
+                         f"LIVE reconciliation/PnL failures/kill switches: <b>{counts['live_reconciliation_unresolved']} / {counts['live_daily_pnl_failures']} / {counts['live_active_kill_switches']}</b>\n"
                          f"Alerts today: <code>{escape(json.dumps(usage['alerts'], default=str))}</code>\n"
                          f"Workers stale: <code>{escape(', '.join(health['stale_workers']) or 'none')}</code>\n\n"
                          "Use /admin_usage, /admin_ai_usage, /admin_users, or /admin_plan_status USER_ID.")

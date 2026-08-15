@@ -34,9 +34,21 @@ ALERT_CATEGORY = {
     "STOP": "TRADE_LIFECYCLE", "INVALIDATION": "TRADE_LIFECYCLE",
     "PROVIDER_DEGRADATION": "SYSTEM", "LIVE_RISK_EVENT": "LIVE_SAFETY",
     "RECONCILIATION_MISMATCH": "LIVE_SAFETY",
+    "ACCOUNT_CONNECTED": "LIVE_SAFETY", "CERTIFICATION_EXPIRING": "LIVE_SAFETY",
+    "LIVE_ENABLED": "LIVE_SAFETY", "LIVE_DISABLED": "LIVE_SAFETY",
+    "ORDER_SUBMITTED": "LIVE_SAFETY", "PARTIAL_FILL": "LIVE_SAFETY",
+    "FULL_FILL": "LIVE_SAFETY", "ORDER_REJECTED": "LIVE_SAFETY",
+    "KILL_SWITCH": "LIVE_SAFETY", "DAILY_LOSS_APPROACHING": "LIVE_SAFETY",
+    "DAILY_LOSS_LIMIT_REACHED": "LIVE_SAFETY",
+    "EMERGENCY_CLOSE_INITIATED": "LIVE_SAFETY",
+    "EMERGENCY_CLOSE_COMPLETE": "LIVE_SAFETY",
+    "EMERGENCY_CLOSE_FAILURE": "LIVE_SAFETY",
 }
 
-CRITICAL_LIVE_TYPES = frozenset({"LIVE_RISK_EVENT", "RECONCILIATION_MISMATCH"})
+CRITICAL_LIVE_TYPES = frozenset({
+    "LIVE_RISK_EVENT", "RECONCILIATION_MISMATCH", "LIVE_DISABLED", "ORDER_REJECTED",
+    "KILL_SWITCH", "DAILY_LOSS_LIMIT_REACHED", "EMERGENCY_CLOSE_FAILURE",
+})
 IDENTITY_SENSITIVE_TYPES = frozenset({
     "TRADE_ACTIVATION", "TAKE_PROFIT", "STOP", "INVALIDATION", *CRITICAL_LIVE_TYPES,
 })
@@ -102,7 +114,7 @@ class IntelligenceAlertService:
         return {"alert_key": alert_key, "status": status, "suppressed_reason": reason,
                 "capability": capability, "category": required_category or "LEGACY",
                 "critical_live_override": critical_live,
-                "version": "alert-engine-v3", "economic_authority": False}
+                "version": "alert-engine-v4", "economic_authority": False}
 
     @staticmethod
     def mark_delivered(alert_key: str, delivered_at: datetime | None = None) -> bool:

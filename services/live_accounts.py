@@ -116,6 +116,11 @@ class LiveAccountRepository:
                                (int(telegram_id), exchange)).fetchone()
         return self._model(row) if row else None
 
+    def get_by_id(self, account_id: int) -> LiveAccountConfig | None:
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM live_exchange_accounts WHERE id=?", (int(account_id),)).fetchone()
+        return self._model(row) if row else None
+
     def set_dry_run(self, telegram_id: int, exchange: str, enabled: bool) -> LiveAccountConfig:
         account = self.ensure(telegram_id, exchange)
         mode = ExecutionMode.LIVE_DRY_RUN.value if enabled else ExecutionMode.PAPER.value
@@ -229,6 +234,19 @@ class LiveAccountRepository:
             raise PermissionError("LIVE_ACCOUNT_SYNC_REQUIRED")
         if self.unresolved(telegram_id, exchange):
             raise PermissionError("LIVE_RECONCILIATION_REQUIRED")
+        from services.live_copy import LiveDailyPnlService, LiveRecoveryService
+        LiveDailyPnlService().require_current(account.id)
+        LiveRecoveryService.require_ready(account.id)
+        with connect() as conn:
+            preflight = conn.execute("""SELECT ready,created_at FROM live_readiness_audits
+                WHERE account_id=? ORDER BY id DESC LIMIT 1""", (account.id,)).fetchone()
+        if not preflight or not bool(preflight["ready"]):
+            raise PermissionError("LIVE_PREFLIGHT_REQUIRED")
+        preflight_at = datetime.fromisoformat(str(preflight["created_at"]).replace("Z", "+00:00"))
+        preflight_at = preflight_at if preflight_at.tzinfo else preflight_at.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - preflight_at).total_seconds() > int(
+                os.getenv("LIVE_PREFLIGHT_MAX_AGE_SECONDS", "900")):
+            raise PermissionError("LIVE_PREFLIGHT_STALE")
         now = datetime.now(timezone.utc).isoformat()
         with connect() as conn:
             cur = conn.execute("""UPDATE live_exchange_accounts SET live_enabled=1,

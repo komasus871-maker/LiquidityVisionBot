@@ -27,6 +27,8 @@ class ReadinessContext:
     credentials_present: bool = False
     trading_permission: bool = False
     withdrawal_enabled: bool | None = None
+    balances_available: bool = False
+    risk_profile_complete: bool = False
     account_synced: bool = False
     server_time_synced: bool = False
     symbol_rules_valid: bool = False
@@ -59,6 +61,9 @@ def evaluate_live_readiness(context: ReadinessContext) -> ReadinessResult:
         (context.confirmed, "TWO_STEP_CONFIRMATION_REQUIRED"),
         (context.credentials_present, "CREDENTIALS_MISSING"),
         (context.trading_permission, "TRADING_PERMISSION_MISSING"),
+        (context.withdrawal_enabled is False, "WITHDRAWAL_PERMISSION_UNRESOLVED_OR_ENABLED"),
+        (context.balances_available, "BALANCE_READ_FAILED"),
+        (context.risk_profile_complete, "RISK_PROFILE_INCOMPLETE"),
         (context.account_synced, "ACCOUNT_SYNC_FAILED"),
         (context.server_time_synced, "SERVER_TIME_UNSYNCED"),
         (context.symbol_rules_valid, "SYMBOL_RULES_INVALID"),

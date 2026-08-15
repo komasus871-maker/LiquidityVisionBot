@@ -174,9 +174,11 @@ class LiveRiskRepository:
                 json.dumps(sorted(set(allowed_strategies))), json.dumps(normalized_directions),
                 values["leverage_cap"], now, now))
             conn.execute("""UPDATE live_exchange_accounts SET max_order_notional=?,
-                max_account_exposure=?,max_leverage=?,updated_at=? WHERE id=? AND telegram_id=?""", (
+                max_account_exposure=?,max_leverage=?,certification_invalidated_at=?,
+                certification_invalidation_reason='RISK_POLICY_CHANGED',updated_at=?
+                WHERE id=? AND telegram_id=?""", (
                 str(values["max_order_notional"]), str(values["max_portfolio_exposure"]),
-                values["leverage_cap"], now, account_id, telegram_id))
+                values["leverage_cap"], now, now, account_id, telegram_id))
         LiveAuditRepository().record(
             event_type="RISK_PROFILE_CHANGED", outcome="ACTIVE", telegram_id=telegram_id,
             account_id=account_id, metadata={"policy_version": RISK_POLICY_VERSION,

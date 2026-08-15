@@ -154,15 +154,25 @@ async def regimes(message: Message):
 @router.message(Command("strategy_distribution"))
 async def strategy_distribution(message: Message):
     report = market_repo.strategy_distribution(message.from_user.id)
+    separation = market_repo.strategy_separation_diagnostics(message.from_user.id)
     lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: {count} ({count / max(1, report['classified']):.0%})"
              for name, count in report["distribution"]]
     margin = report["average_top_margin"]
+    pair_lines = [
+        f"<code>{escape(item['left'])}/{escape(item['right'])}</code> · n={item['n']} · "
+        f"identical {_number(None if item['identical_decision_rate'] is None else item['identical_decision_rate'] * 100, '%', 1)} · "
+        f"Jaccard {_number(item['jaccard_overlap'], '', 2)} · corr {_number(item['score_correlation'], '', 2)}"
+        for item in separation["pairs"][:8]
+    ]
     await message.answer(
         "<b>Strategy Fusion · Assignment Distribution</b>\n\n" +
         ("\n".join(lines) or "No classified decision snapshots yet.") +
         f"\n\nSnapshots: <b>{report['classified']}</b> · average lead: "
         f"<b>{'n/a' if margin is None else f'{margin:.1f}'}</b>\n"
-        "Assignments follow evidence scores; diversity is never forced. Diagnostic only.")
+        "Assignments follow evidence scores; diversity is never forced. Diagnostic only.\n\n"
+        "<b>Strategy Separation V1</b>\n" +
+        ("\n".join(pair_lines) or "Insufficient paired decision snapshots.") +
+        "\nOutcome correlation remains unavailable until distinct strategy outcomes are persisted.")
 
 
 @router.message(Command("edge_report"))
@@ -616,11 +626,18 @@ async def pump_reversals(message: Message):
 @router.message(Command("entry_research"))
 async def entry_research(message: Message):
     report = market_repo.policy_report("ENTRY", message.from_user.id)
+    calibration = market_repo.readiness_timing_cohorts(message.from_user.id)
+    cohort_lines = [
+        f"<code>{item['state']}</code> · n={item['n']} · MFE {_number(item['subsequent_mfe'], 'R')} · "
+        f"MAE {_number(item['subsequent_mae'], 'R')} · missed/avoided {item['missed_winners']}/{item['avoided_losers']}"
+        for item in calibration["cohorts"]
+    ]
     await message.answer(
         "<b>Entry Research</b>\n\n"
         f"Decision snapshots / resolved: <b>{report['decision_snapshots']} / {report['resolved_outcomes']}</b>\n"
         f"Status: <code>{report['status']}</code>\n"
         f"Policies: <code>{escape(', '.join(report['policies']))}</code>\n\n"
+        "<b>Readiness V4 timing cohorts</b>\n" + "\n".join(cohort_lines) + "\n\n"
         "Fill probability, MAE, missed winners, and avoided losses require ordered path data.", parse_mode="HTML")
 
 
@@ -639,11 +656,19 @@ async def reentry_research(message: Message):
 @router.message(Command("quality_report"))
 async def quality_report(message: Message):
     report = market_repo.quality_threshold_report(message.from_user.id)
+    calibration = market_repo.quality_calibration_cohorts(message.from_user.id)
     lines = [f"<b>{item['threshold']}</b> · n={item['trades']} · E {_number(item['expectancy_r'], 'R')} · "
              f"missed W {item['missed_winners']} · avoided L {item['avoided_losses']}"
              for item in report["threshold_curves"]]
+    calibration_lines = [
+        f"<code>{item['bucket']}</code> · n={item['n']} · WR {_number(item['win_rate_pct'], '%', 1)} · "
+        f"E {_number(item['expectancy_r'], 'R')} · PF {_number(item['profit_factor'])} · "
+        f"cost-adj {_number(item['cost_adjusted_expectancy_r'], 'R')} · {item['status']}"
+        for item in calibration["cohorts"]
+    ]
     await message.answer(
         "<b>Quality Threshold Research</b>\n\n" + "\n".join(lines) +
+        "\n\n<b>Quality calibration buckets</b>\n" + "\n".join(calibration_lines) +
         f"\n\nResolved samples: <b>{report['resolved_samples']}</b> · <code>{report['status']}</code>\n"
         "No threshold is applied automatically and no profitability claim is made.", parse_mode="HTML")
 

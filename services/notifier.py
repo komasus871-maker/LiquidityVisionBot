@@ -11,6 +11,7 @@ from services.probability_engine import ProbabilityEngine
 from services.intelligence_alerts import IntelligenceAlertService
 from utils.price import fmt_price
 from utils.presentation import action_label, status_label
+from services.localization import LocalizationService
 
 
 class Notifier:
@@ -18,6 +19,7 @@ class Notifier:
         self.bot = bot
         self.probability = ProbabilityEngine()
         self.alerts = IntelligenceAlertService()
+        self.i18n = LocalizationService()
 
     @staticmethod
     def _duration(started_at: str | None) -> str | None:
@@ -112,17 +114,8 @@ class Notifier:
             "TRIGGERED": "🔔", "ACTIVE": "🟢", "TP1": "🎯", "TP2": "🏆", "TP3": "👑",
             "STOP": "🛑", "BREAKEVEN": "🛡", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
         }
-        titles = {
-            "TRIGGERED": "Цена вошла в preferred entry zone",
-            "ACTIVE": "Сетап активирован",
-            "TP1": "TP1 достигнут",
-            "TP2": "TP2 достигнут",
-            "TP3": "TP3 достигнут — сделка завершена",
-            "STOP": "Stop Loss достигнут",
-            "BREAKEVEN": "Сделка закрыта в безубыток",
-            "INVALIDATED": "Сетап инвалидирован до активации",
-            "EXPIRED": "Сетап истёк без активации",
-        }
+        language = self.i18n.language(int(telegram_id))
+        t = lambda key, **values: self.i18n.t(key, language=language, **values)
 
         move_pct = self._progress(signal, price)
         r_value = self._r_multiple(signal, price)
@@ -136,47 +129,51 @@ class Notifier:
         lines = [
             f"{icons.get(event, '🔔')} <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))}</b>",
             "",
-            f"<b>{titles.get(event, event)}</b>",
-            f"Signal ID: <code>{signal['id']}</code>",
-            f"Price: <code>{fmt_price(price)}</code>",
-            f"Status: <b>{event}</b>",
+            f"<b>{t(f'lifecycle.{event}')}</b>",
+            f"{t('notify.signal_id')}: {self.i18n.market_token(signal['id'], language=language, html=True)}",
+            f"{t('notify.price')}: {self.i18n.market_token(fmt_price(price), language=language, html=True)}",
+            f"{t('notify.status')}: <b>{self.i18n.market_token(event, language=language)}</b>",
         ]
         if event in {"ACTIVE", "TP1", "TP2", "TP3", "STOP", "BREAKEVEN"}:
             lines.extend([
-                f"Current move: <b>{move_pct:+.2f}%</b>",
-                f"Current R: <b>{r_value:+.2f}R</b>",
+                f"{t('notify.current_move')}: <b>{self.i18n.market_token(f'{move_pct:+.2f}%', language=language)}</b>",
+                f"{t('notify.current_r')}: <b>{self.i18n.market_token(f'{r_value:+.2f}R', language=language)}</b>",
             ])
         if duration:
-            lines.append(f"Duration: <b>{duration}</b>")
+            lines.append(f"{t('notify.duration')}: <b>{self.i18n.market_token(duration, language=language)}</b>")
 
         if event == "TRIGGERED":
-            lines.append("Next: waiting for a directional reaction candle.")
+            lines.append(t("notify.next_reaction"))
         elif event == "ACTIVE":
+            targets = " / ".join(
+                fmt_price(float(signal[name])) for name in ("tp1", "tp2", "tp3")
+            )
             lines.extend([
                 "",
-                f"Entry: <code>{fmt_price(float(signal['entry']))}</code>",
-                f"Stop: <code>{fmt_price(float(signal.get('effective_stop') or signal['stop']))}</code>",
-                f"Targets: {fmt_price(float(signal['tp1']))} / {fmt_price(float(signal['tp2']))} / {fmt_price(float(signal['tp3']))}",
+                f"{t('notify.entry')}: {self.i18n.market_token(fmt_price(float(signal['entry'])), language=language, html=True)}",
+                f"{t('notify.stop')}: {self.i18n.market_token(fmt_price(float(signal.get('effective_stop') or signal['stop'])), language=language, html=True)}",
+                f"{t('notify.targets')}: {self.i18n.market_token(targets, language=language)}",
             ])
         elif event == "TP1":
-            lines.append(f"Next target: <b>{fmt_price(float(signal['tp2']))}</b>")
+            lines.append(f"{t('notify.next_target')}: <b>{self.i18n.market_token(fmt_price(float(signal['tp2'])), language=language)}</b>")
             if signal.get("break_even_at"):
-                lines.append("🛡 Stop automatically moved to Break Even.")
+                lines.append("🛡 " + t("notify.break_even_active"))
         elif event == "TP2":
-            lines.append(f"Final target: <b>{fmt_price(float(signal['tp3']))}</b>")
+            lines.append(f"{t('notify.final_target')}: <b>{self.i18n.market_token(fmt_price(float(signal['tp3'])), language=language)}</b>")
         elif event in {"TP3", "STOP", "BREAKEVEN"}:
+            realized_r = f"{float(signal.get('realized_r') or 0):+.2f}R"
             lines.extend([
                 f"MFE: <b>{float(signal.get('max_profit_pct') or 0):.2f}%</b>",
                 f"MAE: <b>{float(signal.get('max_drawdown_pct') or 0):.2f}%</b>",
-                f"Realized result: <b>{float(signal.get('realized_r') or 0):+.2f}R</b>",
+                f"{t('notify.realized')}: <b>{self.i18n.market_token(realized_r, language=language)}</b>",
             ])
 
         if int(stats.get("samples") or 0) >= 5:
             lines.extend([
                 "",
-                "📚 <b>Historical exact-setup context</b>",
-                f"Samples: {stats['samples']} · TP1 {stats['tp1_rate']}% · TP2 {stats['tp2_rate']}% · Stop {stats['stop_rate']}%",
-                f"Reliability: {html.escape(str(stats['reliability']))}",
+                f"📚 <b>{t('notify.history')}</b>",
+                f"{t('notify.samples')}: {stats['samples']} · TP1 {stats['tp1_rate']}% · TP2 {stats['tp2_rate']}% · Stop {stats['stop_rate']}%",
+                f"{t('notify.reliability')}: {html.escape(str(stats['reliability']))}",
             ])
         if extra:
             lines.extend(["", html.escape(extra)])
@@ -202,6 +199,9 @@ class Notifier:
         return max(0.0, min(100.0, confidence)), {k: max(0.0, min(100.0, v)) for k, v in groups.items()}
 
     async def progress(self, signal: dict, price: float) -> None:
+        telegram_id = signal.get("notification_chat_id") or signal.get("owner_telegram_id")
+        language = self.i18n.language(int(telegram_id)) if telegram_id else "en"
+        t = lambda key, **values: self.i18n.t(key, language=language, **values)
         entry = float(signal["entry"])
         stop = float(signal.get("effective_stop") or signal["stop"])
         side = str(signal["side"])
@@ -224,18 +224,21 @@ class Notifier:
             pass
         probability = self.probability.live_context(signal)
         if signal.get("break_even_at"):
-            risk_lines = ["🛡 Защита риска: <b>100%</b>", "Капитал под риском: <b>0R</b>", "Стоп: <b>Break Even</b>"]
+            risk_lines = [f"🛡 {t('notify.risk_protected')}: <b>100%</b>",
+                          f"{t('notify.capital_at_risk')}: <b>0R</b>",
+                          f"{t('notify.stop')}: <b>Break Even</b>"]
         else:
-            risk_lines = [f"Использованный риск {self._bar(risk_used)} {risk_used:.0f}%", f"До стопа: <b>{distance_to_sl:.0f}%</b>"]
+            risk_lines = [f"{t('notify.risk_used')} {self._bar(risk_used)} {risk_used:.0f}%",
+                          f"{t('notify.to_stop')}: <b>{distance_to_sl:.0f}%</b>"]
 
         lines = [
             f"📡 <b>{html.escape(str(signal['symbol']))} {html.escape(side)} · LIVE</b>",
             "",
-            f"Статус: <b>{html.escape(status_label(signal['status']))}</b>",
+            f"{t('notify.status')}: <b>{html.escape(str(signal['status']))}</b>",
             f"Entry / Current: <code>{fmt_price(entry)}</code> → <code>{fmt_price(price)}</code>",
             f"PnL: <b>{move_pct:+.2f}%</b> · <b>{r_value:+.2f}R</b>",
-            f"Состояние: <b>{html.escape(health)}</b>",
-            f"Действие: <b>{html.escape(action_label((json.loads(signal.get('intelligence_json') or '{}') if signal.get('intelligence_json') else {}).get('suggested_action') or 'HOLD'))}</b>",
+            f"{t('notify.state')}: <b>{html.escape(health)}</b>",
+            f"{t('notify.action')}: <b>{html.escape(str((json.loads(signal.get('intelligence_json') or '{}') if signal.get('intelligence_json') else {}).get('suggested_action') or 'HOLD'))}</b>",
             "",
             f"TP1 {self._bar(tp1)} {tp1:.0f}%",
             f"TP2 {self._bar(tp2)} {tp2:.0f}%",
@@ -248,20 +251,20 @@ class Notifier:
             f"Liquidity {self._bar(confidence_groups.get('Liquidity', 50))} {confidence_groups.get('Liquidity', 50):.0f}%",
             f"Momentum {self._bar(confidence_groups.get('Momentum', 50))} {confidence_groups.get('Momentum', 50):.0f}%",
             "",
-            "📊 <b>Историческая модель</b>",
+            f"📊 <b>{t('notify.historical_model')}</b>",
             (f"TP1 {probability['tp1_rate']:.0f}% · TP2 {probability['tp2_rate']:.0f}% · TP3 {probability['tp3_rate']:.0f}% · Stop {probability['stop_rate']:.0f}%"
              if probability.get('sufficient') else "Statistical model disabled."),
             (f"Sample: {probability['samples']} · Reliability: {html.escape(probability['reliability'])}"
              if probability.get('sufficient') else html.escape(str(probability.get('disabled_reason') or 'Insufficient completed history.'))),
             "",
-            "🤖 <b>Комментарий</b>",
-            html.escape(commentary or "The trade remains under live monitoring."),
+            f"🤖 <b>{t('notify.commentary')}</b>",
+            html.escape(commentary if commentary and language == "ru" else t("notify.monitoring")),
             "",
-            f"Duration: <b>{duration}</b>",
+            f"{t('notify.duration')}: <b>{duration}</b>",
             f"MFE / MAE: <b>{float(signal.get('max_profit_pct') or 0):+.2f}%</b> / <b>{float(signal.get('max_drawdown_pct') or 0):+.2f}%</b>",
         ]
         if signal.get("break_even_at"):
-            lines.append("🛡 Защита безубытком активна.")
+            lines.append("🛡 " + t("notify.break_even_active"))
         await self._send(signal, lines)
 
     async def smart_alert(self, signal: dict, price: float, reasons: list[str]) -> None:
@@ -269,24 +272,30 @@ class Notifier:
             return
         confidence, _ = self._confidence_components(signal)
         health = str(signal.get("trade_health") or "🟡 STABLE")
+        telegram_id = signal.get("notification_chat_id") or signal.get("owner_telegram_id")
+        language = self.i18n.language(int(telegram_id)) if telegram_id else "en"
+        t = lambda key: self.i18n.t(key, language=language)
         lines = [
-            f"🧠 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))} · ОБНОВЛЕНИЕ</b>",
-            f"Состояние: <b>{html.escape(health)}</b> · Уверенность: <b>{confidence:.0f}%</b>",
-            f"Цена: <code>{fmt_price(price)}</code>",
+            f"🧠 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))} · {t('notify.update')}</b>",
+            f"{t('notify.state')}: <b>{html.escape(health)}</b> · {t('notify.confidence')}: <b>{confidence:.0f}%</b>",
+            f"{t('notify.price')}: <code>{fmt_price(price)}</code>",
             "",
             *[f"• {html.escape(reason)}" for reason in reasons[:3]],
             "",
-            f"Полная история: <code>/trade {signal.get('id')}</code>",
+            f"{t('notify.full_history')}: <code>/trade {signal.get('id')}</code>",
         ]
         await self._send(signal, lines)
 
     async def break_even(self, signal: dict, price: float) -> None:
+        telegram_id = signal.get("notification_chat_id") or signal.get("owner_telegram_id")
+        language = self.i18n.language(int(telegram_id)) if telegram_id else "en"
+        t = lambda key: self.i18n.t(key, language=language)
         lines = [
             f"🛡 <b>{html.escape(str(signal['symbol']))} {html.escape(str(signal['side']))}</b>",
             "",
-            "<b>Position secured</b>",
-            f"Signal ID: <code>{signal['id']}</code>",
-            f"Stop moved to Break Even: <code>{fmt_price(price)}</code>",
-            "If price returns to entry, the lifecycle will close as BREAKEVEN instead of STOP.",
+            f"<b>{t('notify.position_secured')}</b>",
+            f"{t('notify.signal_id')}: {self.i18n.market_token(signal['id'], language=language, html=True)}",
+            f"{t('notify.stop_to_break_even')}: {self.i18n.market_token(fmt_price(price), language=language, html=True)}",
+            t("notify.break_even_explainer"),
         ]
         await self._send(signal, lines)

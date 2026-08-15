@@ -22,6 +22,7 @@ from services.exchanges.models import ExchangeCredentials
 from services.market_intelligence import BoundedMicrostructureBuffer
 from services.market_intelligence_repository import MarketIntelligenceRepository
 from services.intelligence_alerts import IntelligenceAlertService
+from services.localization import LocalizationService
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -109,6 +110,7 @@ class MicrostructureObserver:
                 WHERE symbol IN ({placeholders}) ORDER BY telegram_id,symbol LIMIT 500""", symbols).fetchall()
         alerts = IntelligenceAlertService(
             debounce_minutes=int(os.getenv("ALERT_DEBOUNCE_MINUTES", "30")))
+        i18n = LocalizationService()
         failed_sources = [name for name, health in source_health.items() if health.get("failed")]
         for row in rows:
             for source in failed_sources:
@@ -118,12 +120,15 @@ class MicrostructureObserver:
                     severity="WARNING", details={"source": source, "provider": "BINGX_PUBLIC_FUTURES"})
                 if decision["status"] != "ELIGIBLE":
                     continue
+                language = i18n.language(int(row["telegram_id"]))
+                symbol = i18n.market_token(str(row["symbol"]), language=language)
+                source_token = i18n.market_token(source, language=language)
                 try:
                     await self.bot.send_message(
                         int(row["telegram_id"]),
-                        f"⚠️ <b>Market-data degradation</b>\n\n"
-                        f"{escape(str(row['symbol']))} · <code>{escape(source)}</code> is temporarily degraded. "
-                        "Available independent sources remain usable; missing evidence is shown as unavailable.",
+                        f"⚠️ <b>{i18n.t('alert.provider.title', language=language)}</b>\n\n"
+                        + i18n.t("alert.provider.body", language=language,
+                                 symbol=symbol, source=source_token),
                         parse_mode="HTML")
                 except Exception:
                     alerts.mark_delivery_failed(decision["alert_key"])
@@ -160,6 +165,30 @@ class MicrostructureObserver:
         message = re.sub(r"[^A-Z0-9_]+", "_", str(exc).strip().upper()).strip("_")
         detail = explicit or (message if message and len(message) <= 48 else type(exc).__name__.upper())
         return f"BINGX_{source}_{detail}"[:80]
+
+    def _record_public_stages(self, adapter: Any, *, symbol: str, source_type: str,
+                              success: bool, error_code: str | None = None) -> None:
+        provider = {"DEPTH": "BINGX_PUBLIC_FUTURES_DEPTH",
+                    "FUNDING": "BINGX_PUBLIC_FUTURES_FUNDING",
+                    "OPEN_INTEREST": "BINGX_PUBLIC_FUTURES_OPEN_INTEREST"}[source_type]
+        diagnostic = (adapter.public_diagnostics(source_type, symbol)
+                      if hasattr(adapter, "public_diagnostics") else {})
+        stages = ("http_success", "payload_valid", "rows_valid", "normalized")
+        if success:
+            for stage in stages:
+                self.repository.record_pipeline_stage(
+                    symbol=symbol, source_type=source_type, provider=provider,
+                    stage=stage, success=bool(diagnostic.get(stage, True)),
+                    rejection_code=str(diagnostic.get("rejection_code") or f"{source_type}_{stage.upper()}_FAILED"))
+            return
+        # Preserve the most specific stage evidence supplied by the adapter. If
+        # transport failed, later validation stages were not attempted.
+        failed_stage = next((stage for stage in stages if diagnostic.get(stage) is False),
+                            "http_success")
+        self.repository.record_pipeline_stage(
+            symbol=symbol, source_type=source_type, provider=provider,
+            stage=failed_stage, success=False,
+            rejection_code=str(diagnostic.get("rejection_code") or error_code or "SOURCE_REQUEST_FAILED"))
 
     async def _derivative_requests(self, adapter: BingXSwapAdapter, symbol: str) -> dict[str, Any]:
         """Collect funding and OI independently when the adapter supports V2 methods."""
@@ -224,7 +253,7 @@ class MicrostructureObserver:
             worker_started_at=previous.get("worker_started_at") or cycle_started.isoformat(),
             heartbeat_at=cycle_started.isoformat(), lease_state="ACQUIRED", lease_owner=self.owner_id,
             active_symbols=symbols, last_cycle_started_at=cycle_started.isoformat(),
-            source_health=source_health, last_error_code=None,
+            source_health=source_health, last_error_code=previous.get("last_error_code"),
         )
         adapter: BingXSwapAdapter | None = None
         try:
@@ -237,17 +266,27 @@ class MicrostructureObserver:
                 source_health["DEPTH"]["attempted"] += 1
                 try:
                     for sample_index in range(self.samples_per_symbol):
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                            stage="request_attempted")
                         snapshot = await asyncio.wait_for(
                             adapter.market_depth(symbol, self.max_levels),
                             timeout=float(os.getenv("EXCHANGE_HTTP_TIMEOUT", "10")) + 2,
                         )
+                        self._record_public_stages(adapter, symbol=symbol, source_type="DEPTH", success=True)
                         aggregate = self.buffer.ingest(symbol, snapshot)
+                        if (aggregate or {}).get("status") != "AVAILABLE":
+                            self.repository.record_pipeline_stage(
+                                symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                                stage="aggregate_created", success=False,
+                                rejection_code="DEPTH_AGGREGATE_UNAVAILABLE")
+                            raise ValueError("DEPTH_AGGREGATE_UNAVAILABLE")
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                            stage="aggregate_created")
                         samples_collected += 1
                         if sample_index + 1 < self.samples_per_symbol:
                             await asyncio.sleep(self.sample_spacing_ms / 1000)
-                    source_health["DEPTH"]["succeeded"] += 1
-                    self.repository.record_source_health(symbol=symbol, source_type="DEPTH",
-                                                         provider="BINGX_PUBLIC_FUTURES_DEPTH", success=True)
                     symbol_success = True
                     logging.info(
                         "microstructure_stage=complete symbol=%s samples=%s status=%s",
@@ -259,9 +298,12 @@ class MicrostructureObserver:
                     errors += 1
                     samples_rejected += 1
                     source_health["DEPTH"]["failed"] += 1
+                    code = self._error_code("DEPTH", exc)
+                    self._record_public_stages(adapter, symbol=symbol, source_type="DEPTH",
+                                               success=False, error_code=code)
                     self.repository.record_source_health(
                         symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
-                        success=False, error_code=self._error_code("DEPTH", exc))
+                        success=False, error_code=code)
                     logging.warning(
                         "microstructure_stage=failed symbol=%s error_code=%s",
                         symbol,
@@ -269,6 +311,13 @@ class MicrostructureObserver:
                         exc_info=True,
                     )
 
+                for source_type, provider in (
+                    ("FUNDING", "BINGX_PUBLIC_FUTURES_FUNDING"),
+                    ("OPEN_INTEREST", "BINGX_PUBLIC_FUTURES_OPEN_INTEREST"),
+                ):
+                    self.repository.record_pipeline_stage(
+                        symbol=symbol, source_type=source_type, provider=provider,
+                        stage="request_attempted")
                 derivatives = await self._derivative_requests(adapter, symbol)
                 derivative_context: dict[str, Any] = {"status": "UNAVAILABLE", "freshness": "UNAVAILABLE",
                                                       "source": "BINGX_PUBLIC_FUTURES_MARKET"}
@@ -281,15 +330,22 @@ class MicrostructureObserver:
                         samples_rejected += 1
                         source_health[source_type]["failed"] += 1
                         code = self._error_code(source_type, value)
+                        self._record_public_stages(adapter, symbol=symbol, source_type=source_type,
+                                                   success=False, error_code=code)
                         self.repository.record_source_health(symbol=symbol, source_type=source_type,
                                                              provider=provider, success=False, error_code=code)
                         derivative_context[f"{source_type.lower()}_status"] = "UNAVAILABLE"
                         derivative_context[f"{source_type.lower()}_reason_code"] = code
                         continue
                     payload = dict(value)
+                    self._record_public_stages(adapter, symbol=symbol, source_type=source_type,
+                                               success=True)
                     if source_type == "OPEN_INTEREST" and aggregate:
                         payload["reference_price"] = aggregate.get("mid_price")
                     try:
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type=source_type, provider=provider,
+                            stage="persist_attempted")
                         inserted = self.repository.persist_source_snapshot(
                             symbol=symbol, exchange="bingx",
                             environment=getattr(adapter, "environment", "unknown"),
@@ -300,6 +356,9 @@ class MicrostructureObserver:
                         source_health[source_type]["succeeded"] += 1
                         self.repository.record_source_health(symbol=symbol, source_type=source_type,
                                                              provider=provider, success=True)
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type=source_type, provider=provider,
+                            stage="persist_success")
                         derivative_context.update(payload)
                         derivative_context[f"{source_type.lower()}_status"] = "AVAILABLE"
                         symbol_success = True
@@ -308,6 +367,9 @@ class MicrostructureObserver:
                         samples_rejected += 1
                         source_health[source_type]["failed"] += 1
                         code = self._error_code(f"{source_type}_PERSIST", exc)
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type=source_type, provider=provider,
+                            stage="persist_success", success=False, rejection_code=code)
                         self.repository.record_source_health(symbol=symbol, source_type=source_type,
                                                              provider=provider, success=False, error_code=code)
                         derivative_context[f"{source_type.lower()}_status"] = "UNAVAILABLE"
@@ -319,16 +381,29 @@ class MicrostructureObserver:
                     derivative_context["freshness"] = "FRESH" if derivative_context["status"] == "AVAILABLE" else "UNAVAILABLE"
                     aggregate["funding_open_interest"] = derivative_context
                     try:
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                            stage="persist_attempted")
                         inserted = self.repository.persist_microstructure(
                             symbol=symbol, exchange="bingx",
                             environment=getattr(adapter, "environment", "unknown"),
                             aggregate=aggregate, ttl_seconds=max(self.interval_seconds * 3, 90))
                         persisted += int(inserted)
+                        source_health["DEPTH"]["succeeded"] += 1
+                        self.repository.record_source_health(
+                            symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                            success=True)
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                            stage="persist_success")
                     except Exception as exc:
                         errors += 1
                         samples_rejected += 1
                         source_health["DEPTH"]["failed"] += 1
                         code = self._error_code("DEPTH_PERSIST", exc)
+                        self.repository.record_pipeline_stage(
+                            symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
+                            stage="persist_success", success=False, rejection_code=code)
                         self.repository.record_source_health(
                             symbol=symbol, source_type="DEPTH", provider="BINGX_PUBLIC_FUTURES_DEPTH",
                             success=False, error_code=code)

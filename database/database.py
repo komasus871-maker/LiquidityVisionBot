@@ -574,6 +574,63 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_copy_settings(
+                id {id_col}, telegram_id BIGINT NOT NULL, account_id BIGINT NOT NULL UNIQUE,
+                exchange TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
+                symbols_json TEXT NOT NULL DEFAULT '[]', strategies_json TEXT NOT NULL DEFAULT '[]',
+                timeframes_json TEXT NOT NULL DEFAULT '[]', directions_json TEXT NOT NULL DEFAULT '[]',
+                minimum_quality DOUBLE PRECISION NOT NULL DEFAULT 70,
+                sizing_mode TEXT NOT NULL DEFAULT 'FIXED_NOTIONAL', sizing_value DOUBLE PRECISION,
+                max_exposure DOUBLE PRECISION, max_leverage INTEGER NOT NULL DEFAULT 1,
+                settings_version TEXT NOT NULL DEFAULT 'live-copy-settings-v1',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_daily_pnl_snapshots(
+                id {id_col}, account_id BIGINT NOT NULL, telegram_id BIGINT NOT NULL,
+                exchange TEXT NOT NULL, bucket_utc TEXT NOT NULL,
+                realized_pnl DOUBLE PRECISION NOT NULL, fees DOUBLE PRECISION NOT NULL,
+                unrealized_pnl DOUBLE PRECISION,
+                total_loss_basis DOUBLE PRECISION NOT NULL,
+                source_identity TEXT NOT NULL, source_symbols_json TEXT NOT NULL DEFAULT '[]',
+                source_complete INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                rejection_code TEXT, observed_at TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(account_id,bucket_utc)
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_execution_queue(
+                id {id_col}, queue_key TEXT NOT NULL UNIQUE, journal_id BIGINT NOT NULL,
+                plan_id TEXT NOT NULL, telegram_id BIGINT NOT NULL, account_id BIGINT NOT NULL,
+                exchange TEXT NOT NULL, signal_id BIGINT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'PLANNED', payload_json TEXT NOT NULL,
+                claim_token TEXT, claimed_by TEXT, claimed_at TEXT, lease_expires_at TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3,
+                execution_id BIGINT, last_error_code TEXT, next_attempt_at TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_emergency_confirmations(
+                id {id_col}, confirmation_key TEXT NOT NULL UNIQUE,
+                telegram_id BIGINT NOT NULL, account_id BIGINT NOT NULL, exchange TEXT NOT NULL,
+                token_hash TEXT NOT NULL, account_fingerprint TEXT NOT NULL,
+                position_snapshot_json TEXT NOT NULL, estimated_exposure DOUBLE PRECISION NOT NULL,
+                state TEXT NOT NULL DEFAULT 'PENDING', expires_at TEXT NOT NULL,
+                confirmed_at TEXT, completed_at TEXT, result_json TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_recovery_state(
+                account_id BIGINT PRIMARY KEY, telegram_id BIGINT NOT NULL, exchange TEXT NOT NULL,
+                state TEXT NOT NULL, blocker_code TEXT, last_started_at TEXT,
+                last_success_at TEXT, last_failure_at TEXT, details_json TEXT NOT NULL DEFAULT '{{}}',
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS bingx_certification_audits(
                 id {id_col}, run_key TEXT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
                 account_id BIGINT NOT NULL, environment TEXT NOT NULL, adapter_version TEXT NOT NULL,
@@ -973,6 +1030,22 @@ def create_tables() -> None:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_source_diagnostics(
+                symbol TEXT NOT NULL, source_type TEXT NOT NULL, provider TEXT NOT NULL,
+                request_attempted BIGINT NOT NULL DEFAULT 0,
+                http_success BIGINT NOT NULL DEFAULT 0,
+                payload_valid BIGINT NOT NULL DEFAULT 0,
+                rows_valid BIGINT NOT NULL DEFAULT 0,
+                normalized BIGINT NOT NULL DEFAULT 0,
+                aggregate_created BIGINT NOT NULL DEFAULT 0,
+                persist_attempted BIGINT NOT NULL DEFAULT 0,
+                persist_success BIGINT NOT NULL DEFAULT 0,
+                rejection_code TEXT, last_success_at TEXT, last_failure_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol,source_type,provider)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS microstructure_worker_health(
                 worker_name TEXT PRIMARY KEY, configured_value TEXT,
                 configured_enabled INTEGER NOT NULL DEFAULT 0,
@@ -1186,6 +1259,8 @@ def create_tables() -> None:
             "permission_snapshot_json": "TEXT",
             "certification_status": "TEXT",
             "certification_expires_at": "TEXT",
+            "certification_invalidated_at": "TEXT",
+            "certification_invalidation_reason": "TEXT",
             "lifecycle_state": "TEXT NOT NULL DEFAULT 'NOT_CONNECTED'",
         }.items():
             _add_column(conn, "live_exchange_accounts", name, definition)

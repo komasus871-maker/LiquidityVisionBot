@@ -75,6 +75,64 @@ def _contains_forbidden(value: Any) -> set[str]:
 
 
 class MarketIntelligenceRepository:
+    PIPELINE_STAGES = frozenset({
+        "request_attempted", "http_success", "payload_valid", "rows_valid",
+        "normalized", "aggregate_created", "persist_attempted", "persist_success",
+    })
+
+    def record_pipeline_stage(self, *, symbol: str, source_type: str, provider: str,
+                              stage: str, success: bool = True,
+                              rejection_code: str | None = None) -> dict[str, Any]:
+        """Persist normalized provider-stage evidence without retaining provider payloads."""
+        stage_key = str(stage).strip().lower()
+        if stage_key not in self.PIPELINE_STAGES:
+            raise ValueError("MARKET_SOURCE_DIAGNOSTIC_STAGE_INVALID")
+        normalized = str(symbol).upper().replace("-", "")
+        source_key = str(source_type).upper()
+        now = datetime.now(timezone.utc).isoformat()
+        code = None if success else str(rejection_code or f"{source_key}_{stage_key.upper()}_FAILED")[:80]
+        # stage_key is selected from the fixed allow-list above, never caller SQL.
+        with connect() as conn:
+            conn.execute(f"""INSERT INTO market_source_diagnostics(symbol,source_type,provider,
+                {stage_key},rejection_code,last_success_at,last_failure_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(symbol,source_type,provider) DO UPDATE SET
+                    {stage_key}=market_source_diagnostics.{stage_key}+1,
+                    rejection_code=CASE WHEN excluded.last_failure_at IS NOT NULL
+                        THEN excluded.rejection_code
+                        WHEN excluded.last_success_at IS NOT NULL THEN NULL
+                        ELSE market_source_diagnostics.rejection_code END,
+                    last_success_at=COALESCE(excluded.last_success_at,market_source_diagnostics.last_success_at),
+                    last_failure_at=COALESCE(excluded.last_failure_at,market_source_diagnostics.last_failure_at),
+                    updated_at=excluded.updated_at""", (
+                    normalized, source_key, provider, 1, code,
+                    now if success and stage_key == "persist_success" else None,
+                    now if not success else None, now))
+        return self.pipeline_diagnostics(normalized, source_key, provider) or {}
+
+    def pipeline_diagnostics(self, symbol: str, source_type: str,
+                             provider: str | None = None) -> dict[str, Any] | None:
+        normalized = str(symbol).upper().replace("-", "")
+        source_key = str(source_type).upper()
+        with connect() as conn:
+            if provider:
+                row = conn.execute("""SELECT * FROM market_source_diagnostics
+                    WHERE symbol=? AND source_type=? AND provider=?""",
+                    (normalized, source_key, provider)).fetchone()
+            else:
+                row = conn.execute("""SELECT * FROM market_source_diagnostics
+                    WHERE symbol=? AND source_type=? ORDER BY updated_at DESC LIMIT 1""",
+                    (normalized, source_key)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        prefix = source_key.lower()
+        # Named aliases make operator telemetry match the production runbook.
+        return {**result, **{f"{prefix}_{key}": result.get(key) for key in (
+            "request_attempted", "http_success", "payload_valid", "rows_valid",
+            "normalized", "aggregate_created", "persist_attempted", "persist_success",
+            "rejection_code", "last_success_at", "last_failure_at")}}
+
     def strategy_distribution(self, telegram_id: int, limit: int = 500) -> dict[str, Any]:
         safe = max(1, min(int(limit), 2000))
         with connect() as conn:
@@ -235,7 +293,7 @@ class MarketIntelligenceRepository:
         for raw in rows:
             row = self._decode(dict(raw))
             candidates = row.get("reversal") or {}
-            if any(str(candidate.get("state") or "").endswith(("_EARLY", "_CONFIRMED", "_CONTINUATION_RISK"))
+            if any(str(candidate.get("state") or "").endswith(("_EARLY", "_CONFIRMED", "_CONTINUATION"))
                    for candidate in candidates.values() if isinstance(candidate, dict)):
                 result.append(row)
             if len(result) >= safe:
@@ -611,6 +669,9 @@ class MarketIntelligenceRepository:
             "open_interest_context": oi_context,
             "microstructure_history": self.microstructure_history(symbol) if symbol else {},
             "collector": worker,
+            "source_diagnostics": ({source: self.pipeline_diagnostics(symbol, source)
+                                    for source in ("DEPTH", "FUNDING", "OPEN_INTEREST")}
+                                   if symbol else {}),
             "automatic_policy_change": False,
         }
 
@@ -652,6 +713,138 @@ class MarketIntelligenceRepository:
                 "threshold_curves": curves, "minimum_sample_gate": 20,
                 "status": "SUFFICIENT" if len(resolved) >= 20 else "INSUFFICIENT_SAMPLES",
                 "automatic_filter_change": False, "profitability_claim": False}
+
+    def quality_calibration_cohorts(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
+        """Research-only 20-point Quality buckets with honest missing outcome fields."""
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT m.overall_quality,
+                m.research_policies_json,o.outcome_json FROM market_intelligence_snapshots m
+                JOIN research_signal_snapshots r ON r.snapshot_id=m.research_snapshot_id
+                LEFT JOIN research_outcomes o ON o.snapshot_id=m.research_snapshot_id AND o.id=(
+                    SELECT MAX(o2.id) FROM research_outcomes o2 WHERE o2.snapshot_id=m.research_snapshot_id)
+                WHERE r.capture_quality='DECISION_TIME' AND
+                  (? IS NULL OR m.owner_telegram_id IS NULL OR m.owner_telegram_id=0
+                   OR m.owner_telegram_id=?) ORDER BY m.decision_at,m.id""",
+                (owner_telegram_id, owner_telegram_id)).fetchall()]
+        bands = [(0, 20), (20, 40), (40, 60), (60, 80), (80, 101)]
+        samples: dict[str, list[dict[str, float | None]]] = {
+            f"{low}-{100 if high == 101 else high}": [] for low, high in bands}
+        for row in rows:
+            outcome = _loads(row.get("outcome_json"), {})
+            pure = outcome.get("pure_market") if isinstance(outcome.get("pure_market"), dict) else {}
+            if not pure.get("eligible") or pure.get("signal_r") is None:
+                continue
+            quality = float(row.get("overall_quality") or 0)
+            low, high = next((low, high) for low, high in bands if low <= quality < high)
+            costs = _loads(row.get("research_policies_json"), {}).get("estimated_cost_r")
+            samples[f"{low}-{100 if high == 101 else high}"].append({
+                "r": float(pure["signal_r"]),
+                "mfe": _number(pure.get("mfe_r") if pure.get("mfe_r") is not None else pure.get("mfe")),
+                "mae": _number(pure.get("mae_r") if pure.get("mae_r") is not None else pure.get("mae")),
+                "cost": _number(costs),
+            })
+        cohorts = []
+        for label, values in samples.items():
+            rs = [float(item["r"] or 0) for item in values]
+            wins, losses = [v for v in rs if v > 0], [v for v in rs if v < 0]
+            gross_win, gross_loss = sum(wins), abs(sum(losses))
+            cost_adjusted = [value - float(item.get("cost") or 0)
+                             for value, item in zip(rs, values)]
+            cohorts.append({
+                "bucket": label, "n": len(rs),
+                "status": "SUFFICIENT" if len(rs) >= 20 else "INSUFFICIENT",
+                "win_rate_pct": round(len(wins) / len(rs) * 100, 3) if rs else None,
+                "expectancy_r": round(sum(rs) / len(rs), 5) if rs else None,
+                "mfe_r": (round(sum(v for v in (_number(i.get("mfe")) for i in values) if v is not None)
+                                / sum(_number(i.get("mfe")) is not None for i in values), 5)
+                          if any(_number(i.get("mfe")) is not None for i in values) else None),
+                "mae_r": (round(sum(v for v in (_number(i.get("mae")) for i in values) if v is not None)
+                                / sum(_number(i.get("mae")) is not None for i in values), 5)
+                          if any(_number(i.get("mae")) is not None for i in values) else None),
+                "profit_factor": round(gross_win / gross_loss, 5) if gross_loss else None,
+                "cost_adjusted_expectancy_r": (round(sum(cost_adjusted) / len(cost_adjusted), 5)
+                                                if cost_adjusted else None),
+            })
+        return {"version": "quality-calibration-v1", "cohorts": cohorts,
+                "resolved_samples": sum(len(items) for items in samples.values()),
+                "score_is_probability": False, "automatic_threshold_change": False}
+
+    def readiness_timing_cohorts(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
+        states = ("READY", "WAIT_STRUCTURE", "WAIT_CONFIRMATION", "WAIT_PULLBACK", "CHASING", "INVALID")
+        grouped: dict[str, list[dict[str, Any]]] = {state: [] for state in states}
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT m.full_snapshot_json,o.outcome_json
+                FROM market_intelligence_snapshots m JOIN research_signal_snapshots r
+                  ON r.snapshot_id=m.research_snapshot_id
+                LEFT JOIN research_outcomes o ON o.snapshot_id=m.research_snapshot_id AND o.id=(
+                  SELECT MAX(o2.id) FROM research_outcomes o2 WHERE o2.snapshot_id=m.research_snapshot_id)
+                WHERE r.capture_quality='DECISION_TIME' AND
+                  (? IS NULL OR m.owner_telegram_id IS NULL OR m.owner_telegram_id=0
+                   OR m.owner_telegram_id=?)""", (owner_telegram_id, owner_telegram_id)).fetchall()]
+        for row in rows:
+            snapshot = _loads(row.get("full_snapshot_json"), {})
+            readiness = snapshot.get("entry_readiness") or {}
+            state = str(readiness.get("state") or "")
+            if state not in grouped:
+                continue
+            outcome = _loads(row.get("outcome_json"), {})
+            pure = outcome.get("pure_market") if isinstance(outcome.get("pure_market"), dict) else {}
+            if pure.get("eligible"):
+                grouped[state].append(pure)
+        cohorts = []
+        for state, items in grouped.items():
+            values = [_number(item.get("signal_r")) for item in items]
+            values = [value for value in values if value is not None]
+            def average(*keys: str) -> float | None:
+                found = [_number(next((item.get(key) for key in keys if item.get(key) is not None), None))
+                         for item in items]
+                found = [value for value in found if value is not None]
+                return round(sum(found) / len(found), 5) if found else None
+            cohorts.append({"state": state, "n": len(values),
+                            "status": "SUFFICIENT" if len(values) >= 20 else "INSUFFICIENT",
+                            "subsequent_mfe": average("mfe_r", "mfe"),
+                            "subsequent_mae": average("mae_r", "mae"),
+                            "time_to_entry_seconds": average("time_to_entry_seconds"),
+                            "time_to_invalidation_seconds": average("time_to_invalidation_seconds"),
+                            "missed_winners": sum(value > 0 for value in values) if state != "READY" else 0,
+                            "avoided_losers": sum(value < 0 for value in values) if state != "READY" else 0})
+        return {"version": "entry-readiness-calibration-v1", "cohorts": cohorts,
+                "automatic_policy_change": False, "future_data_in_decision_features": False}
+
+    def strategy_separation_diagnostics(self, telegram_id: int, limit: int = 1000) -> dict[str, Any]:
+        safe = max(10, min(int(limit), 5000))
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute(f"""SELECT strategy_suitability_json
+                FROM market_intelligence_snapshots WHERE owner_telegram_id=? OR owner_telegram_id IS NULL
+                ORDER BY id DESC LIMIT {safe}""", (telegram_id,)).fetchall()]
+        vectors = [_loads(row.get("strategy_suitability_json"), {}) for row in rows]
+        strategies = sorted({str(key) for vector in vectors for key in vector})
+        pairs = []
+        def correlation(left: list[float], right: list[float]) -> float | None:
+            if len(left) < 3 or len(left) != len(right):
+                return None
+            lm, rm = sum(left) / len(left), sum(right) / len(right)
+            numerator = sum((a - lm) * (b - rm) for a, b in zip(left, right))
+            denominator = math.sqrt(sum((a - lm) ** 2 for a in left) * sum((b - rm) ** 2 for b in right))
+            return round(numerator / denominator, 5) if denominator else None
+        for index, left_name in enumerate(strategies):
+            for right_name in strategies[index + 1:]:
+                observed = [(float(v[left_name]), float(v[right_name])) for v in vectors
+                            if left_name in v and right_name in v]
+                left_scores, right_scores = [x[0] for x in observed], [x[1] for x in observed]
+                left_set = {i for i, value in enumerate(left_scores) if value >= 60}
+                right_set = {i for i, value in enumerate(right_scores) if value >= 60}
+                union, overlap = left_set | right_set, left_set & right_set
+                identical = sum((a >= 60) == (b >= 60) for a, b in observed)
+                pairs.append({"left": left_name, "right": right_name, "n": len(observed),
+                              "identical_decision_rate": round(identical / len(observed), 5) if observed else None,
+                              "jaccard_overlap": round(len(overlap) / len(union), 5) if union else None,
+                              "accepted_set_overlap": len(overlap),
+                              "score_correlation": correlation(left_scores, right_scores),
+                              "outcome_correlation": None,
+                              "outcome_correlation_status": "DISTINCT_STRATEGY_OUTCOMES_NOT_AVAILABLE"})
+        return {"version": "strategy-separation-v1", "snapshots": len(vectors), "pairs": pairs,
+                "forced_diversity": False, "research_only": True, "execution_authority": False}
 
     def quality_exception_cohorts(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
         with connect() as conn:

@@ -44,7 +44,8 @@ ALLOWED_LIVE_TRANSITIONS = {
     LiveExecutionState.QUEUED: {LiveExecutionState.SUBMITTING, LiveExecutionState.CANCELLED},
     LiveExecutionState.SUBMITTING: {LiveExecutionState.SUBMITTED, LiveExecutionState.ACKNOWLEDGED,
                                     LiveExecutionState.UNKNOWN, LiveExecutionState.RETRY_WAIT,
-                                    LiveExecutionState.REJECTED, LiveExecutionState.FAILED},
+                                    LiveExecutionState.REJECTED, LiveExecutionState.FAILED,
+                                    LiveExecutionState.RECOVERY_REQUIRED},
     LiveExecutionState.SUBMITTED: {LiveExecutionState.ACKNOWLEDGED, LiveExecutionState.UNKNOWN},
     LiveExecutionState.ACKNOWLEDGED: {LiveExecutionState.PARTIALLY_FILLED, LiveExecutionState.FILLED,
                                       LiveExecutionState.CANCEL_PENDING, LiveExecutionState.UNKNOWN},
@@ -311,26 +312,33 @@ class LiveExecutionCoordinator:
                      signal_id: int | None = None, strategy: str | None = None,
                      timeframe: str | None = None, modeled_slippage_bps: Decimal | None = None,
                      daily_realized_loss: Decimal | None = None,
-                      daily_total_loss: Decimal | None = None,
+                     daily_total_loss: Decimal | None = None,
                       seconds_since_last_entry: int | None = None,
-                      authority_source: str = "DETERMINISTIC_APPROVED_PLAN") -> SubmissionResult:
+                      authority_source: str = "DETERMINISTIC_APPROVED_PLAN",
+                      emergency_confirmation_id: int | None = None) -> SubmissionResult:
         risk_evaluated = False
         if mode is ExecutionMode.LIVE and not readiness_passed:
             raise PermissionError("LIVE_READINESS_REQUIRED")
         if mode is ExecutionMode.LIVE and exchange.lower() == "bingx":
             environment = str(getattr(self.adapter, "environment", ""))
             if environment == "prod-live":
-                if authority_source != "DETERMINISTIC_APPROVED_PLAN":
+                if authority_source == "LIVE_EMERGENCY_CLOSE":
+                    if not request.reduce_only:
+                        raise PermissionError("BINGX_EMERGENCY_REDUCE_ONLY_REQUIRED")
+                    self._require_emergency_confirmation(
+                        confirmation_id=emergency_confirmation_id,
+                        telegram_id=telegram_id, account_id=account_id, exchange=exchange)
+                elif authority_source != "DETERMINISTIC_APPROVED_PLAN":
                     raise PermissionError("BINGX_LIVE_AUTHORITY_SOURCE_INVALID")
-                if not strategy:
-                    raise PermissionError("BINGX_APPROVED_PLAN_STRATEGY_REQUIRED")
-                self._require_approved_execution_plan(
-                    plan_id=plan_id, telegram_id=telegram_id, signal_id=signal_id,
-                    account_id=account_id, request=request, timeframe=timeframe)
-                limits = self._require_durable_bingx_live_gate(account_id)
-                if request.leverage > int(limits["max_leverage"]):
-                    raise PermissionError("BINGX_MAX_LEVERAGE_EXCEEDED")
-                if not request.reduce_only:
+                if authority_source == "DETERMINISTIC_APPROVED_PLAN":
+                    if not strategy:
+                        raise PermissionError("BINGX_APPROVED_PLAN_STRATEGY_REQUIRED")
+                    self._require_approved_execution_plan(
+                        plan_id=plan_id, telegram_id=telegram_id, signal_id=signal_id,
+                        account_id=account_id, request=request, timeframe=timeframe)
+                    limits = self._require_durable_bingx_live_gate(account_id)
+                    if request.leverage > int(limits["max_leverage"]):
+                        raise PermissionError("BINGX_MAX_LEVERAGE_EXCEEDED")
                     if request.price is None or request.price <= 0:
                         raise PermissionError("BINGX_REFERENCE_PRICE_REQUIRED")
                     order_notional = request.quantity * request.price
@@ -465,15 +473,22 @@ class LiveExecutionCoordinator:
             row = conn.execute("""SELECT status,exchange_account_id,plan_json
                 FROM copy_execution_journal WHERE plan_id=? AND telegram_id=? AND signal_id=?
                 ORDER BY id DESC LIMIT 1""", (plan_id, telegram_id, signal_id)).fetchone()
-        if not row or row["status"] != "EXECUTING" or int(row["exchange_account_id"] or 0) != int(account_id):
+            queue = conn.execute("""SELECT state,payload_json FROM live_execution_queue
+                WHERE plan_id=? AND telegram_id=? AND account_id=?
+                ORDER BY id DESC LIMIT 1""", (plan_id, telegram_id, account_id)).fetchone()
+        if (not row or row["status"] not in {"EXECUTING", "EXECUTED"}
+                or int(row["exchange_account_id"] or 0) != int(account_id)):
             raise PermissionError("BINGX_APPROVED_PLAN_NOT_CLAIMED")
         try:
             payload = json.loads(row["plan_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             raise PermissionError("BINGX_APPROVED_PLAN_INVALID") from None
         canonical = lambda value: "".join(char for char in str(value).upper() if char.isalnum())
-        quantity = payload.get("quantity")
-        planned_price = payload.get("entry_price")
+        queue_payload = json.loads(queue["payload_json"] or "{}") if queue else {}
+        live_request = queue_payload.get("live_request") or {}
+        queue_authorized = bool(queue and queue["state"] in {"CLAIMED", "SUBMITTING"})
+        quantity = live_request.get("quantity") if queue_authorized else payload.get("quantity")
+        planned_price = live_request.get("price") if queue_authorized else payload.get("entry_price")
         identity_valid = (
             payload.get("status") == "APPROVED"
             and canonical(payload.get("symbol")) == canonical(request.symbol)
@@ -483,10 +498,36 @@ class LiveExecutionCoordinator:
             and abs(Decimal(str(quantity)) - request.quantity) <= Decimal("0.000000000001")
             and planned_price is not None and request.price is not None
             and abs(Decimal(str(planned_price)) - request.price) <= Decimal("0.00000001")
-            and int(payload.get("leverage") or 1) == int(request.leverage)
+            and int((live_request.get("leverage") if queue_authorized else payload.get("leverage")) or 1)
+                == int(request.leverage)
+            and (not queue_authorized or str(live_request.get("client_order_id")) == request.client_order_id)
         )
         if not identity_valid:
             raise PermissionError("BINGX_APPROVED_PLAN_INTENT_MISMATCH")
+
+    @staticmethod
+    def _require_emergency_confirmation(*, confirmation_id: int | None,
+                                        telegram_id: int, account_id: int, exchange: str) -> None:
+        if confirmation_id is None:
+            raise PermissionError("LIVE_EMERGENCY_CONFIRMATION_REQUIRED")
+        now = datetime.now(timezone.utc)
+        with connect() as conn:
+            row = conn.execute("""SELECT * FROM live_emergency_confirmations
+                WHERE id=? AND telegram_id=? AND account_id=? AND exchange=?""",
+                (confirmation_id, telegram_id, account_id, exchange)).fetchone()
+            credentials = conn.execute("""SELECT 1 FROM user_exchange_credentials
+                WHERE telegram_id=? AND exchange=? AND status='connected'""",
+                (telegram_id, exchange)).fetchone()
+        if not row or row["state"] != "CONFIRMED" or not credentials:
+            raise PermissionError("LIVE_EMERGENCY_CONFIRMATION_INVALID")
+        expires = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+        expires = expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)
+        if expires < now:
+            raise PermissionError("LIVE_EMERGENCY_CONFIRMATION_EXPIRED")
+        if os.getenv("BINGX_PRODUCTION_ADAPTER_ALLOWED", "false").lower() not in {"1", "true", "yes", "on"}:
+            raise PermissionError("BINGX_PRODUCTION_ADAPTER_NOT_ALLOWED")
+        if os.getenv("ENVIRONMENT", "").lower() not in {"production", "render"}:
+            raise PermissionError("LIVE_DEPLOYMENT_ENVIRONMENT_INVALID")
 
     @staticmethod
     def _require_durable_bingx_live_gate(account_id: int) -> dict:
@@ -525,6 +566,18 @@ class LiveExecutionCoordinator:
             raise PermissionError("BINGX_ACCOUNT_LIMITS_MISSING")
         if int(unresolved["n"] or 0):
             raise PermissionError("BINGX_RECOVERY_REQUIRED")
+        from services.live_copy import LiveDailyPnlService, LiveRecoveryService
+        LiveDailyPnlService().require_current(account_id)
+        LiveRecoveryService.require_ready(account_id)
+        with connect() as conn:
+            preflight = conn.execute("""SELECT ready,created_at FROM live_readiness_audits
+                WHERE account_id=? ORDER BY id DESC LIMIT 1""", (account_id,)).fetchone()
+        if not preflight or not bool(preflight["ready"]):
+            raise PermissionError("BINGX_LIVE_PREFLIGHT_REQUIRED")
+        preflight_at = datetime.fromisoformat(str(preflight["created_at"]).replace("Z", "+00:00"))
+        preflight_at = preflight_at if preflight_at.tzinfo else preflight_at.replace(tzinfo=timezone.utc)
+        if (now - preflight_at).total_seconds() > int(os.getenv("LIVE_PREFLIGHT_MAX_AGE_SECONDS", "900")):
+            raise PermissionError("BINGX_LIVE_PREFLIGHT_STALE")
         if not cert or cert["status"] != "VST_ECONOMIC_PASSED" or cert["environment"] != "prod-vst" or not cert["expires_at"]:
             raise PermissionError("BINGX_VST_CERTIFICATION_REQUIRED")
         expires = datetime.fromisoformat(str(cert["expires_at"]).replace("Z", "+00:00"))
@@ -539,6 +592,11 @@ class LiveExecutionCoordinator:
         if not execution:
             raise KeyError(execution_id)
         state = LiveExecutionState(execution["state"])
+        if state is LiveExecutionState.SUBMITTING:
+            self.repository.transition(execution_id, state, LiveExecutionState.UNKNOWN,
+                                       recovery_reason="PROCESS_INTERRUPTED_DURING_SUBMISSION")
+            execution = self.repository.get(execution_id)
+            state = LiveExecutionState(execution["state"])
         if state not in {LiveExecutionState.UNKNOWN, LiveExecutionState.RECOVERY_REQUIRED}:
             return SubmissionResult(execution_id, state, execution["client_order_id"], execution.get("exchange_order_id"))
         order = await self.adapter.query_order_by_client_id(
