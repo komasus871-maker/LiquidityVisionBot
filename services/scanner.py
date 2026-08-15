@@ -45,9 +45,15 @@ class Scanner:
                 ]
                 intelligence = result.get("market_intelligence") or {}
                 suitability = intelligence.get("strategy_suitability") or {}
-                strategy = (max(suitability, key=lambda key: float(suitability[key]))
-                            if suitability else str(result.get("setup_type") or "MARKET_STRUCTURE"))
+                fusion = intelligence.get("strategy_fusion_v2") or {}
+                primary = fusion.get("primary") or {}
+                secondary = fusion.get("secondary") or {}
+                strategy = str(primary.get("strategy") or (
+                    max(suitability, key=lambda key: float(suitability[key]))
+                    if suitability else result.get("setup_type") or "MARKET_STRUCTURE"
+                ))
                 quality = intelligence.get("signal_quality_v3") or {}
+                readiness_v2 = intelligence.get("entry_readiness") or {}
                 supports = quality.get("supporting_evidence") or []
                 conflicts = quality.get("contradicting_evidence") or []
                 def evidence_text(items, fallback):
@@ -55,6 +61,7 @@ class Scanner:
                         return fallback
                     item = items[0]
                     return str(item.get("reason") if isinstance(item, dict) else item)[:100]
+                scanner_score = float((result.get("expected_value") or {}).get("rank_score") or self._execution_score(result))
                 return {
                     "symbol": symbol,
                     "analysis": result,
@@ -67,19 +74,29 @@ class Scanner:
                     "risk": risks[0] if risks else "No major blocker",
                     "rr": result["rr"],
                     "raw_ranking_score": result["ranking_score"],
-                    "ranking_score": float((result.get("expected_value") or {}).get("rank_score") or self._execution_score(result)),
+                    "ranking_score": scanner_score,
+                    "scanner_score": scanner_score,
                     "expected_r": float((result.get("expected_value") or {}).get("expected_r") or 0),
                     "ev_band": str((result.get("expected_value") or {}).get("band") or "UNKNOWN"),
                     "edge": result["directional_edge"],
                     "category": result["opportunity_category"],
                     "entry_quality": result["entry_quality"],
-                    "readiness": result["execution_readiness"],
+                    "readiness": float(readiness_v2.get("score") or result["execution_readiness"]),
+                    "readiness_state": str(readiness_v2.get("state") or result.get("execution_status") or "UNKNOWN"),
                     "preferred_entry_low": result["preferred_entry_low"],
                     "preferred_entry_high": result["preferred_entry_high"],
                     "decision_action": (result.get("unified_decision") or {}).get("action", result.get("decision_action")),
                     "conviction": result.get("conviction") or {},
                     "strategy": strategy,
+                    "primary_strategy": strategy,
+                    "secondary_strategy": str(secondary.get("strategy") or "NONE"),
+                    "strategy_gap": float(fusion.get("suitability_gap") or 0),
+                    "strategy_fit": float(primary.get("suitability") or suitability.get(strategy) or 0),
+                    "fusion_state": str(fusion.get("fusion_state") or "UNAVAILABLE"),
                     "quality": float(quality.get("overall_quality") or result.get("decision_quality_score") or 0),
+                    "quality_dimensions": quality.get("quality_dimensions") or {},
+                    "market_regime": intelligence.get("market_regime_v2") or {},
+                    "momentum_reacceleration": intelligence.get("momentum_reacceleration") or {},
                     "strongest_advantage": evidence_text(supports, "best available evidence is mixed"),
                     "strongest_contradiction": evidence_text(conflicts, risks[0] if risks else "none material"),
                 }

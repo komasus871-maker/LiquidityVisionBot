@@ -51,6 +51,7 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("copy_balance", "PAPER balance"), ("copy_limits", "Safety limits"),
         ("copy_stats", "Copy statistics"), ("copy_diagnostics", "Copy diagnostics"),
         ("copy_performance", "Candidates, execution, costs, and outcome quality"),
+        ("copy_analytics", "PAPER cohorts by strategy, timeframe, symbol, Quality and Readiness"),
         ("copy_guard", "Safety guard state"), ("copy_training", "Training summary"),
         ("copy_rejections", "Admission rejection analytics"),
         ("copy_guardrails", "Effective copy guardrails"),
@@ -88,12 +89,14 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("strategy_distribution", "Observed strategy-family assignment distribution"),
     ),
     "system": _entries(
-        ("system_health", "System Health V2"),
+        ("system_health", "System Health V3"),
     ),
     "account": _entries(
         ("profile", "User profile"), ("premium", "Plan overview"),
         ("plans", "Free, Pro, and Elite comparison"), ("my_plan", "Effective plan and limits"),
         ("settings", "Personal output preferences"), ("alerts", "Notification preferences"),
+        ("language", "Select English, Russian, Ukrainian, Hebrew, or Arabic"),
+        ("usage", "Daily plan limits and remaining usage"),
         ("connect_exchange", "Connect a supported account read path"),
         ("disconnect_exchange", "Disconnect an exchange"), ("my_exchanges", "Connected exchanges"),
         ("exchanges", "Supported exchanges"), ("exchange_balance", "Account balance"),
@@ -111,6 +114,9 @@ OPERATOR_COMMANDS = frozenset({
     "ai_experiments", "ai_kill", "live_sync", "live_certify", "live_account",
     "live_dry_run", "live_confirm", "live_disable", "live_readiness", "recovery",
     "demo_order", "demo_cancel", "demo_status", "demo_kill", "demo_resume",
+    "admin", "admin_plan", "admin_plan_status", "admin_plan_revoke", "admin_plan_extend",
+    "admin_entitlements", "admin_users", "admin_usage", "admin_plans", "admin_ai_usage",
+    "admin_health", "admin_worker_status",
 })
 
 OPERATOR_HELP = (
@@ -133,13 +139,16 @@ MAIN_MENU_COMMANDS = (
 )
 
 
-def category_text(category: str) -> str | None:
+def category_text(category: str, language: str = "en") -> str | None:
+    from services.localization import LocalizationService
     entries = HELP_CATALOG.get(category)
     if entries is None:
         return None
-    lines = [f"<b>{category.title()} · Command Catalog</b>", ""]
+    i18n = LocalizationService()
+    lines = [f"<b>{category.title()} · {i18n.t('help.title', language=language)}</b>",
+             i18n.t(f"help.{category}", language=language), ""]
     for entry in entries:
         lines.append(f"/<b>{entry.command}</b> — {entry.summary}")
         if entry.usage:
-            lines.append(f"  Example: <code>{entry.usage}</code>")
+            lines.append(f"  {i18n.t('common.example', language=language)}: <code>{entry.usage}</code>")
     return "\n".join(lines)

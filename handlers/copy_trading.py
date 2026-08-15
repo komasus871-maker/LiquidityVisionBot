@@ -13,6 +13,10 @@ from services.copy_training import CopyTrainingService
 from services.copy_execution_intelligence import CopyExecutionIntelligenceService
 from services.copy_guardrail_outcomes import CopyGuardrailOutcomeService
 from services.copy_similarity import CopySimilarityService
+from services.operator_authorization import OperatorAuthorizationService, OperatorCapability
+from services.paper_copy_analytics import PaperCopyAnalyticsService
+from services.capabilities import CapabilityService
+from services.public_errors import public_error_message
 
 router = Router()
 service = CopyTradingService()
@@ -20,6 +24,9 @@ training_service = CopyTrainingService()
 intelligence_service = CopyExecutionIntelligenceService()
 outcome_service = CopyGuardrailOutcomeService()
 similarity_service = CopySimilarityService()
+operators = OperatorAuthorizationService()
+paper_analytics = PaperCopyAnalyticsService()
+capabilities = CapabilityService()
 
 
 def _status_text(profile: dict, stats: dict, *, include_diagnostics: bool = True) -> str:
@@ -108,6 +115,7 @@ async def copy_status(message: Message):
 @router.message(Command("copy_performance"))
 async def copy_performance(message: Message):
     stats = service.performance_stats(message.from_user.id)
+    cohorts = paper_analytics.report(message.from_user.id, days=90)
     n = int(stats["strategy_closed"])
     expectancy = stats["strategy_expectancy_r"]
     pf = stats["strategy_profit_factor"]
@@ -126,8 +134,40 @@ async def copy_performance(message: Message):
         f"Gross PnL / fees / net: <b>${stats['actual_gross_pnl']:+,.2f} / ${stats['actual_fees']:,.2f} / ${stats['actual_net_pnl']:+,.2f}</b>\n"
         f"Average slippage: <b>{stats['actual_average_slippage_pct']:.4f}%</b>\n"
         f"Evidence state: <code>{evidence}</code>\n\n"
+        f"Analytics V2 resolved/executed/counterfactual: <b>{cohorts['resolved']} / {cohorts['executed']} / {cohorts['counterfactual']}</b>\n"
+        "Cohorts: <code>/copy_analytics</code> · "
         "Admission outcomes: <code>/copy_rejections</code> · rejected-signal outcomes: <code>/copy_guardrails</code>\n"
         "PAPER results are descriptive and do not establish future profitability.")
+
+
+@router.message(Command("copy_analytics"))
+async def copy_analytics(message: Message):
+    if not capabilities.has(message.from_user.id, "ADVANCED_COHORT_ANALYTICS"):
+        await message.answer(capabilities.preview("ADVANCED_COHORT_ANALYTICS", message.from_user.id))
+        return
+    report = paper_analytics.report(message.from_user.id, days=90)
+
+    def top(items) -> str:
+        return "\n".join(f"• <code>{escape(str(item['key']))}</code> · n={item['sample']} · "
+                         f"{item['expectancy_r']:+.2f}R expectancy · {item['net_r']:+.2f}R net"
+                         for item in items[:5]) or "• insufficient resolved sample"
+
+    guardrails = report["guardrail_counterfactuals"]
+    counterfactual = "\n".join(
+        f"• <code>{code}</code> · n={item['sample']} · avoided {item['avoided_losses']} losses · "
+        f"missed {item['missed_wins']} wins · {item['net_shadow_r']:+.2f}R shadow"
+        for code, item in guardrails.items()
+    )
+    await message.answer(
+        f"<b>PAPER Copy Analytics V2 · 90 days</b>\n\n"
+        f"Resolved: <b>{report['resolved']}</b> · executed {report['executed']} · counterfactual {report['counterfactual']}\n\n"
+        f"<b>Strategy</b>\n{top(report['by_strategy'])}\n\n"
+        f"<b>Timeframe</b>\n{top(report['by_timeframe'])}\n\n"
+        f"<b>Symbol</b>\n{top(report['by_symbol'])}\n\n"
+        f"<b>Decision-time Quality</b>\n{top(report['by_quality'])}\n\n"
+        f"<b>Decision-time Entry Readiness</b>\n{top(report['by_readiness'])}\n\n"
+        f"<b>Guardrail counterfactuals</b>\n{counterfactual}\n\n"
+        "Descriptive PAPER research only. Counterfactuals never weaken guardrails or change execution policy automatically.")
 
 
 def _control_values(parts: list[str]) -> list[str]:
@@ -344,9 +384,9 @@ async def copy_stats(message: Message):
 
 @router.message(Command("copy_diagnostics"))
 async def copy_diagnostics(message: Message):
-    raw = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", ""))
-    admins = {int(value.strip()) for value in raw.replace(";", ",").split(",") if value.strip().isdigit()}
-    if not message.from_user or message.from_user.id not in admins:
+    actor = message.from_user.id if message.from_user else None
+    if not operators.authorize(actor_telegram_id=actor, capability=OperatorCapability.SYSTEM_ADMIN,
+                               action="COPY_DIAGNOSTICS_VIEW"):
         await message.answer("Operator diagnostics are restricted.")
         return
     profile = service.ensure_profile(message.from_user.id)
@@ -529,7 +569,7 @@ async def copy_similar(message: Message):
         )
     except (ValueError, LookupError) as exc:
         await message.answer(
-            f"🧬 <b>Similar Trade Intelligence</b>\n\n{escape(str(exc))}\n"
+            f"🧬 <b>Similar Trade Intelligence</b>\n\n{public_error_message(exc, context='RESEARCH')}\n"
             "Usage: <code>/copy_similar</code> or <code>/copy_similar 123</code>",
             parse_mode="HTML",
         )
@@ -594,7 +634,7 @@ async def genome(message: Message):
         )
     except (ValueError, LookupError) as exc:
         await message.answer(
-            f"🧬 <b>Strategy Genome</b>\n\n{escape(str(exc))}\n"
+            f"🧬 <b>Strategy Genome</b>\n\n{public_error_message(exc, context='RESEARCH')}\n"
             "Usage: <code>/genome</code> or <code>/genome 123</code>",
             parse_mode="HTML",
         )
@@ -663,7 +703,7 @@ async def copy_plan(message: Message):
         f"Side: <b>{escape(str(payload.get('side') or '—'))}</b>\n"
         f"Status: <b>{escape(str(row.get('status') or '—'))}</b>\n"
         f"Code: <code>{escape(str(row.get('code') or '—'))}</code>\n"
-        f"Reason: {escape(str(row.get('last_error') or row.get('reason') or '—'))}\n"
+        f"Reason: {public_error_message(row.get('last_error'), context='COPY') if row.get('last_error') else escape(str(row.get('reason') or '—'))}\n"
         f"Quantity: <b>{escape(str(payload.get('quantity') or '—'))}</b>\n"
         f"Notional: <b>{escape(str(payload.get('notional') or '—'))}</b>\n"
         f"Leverage: <b>{escape(str(payload.get('leverage') or 1))}x</b>\n"
@@ -747,7 +787,7 @@ Targets: <b>{tp_text}</b>
 Leverage: <b>{int(plan.get('leverage') or 1)}x</b>
 Attempts: <b>{int(row.get('attempt_count') or 0)}</b>
 Code: <code>{escape(str(row.get('code') or '—'))}</code>
-Reason: {escape(str(row.get('last_error') or row.get('reason') or '—'))}
+Reason: {public_error_message(row.get('last_error'), context='COPY') if row.get('last_error') else escape(str(row.get('reason') or '—'))}
 Execution ref: <code>{escape(str(row.get('execution_ref') or '—'))}</code>
 Idempotency: <code>{escape(str(row.get('idempotency_key') or '—'))}</code>
 

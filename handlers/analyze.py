@@ -21,6 +21,8 @@ from services.analysis_runtime import run_analysis
 from services.decision_quality import DecisionQualityEngine
 from services.market_context import MarketContextEngine
 from services.capabilities import CapabilityService
+from services.localization import LocalizationService
+from services.public_errors import public_error_message
 from utils.symbols import normalize_usdt_symbol
 
 router = Router()
@@ -37,6 +39,7 @@ user_watchlist = UserWatchlist()
 decision_quality = DecisionQualityEngine()
 market_context = MarketContextEngine()
 capabilities = CapabilityService()
+i18n = LocalizationService()
 
 # Immutable in-process snapshots keep Explain/Similar consistent with the exact
 # analysis the user received. Refresh is the only action that recalculates.
@@ -158,13 +161,13 @@ async def universal_symbol_received(message: Message, state: FSMContext):
             await _send_analysis(message, resolved.base, timeframe, message.from_user.id, message.chat.id)
             await progress.delete()
         except Exception as exc:
-            await message.answer(f"❌ Ошибка\n\n{exc}")
+            await message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
         return
 
     try:
         resolved = await resolver.resolve(raw, interval="1h")
     except ValueError as exc:
-        await message.answer(f"❌ {exc}\n\nПопробуйте другой тикер или /cancel.")
+        await message.answer(f"❌ {i18n.t('error.symbol_invalid', language=i18n.language(message.from_user.id))}")
         return
 
     await state.clear()
@@ -189,7 +192,7 @@ async def universal_timeframe_callback(callback: CallbackQuery):
             callback.message.chat.id,
         )
     except Exception as exc:
-        await callback.message.answer(f"❌ Ошибка анализа\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query(F.data.startswith("analyze_"))
@@ -205,7 +208,7 @@ async def analyze_callback(callback: CallbackQuery):
             callback.message.chat.id,
         )
     except Exception as exc:
-        await callback.message.answer(f"❌ Ошибка\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query((F.data.startswith("refresh:") | F.data.startswith("refresh_")))
@@ -230,7 +233,7 @@ async def refresh_callback(callback: CallbackQuery):
             reply_markup=analysis_actions_keyboard(symbol, timeframe),
         )
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось обновить анализ\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query((F.data.startswith("explain:") | F.data.startswith("explain_")))
@@ -247,7 +250,7 @@ async def explain_callback(callback: CallbackQuery):
             explainer.build(analysis, symbol), parse_mode="HTML", disable_web_page_preview=True,
         )
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось построить Explain Pro\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query(F.data.startswith("whynot:"))
@@ -258,7 +261,7 @@ async def why_not_callback(callback: CallbackQuery):
         analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
         await callback.message.answer(report.why_not(analysis), parse_mode="HTML")
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось открыть Why NOT\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query(F.data.startswith("technical:"))
@@ -269,7 +272,7 @@ async def technical_callback(callback: CallbackQuery):
         analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
         await callback.message.answer(report.technical(analysis), parse_mode="HTML")
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось открыть Technical Details\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query(F.data.startswith("scenarios:"))
@@ -280,7 +283,7 @@ async def scenarios_callback(callback: CallbackQuery):
         analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
         await callback.message.answer(report.scenarios(analysis), parse_mode="HTML")
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось открыть Scenario Map\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.callback_query(F.data.startswith("history:"))
@@ -291,7 +294,7 @@ async def history_callback(callback: CallbackQuery):
         analysis = await _snapshot_or_run(callback.from_user.id, symbol, timeframe)
         await callback.message.answer(report.history(analysis), parse_mode="HTML")
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось открыть Historical Intelligence\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='RESEARCH')}")
 
 
 @router.callback_query((F.data.startswith("similar:") | F.data.startswith("similar_")))
@@ -308,7 +311,7 @@ async def similar_callback(callback: CallbackQuery):
             similarity_report.build(symbol, analysis), parse_mode="HTML", disable_web_page_preview=True,
         )
     except Exception as exc:
-        await callback.message.answer(f"❌ Не удалось найти похожие сетапы\n\n{exc}")
+        await callback.message.answer(f"❌ {public_error_message(exc, context='RESEARCH')}")
 
 
 @router.callback_query(F.data.startswith("watch:"))
@@ -325,7 +328,9 @@ async def watch_callback(callback: CallbackQuery):
 @router.message(F.text == "⭐ Watchlist")
 async def watchlist_view(message: Message):
     parts = (message.text or "").split()
-    if len(parts) > 1:
+    rank_only = len(parts) > 1 and parts[1].lower() == "rank"
+    language = i18n.language(message.from_user.id)
+    if len(parts) > 1 and not rank_only:
         action = parts[1].lower()
         if action not in {"add", "remove"} or len(parts) < 3:
             await message.answer("Usage: <code>/watchlist add|remove SYMBOL [SYMBOL...]</code>\nExample: <code>/watchlist add BTC SOL</code>")
@@ -360,31 +365,47 @@ async def watchlist_view(message: Message):
     rows = user_watchlist.list(message.from_user.id)
     if not rows:
         await message.answer(
-            "⭐ <b>Your watchlist is empty</b>\n\n"
-            "Use <code>/watchlist add BTC SOL</code> or the Watch button after analysis.",
+            f"⭐ <b>{i18n.t('watchlist.empty', language=language)}</b>\n\n"
+            f"{i18n.t('watchlist.hint', language=language)}",
             parse_mode="HTML",
         )
         return
 
     import json
-    lines = ["⭐ <b>Smart Watchlist</b>", "Ranked by most recent intelligence cycle.", ""]
-    for index, row in enumerate(rows, 1):
+    parsed_rows = []
+    for row in rows:
         snapshot = {}
         try:
             snapshot = json.loads(row.get("snapshot_json") or "{}")
         except (TypeError, ValueError):
             pass
+        parsed_rows.append((row, snapshot))
+    if rank_only:
+        parsed_rows.sort(key=lambda item: (
+            float(item[1].get("quality") or 0) * .45
+            + float(item[1].get("readiness") or 0) * .35
+            + float(item[1].get("strategy_fit") or 0) * .20
+        ), reverse=True)
+    lines = [f"⭐ <b>{i18n.t('watchlist.title', language=language)}</b>",
+             "Ranked by Quality, Entry Readiness and strategy fit." if rank_only else "Latest decision-time state.", ""]
+    for index, (row, snapshot) in enumerate(parsed_rows, 1):
         status = snapshot.get("execution_status") or "INITIALIZING"
-        direction = float(snapshot.get("direction_score") or 0)
+        quality = float(snapshot.get("quality") or 0)
         readiness = float(snapshot.get("readiness") or 0)
-        checked = row.get("last_checked_at") or row.get("updated_at") or "waiting for first cycle"
+        readiness_state = snapshot.get("readiness_state") or status
+        strategy = str(snapshot.get("strategy") or "UNCLASSIFIED").replace("_", " ").title()
+        regime = str(snapshot.get("regime") or "UNKNOWN").replace("_", " ").title()
+        checked = i18n.freshness(row.get("last_checked_at") or row.get("updated_at"), language=language)
         error = row.get("last_error")
-        lines.append(f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}")
-        lines.append(f"   {status} · Dir {direction:.1f} · Ready {readiness:.1f}")
-        lines.append(f"   Checked: <code>{checked}</code>")
+        symbol = i18n.market_token(row['symbol'], language=language)
+        tf = i18n.market_token(row['timeframe'].upper(), language=language)
+        lines.append(f"{index}. <b>{symbol}</b> · {tf}")
+        lines.append(f"   Quality {quality:.0f} · Readiness {readiness:.0f} ({readiness_state})")
+        lines.append(f"   {strategy} · {regime}")
+        lines.append(f"   {i18n.t('watchlist.checked', language=language, value=checked)}")
         if error:
-            lines.append(f"   ⚠️ {str(error)[:160]}")
-    lines.append("\nEdit: <code>/watchlist add BTC</code> · <code>/watchlist remove BTC</code>")
+            lines.append(f"   ⚠️ {i18n.t('watchlist.error', language=language)}")
+    lines.append(f"\n{i18n.t('watchlist.edit', language=language)}")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -415,4 +436,4 @@ async def analyze(message: Message):
             message.chat.id,
         )
     except Exception as exc:
-        await message.answer(f"❌ Ошибка\n\n{exc}")
+        await message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")

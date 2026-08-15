@@ -1,2 +1,2 @@
-APP_VERSION = "10.1.0"
-RELEASE_NAME = "Intelligence Product Platform"
+APP_VERSION = "10.2.0"
+RELEASE_NAME = "Multilingual Autonomous Intelligence Platform"

@@ -30,6 +30,7 @@ from services.live_readiness import ReadinessContext, audit_readiness
 from services.bingx_certification import BingXCertificationService, live_certification_valid
 from services.execution_portfolio import ExecutionPortfolioEngine
 from services.bingx_sync import BingXAccountSyncService, BingXSyncReport
+from services.public_errors import public_error_message
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ async def live_sync(message: Message) -> None:
     except ExchangeError as exc:
         await message.answer(
             f"⚠️ <b>BingX synchronization failed before adapter sync</b>\n"
-            f"Reason: <code>{escape(exc.code)} · {escape(str(exc))}</code>", parse_mode="HTML")
+            f"{public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     finally:
         if adapter is not None:
@@ -109,8 +110,7 @@ async def live_sync(message: Message) -> None:
         await message.answer(
             f"⚠️ <b>BingX synchronization failed</b>\n\n"
             f"Stage: <code>{escape(report.stage)}</code>\n"
-            f"Reason: <code>{escape(report.error_code or 'UNKNOWN')} · "
-            f"{escape(report.error_message or 'no detail')}</code>\n"
+            f"Reason: <code>{escape(report.error_code or 'UNAVAILABLE')}</code>\n"
             f"Environment: <code>{escape(report.environment)}</code>\n"
             f"Adapter: <code>{escape(report.adapter_version)}</code>", parse_mode="HTML")
         return
@@ -156,7 +156,7 @@ async def live_certify(message: Message) -> None:
                 confirmation=args[1],
             )
         except (ExchangeError, ValueError, PermissionError) as exc:
-            await message.answer(f"⚠️ BingX VST certification failed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+            await message.answer(f"⚠️ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
             return
         finally:
             if adapter is not None:
@@ -169,7 +169,7 @@ async def live_certify(message: Message) -> None:
         price = Decimal(args[2]) if len(args) > 2 else Decimal(os.getenv("BINGX_CERTIFICATION_REFERENCE_PRICE", "60000"))
         report = await _run_bingx_dry_certification(message, symbol=symbol, quantity=quantity, price=price)
     except (ExchangeError, ValueError) as exc:
-        await message.answer(f"⚠️ BingX certification failed: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     await message.answer(format_bingx_certification(report), parse_mode="HTML")
 
@@ -187,8 +187,7 @@ async def live_account(message: Message) -> None:
         f"Account / margin mode: <code>{escape(account.account_mode or 'unknown')} / {escape(account.margin_mode or 'unknown')}</code>\n"
         f"Last sync: <code>{escape(account.last_sync_at or 'never')}</code>\n"
         f"Sync status: <code>{escape(account.sync_status or 'never')} · {escape(account.sync_stage or 'none')}</code>\n"
-        f"Sync error: <code>{escape(account.sync_error_code or 'none')}"
-        f"{(' · ' + escape(account.sync_error_message)) if account.sync_error_message else ''}</code>\n"
+        f"Sync error: <code>{escape(account.sync_error_code or 'none')}</code>\n"
         f"Time drift: <code>{account.server_time_drift_ms if account.server_time_drift_ms is not None else 'unknown'} ms</code>\n"
         f"Certification: <code>{escape(account.certification_status or 'none')}</code>\n"
         f"Unresolved executions: <b>{len(unresolved)}</b>\n"
@@ -441,13 +440,13 @@ async def connect_exchange(message: Message) -> None:
             store.delete(message.from_user.id, exchange)
             await message.answer(
                 f"⛔ <b>{exchange.value.title()} connection rejected</b>\n"
-                f"<code>{escape(health.error or 'authentication failed')}</code>\n\n"
+                "Authentication failed. Verify the credential permissions and environment.\n\n"
                 "Nothing was saved.",
                 parse_mode="HTML",
             )
             return
     except ExchangeError as exc:
-        await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⛔ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     await message.answer(
         f"✅ <b>{exchange.value.title()} connected to your Telegram account</b>\n\n"
@@ -467,7 +466,7 @@ async def disconnect_exchange(message: Message) -> None:
         exchange = ExchangeName(parts[1].lower())
         removed = _credential_store().delete(message.from_user.id, exchange)
     except (ValueError, ExchangeError) as exc:
-        await message.answer(f"⚠️ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     await message.answer("✅ Exchange disconnected." if removed else "ℹ️ That exchange was not connected.")
 
@@ -477,7 +476,7 @@ async def my_exchanges(message: Message) -> None:
     try:
         connections = _credential_store().list(message.from_user.id)
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     if not connections:
         await message.answer("🔌 You have no connected exchanges. Use <code>/connect_exchange</code>.", parse_mode="HTML")
@@ -509,7 +508,7 @@ async def exchanges_status(message: Message) -> None:
         if health.endpoint:
             lines.append(f"  Endpoint: <code>{escape(health.endpoint)}</code>")
         if health.error and health.error != "credentials_not_configured":
-            lines.append(f"  <code>{escape(health.error[:180])}</code>")
+            lines.append("  <code>temporarily unavailable</code>")
     lines.extend([
         "", "<b>Commands</b>",
         "<code>/connect_exchange bingx demo API_KEY API_SECRET</code>",
@@ -536,7 +535,7 @@ async def exchange_balance(message: Message) -> None:
     try:
         balances = await _user_adapter_call(message.from_user.id, exchange, "balances")
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>{exchange.value.title()} balance unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} balance unavailable</b>\n{public_error_message(exc, context='ACCOUNT')}", parse_mode="HTML")
         return
     rows = [f"• <b>{escape(i.asset)}</b> · wallet {_money(i.wallet_balance)} · available {_money(i.available_balance)}" for i in balances]
     await message.answer(f"💰 <b>{exchange.value.title()} balances</b>\n\n" + ("\n".join(rows) if rows else "No non-zero balances."), parse_mode="HTML")
@@ -548,7 +547,7 @@ async def exchange_positions(message: Message) -> None:
     try:
         positions = await _user_adapter_call(message.from_user.id, exchange, "positions")
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>{exchange.value.title()} positions unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} positions unavailable</b>\n{public_error_message(exc, context='ACCOUNT')}", parse_mode="HTML")
         return
     rows = [f"• <b>{escape(i.symbol)} {i.side}</b> · qty {_money(i.quantity)} · entry {_money(i.entry_price)} · PnL {_money(i.unrealized_pnl)} · {i.leverage}x" for i in positions]
     await message.answer(f"📌 <b>{exchange.value.title()} positions</b>\n\n" + ("\n".join(rows) if rows else "No open positions."), parse_mode="HTML")
@@ -561,7 +560,7 @@ async def exchange_orders(message: Message) -> None:
     try:
         orders = await _user_adapter_call(message.from_user.id, exchange, "open_orders", symbol)
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>{exchange.value.title()} orders unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} orders unavailable</b>\n{public_error_message(exc, context='ACCOUNT')}", parse_mode="HTML")
         return
     rows = [f"• <b>{escape(i.symbol)} {i.side}</b> · {escape(i.order_type)} · qty {_money(i.quantity)} · filled {_money(i.executed_quantity)}" for i in orders]
     await message.answer(f"📋 <b>{exchange.value.title()} open orders</b>\n\n" + ("\n".join(rows) if rows else "No open orders."), parse_mode="HTML")
@@ -577,7 +576,7 @@ async def exchange_symbol(message: Message) -> None:
     try:
         rules = await _adapter_call(exchange, "symbol_rules", symbol)
     except ExchangeError as exc:
-        await message.answer(f"⚠️ <b>{exchange.value.title()} symbol rules unavailable</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⚠️ <b>{exchange.value.title()} symbol rules unavailable</b>\n{public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     minimum = _money(rules.min_notional) if rules.min_notional is not None else "not published"
     await message.answer(
@@ -598,7 +597,7 @@ async def exchange_account(message: Message) -> None:
     except ExchangeError as exc:
         await message.answer(
             f"⚠️ <b>{exchange.value.title()} authenticated snapshot unavailable</b>\n"
-            f"<code>{escape(str(exc))}</code>\n\n"
+            f"{public_error_message(exc, context='ACCOUNT')}\n\n"
             "Add read-only API credentials in Render. Do not enable withdrawal permissions.",
             parse_mode="HTML",
         )
@@ -668,7 +667,7 @@ async def exchange_preflight(message: Message) -> None:
         rules = await adapter.symbol_rules(symbol)
     except ExchangeError as exc:
         await message.answer(
-            f"⚠️ <b>{exchange.value.title()} preflight unavailable</b>\n<code>{escape(str(exc))}</code>",
+            f"⚠️ <b>{exchange.value.title()} preflight unavailable</b>\n{public_error_message(exc, context='EXCHANGE')}",
             parse_mode="HTML",
         )
         return
@@ -753,7 +752,7 @@ async def demo_order(message: Message) -> None:
             limit_price=limit_price,
         ))
     except ExchangeError as exc:
-        await message.answer(f"⛔ <b>Demo execution failed</b>\n<code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⛔ <b>Demo execution failed</b>\n{public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     if not receipt.order:
         violations = "\n".join(f"• <code>{escape(v)}</code>" for v in receipt.violations) or "• none"
@@ -781,7 +780,7 @@ async def demo_cancel(message: Message) -> None:
     try:
         order = await _user_execution_manager(message.from_user.id, exchange).cancel(exchange, args[0], args[1])
     except ExchangeError as exc:
-        await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⛔ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     await message.answer(f"🛑 Demo order <code>{escape(order.order_id)}</code>: <b>{escape(order.status)}</b>", parse_mode="HTML")
 
@@ -795,7 +794,7 @@ async def demo_status(message: Message) -> None:
     try:
         order = await _user_execution_manager(message.from_user.id, exchange).status(exchange, args[0], args[1])
     except ExchangeError as exc:
-        await message.answer(f"⛔ <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        await message.answer(f"⛔ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
     await message.answer(
         f"📍 <b>Demo order status</b>\n\nID: <code>{escape(order.order_id)}</code>\n"

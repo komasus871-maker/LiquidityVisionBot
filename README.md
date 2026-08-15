@@ -21,11 +21,20 @@ Signals are now converted into deterministic, side-effect-free execution plans b
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 
-# LiquidityVisionBot v10.1.0
+# LiquidityVisionBot v10.2.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
-## Intelligence Product Platform
+## Multilingual Autonomous Intelligence Platform
+
+v10.2 centralizes owner/operator authorization and immutable action audits;
+adds persistent English, Russian, Ukrainian, Hebrew, and Arabic UI with
+RTL-safe market tokens; refines Free/Pro/Elite entitlements and visible usage;
+and upgrades Scanner, Entry Readiness, Strategy Fusion, Market Regime,
+microstructure, BTC benchmark, derivatives research, alerts, watchlists,
+settings, replay, PAPER cohorts, counterfactuals, and operator analytics.
+All intelligence and AI paths remain advisory/research-only, PAPER is
+simulated, and plans do not grant execution authority.
 
 v9.9.18 adds a deterministic, research-only market-story layer built from confirmed candles; a 4H → 1H → 15M hierarchy; family-aware level and liquidity clustering; bounded BingX order-book interaction aggregates; pump/dump exhaustion research; contradiction, confidence and invalidation decomposition; Signal Quality V2; and Signal Ranking V3. New intelligence is captured at decision time and cannot affect deterministic policy, copy admission, risk, sizing, accounting, positions, or exchange execution.
 
@@ -98,11 +107,11 @@ BOT_MODE=webhook
 DATABASE_URL=postgresql://...
 WEBHOOK_BASE_URL=https://your-service.onrender.com
 MONITOR_CRON_SECRET=...
-ADMIN_IDS=123456789
+TELEGRAM_SYSTEM_ADMIN_USER_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=10.1.0
+APP_VERSION=10.2.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```
@@ -143,7 +152,9 @@ GET /internal/monitor?token=<MONITOR_CRON_SECRET>
 
 ## Diagnostics
 
-Set your Telegram numeric ID in `ADMIN_IDS`, then run:
+The fixed owner may run operator commands directly. Additional operators use
+the role-scoped `TELEGRAM_*_ADMIN_USER_IDS` variables described in
+`V10_2_MULTILINGUAL_AUTONOMOUS_INTELLIGENCE.md`. Then run:
 
 ```text
 /admin_status

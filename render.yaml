@@ -11,7 +11,17 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: APP_VERSION
-        value: 10.1.0
+        value: 10.2.0
+      - key: TELEGRAM_OPERATOR_USER_IDS
+        sync: false
+      - key: TELEGRAM_PLAN_ADMIN_USER_IDS
+        sync: false
+      - key: TELEGRAM_SYSTEM_ADMIN_USER_IDS
+        sync: false
+      - key: TELEGRAM_RESEARCH_ADMIN_USER_IDS
+        sync: false
+      - key: TELEGRAM_AI_ADMIN_USER_IDS
+        sync: false
       - key: BOT_MODE
         value: webhook
       - key: OKX_PUBLIC_MAX_ATTEMPTS

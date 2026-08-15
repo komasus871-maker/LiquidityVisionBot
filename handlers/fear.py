@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message
+from services.public_errors import public_error_message
 from utils.fear_greed import FearGreed
 
 router = Router()
@@ -20,7 +21,7 @@ async def send_fear(message: Message):
         value, text = await fear.get()
         await message.answer(f"😨 <b>Fear & Greed Index</b>\n\nValue: <b>{value}</b>\nMarket: {text}\n\n🧠 {interpretation(value)}", parse_mode="HTML")
     except Exception as exc:
-        await message.answer(f"❌ Не удалось получить индекс: {exc}")
+        await message.answer(f"❌ {public_error_message(exc, context='MARKET')}")
 
 
 @router.message(Command("fear"))

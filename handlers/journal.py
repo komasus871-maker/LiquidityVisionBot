@@ -334,10 +334,27 @@ async def trade_replay_handler(message: Message):
     market_snapshot = (market_row or {}).get("full_snapshot") or {}
     market_quality = market_snapshot.get("signal_quality_v3") or market_snapshot.get("signal_quality_v2") or {}
     market_story = market_snapshot.get("market_story") or {}
+    readiness = market_snapshot.get("entry_readiness") or {}
+    fusion = market_snapshot.get("strategy_fusion_v2") or {}
+    primary = fusion.get("primary") or {}
+    secondary = fusion.get("secondary") or {}
+    regime = market_snapshot.get("market_regime_v2") or {}
     market_summary = (
-        f"Market Story: <code>{html.escape(str(market_story.get('state') or 'UNKNOWN'))}</code>\n"
-        f"Market / Signal Quality V3: <b>{float(market_quality.get('market_quality') or 0):.0f} / "
-        f"{float(market_quality.get('overall_quality') or 0):.0f}</b>\n"
+        f"<b>Decision-time intelligence</b>\n"
+        f"Captured: <code>{html.escape(str(market_row.get('decision_at') or 'UNKNOWN'))}</code>\n"
+        f"Story / Regime: <code>{html.escape(str(market_story.get('state') or 'UNKNOWN'))} / "
+        f"{html.escape(str(regime.get('phase') or 'UNKNOWN'))}</code>\n"
+        f"Overall / Setup / Entry / Market / Execution Quality: <b>"
+        f"{float(market_quality.get('overall_quality') or 0):.0f} / "
+        f"{float(market_quality.get('setup_quality') or 0):.0f} / "
+        f"{float(market_quality.get('entry_quality') or 0):.0f} / "
+        f"{float(market_quality.get('market_quality') or 0):.0f} / "
+        f"{float(market_quality.get('execution_quality') or 0):.0f}</b>\n"
+        f"Entry Readiness: <b>{float(readiness.get('score') or 0):.0f}</b> · "
+        f"<code>{html.escape(str(readiness.get('state') or 'UNKNOWN'))}</code>\n"
+        f"Primary / Secondary strategy: <code>{html.escape(str(primary.get('strategy') or 'UNKNOWN'))}</code> / "
+        f"<code>{html.escape(str(secondary.get('strategy') or 'UNKNOWN'))}</code> · "
+        f"gap <b>{float(fusion.get('suitability_gap') or 0):.0f}</b>\n"
         f"Evidence Diversity: <b>{float(market_quality.get('evidence_diversity_score') or 0):.0f}</b>\n"
         if market_row else "Market Intelligence: <code>not captured for this legacy signal</code>\n"
     )
@@ -363,6 +380,8 @@ Dynamic Confidence: <b>{float(signal.get('dynamic_confidence') or signal.get('co
 {market_summary}
 
 ━━━━━━━━━━━━━━━━━━
+
+<b>Outcome evolution</b>
 
 {replay}
 """,

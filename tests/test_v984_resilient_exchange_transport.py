@@ -28,8 +28,8 @@ def test_release_and_registry_transport_settings(monkeypatch):
     monkeypatch.setenv("EXCHANGE_READ_TIMEOUT", "9")
     monkeypatch.setenv("EXCHANGE_MAX_ATTEMPTS", "4")
     adapter = build_exchange_registry().create("okx")
-    assert APP_VERSION == "10.1.0"
-    assert RELEASE_NAME == "Intelligence Product Platform"
+    assert APP_VERSION == "10.2.0"
+    assert RELEASE_NAME == "Multilingual Autonomous Intelligence Platform"
     assert adapter.connect_timeout_seconds == 2.5
     assert adapter.read_timeout_seconds == 9
     assert adapter.max_attempts == 4

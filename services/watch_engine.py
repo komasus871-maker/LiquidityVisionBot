@@ -20,6 +20,8 @@ from services.analyzer import Analyzer
 from services.market import Market
 from services.probability_engine import ProbabilityEngine
 from services.signal_recorder import SignalRecorder
+from services.intelligence_alerts import IntelligenceAlertService
+from services.localization import LocalizationService
 
 
 class WatchEngine:
@@ -37,6 +39,10 @@ class WatchEngine:
         self.analyzer = Analyzer()
         self.probability = ProbabilityEngine()
         self.recorder = SignalRecorder()
+        self.alerts = IntelligenceAlertService(
+            debounce_minutes=int(os.getenv("ALERT_DEBOUNCE_MINUTES", "30")),
+        )
+        self.i18n = LocalizationService()
         self._stop = asyncio.Event()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
@@ -49,6 +55,13 @@ class WatchEngine:
 
     @staticmethod
     def _snapshot(analysis: dict) -> dict:
+        intelligence = analysis.get("market_intelligence") or {}
+        quality = intelligence.get("signal_quality_v3") or {}
+        readiness = intelligence.get("entry_readiness") or {}
+        fusion = intelligence.get("strategy_fusion_v2") or {}
+        primary = fusion.get("primary") or {}
+        regime = intelligence.get("market_regime_v2") or {}
+        microstructure = intelligence.get("microstructure") or {}
         return {
             "price": float(analysis.get("price") or 0),
             "direction": analysis.get("direction"),
@@ -56,7 +69,13 @@ class WatchEngine:
             "execution_status": analysis.get("execution_status"),
             "recommendation": analysis.get("recommendation"),
             "direction_score": float(analysis.get("direction_score") or 0),
-            "readiness": float(analysis.get("execution_readiness") or 0),
+            "readiness": float(readiness.get("score") or analysis.get("execution_readiness") or 0),
+            "readiness_state": readiness.get("state") or analysis.get("execution_status"),
+            "quality": float(quality.get("overall_quality") or analysis.get("decision_quality_score") or 0),
+            "strategy": primary.get("strategy") or analysis.get("setup_type") or "UNCLASSIFIED",
+            "strategy_fit": float(primary.get("suitability") or 0),
+            "regime": regime.get("phase") or (intelligence.get("market_story") or {}).get("state"),
+            "microstructure_quality": float(microstructure.get("microstructure_quality") or 0),
             "bos": analysis.get("bos"),
             "choch": analysis.get("choch"),
             "preferred_entry_low": analysis.get("preferred_entry_low"),
@@ -89,6 +108,36 @@ class WatchEngine:
         if is_in_zone and not was_in_zone:
             changes.append("Price entered the preferred entry zone")
         return changes
+
+    def _alert_candidates(self, previous: dict, current: dict) -> list[dict]:
+        candidates: list[dict] = []
+        def changed(field: str, alert_type: str, label: str, *, threshold: float | None = None) -> None:
+            before, after = previous.get(field), current.get(field)
+            if threshold is not None:
+                if abs(float(after or 0) - float(before or 0)) < threshold:
+                    return
+            elif before == after:
+                return
+            candidates.append({"type": alert_type, "identity": f"{field}:{after}",
+                               "text": f"{label}: {before or '—'} → {after or '—'}",
+                               "before": before, "after": after})
+        changed("execution_status", "STATUS_CHANGE", "Status")
+        changed("direction", "DIRECTION_CHANGE", "Direction")
+        changed("readiness", "READINESS_CHANGE", "Readiness", threshold=self.readiness_delta)
+        changed("quality", "QUALITY_CHANGE", "Quality", threshold=self.score_delta)
+        changed("readiness_state", "READINESS_CHANGE", "Readiness state")
+        changed("strategy", "STRATEGY_CHANGE", "Primary strategy")
+        changed("regime", "REGIME_CHANGE", "Market regime")
+        changed("microstructure_quality", "MICROSTRUCTURE_CHANGE", "Microstructure quality", threshold=self.score_delta)
+        if previous.get("bos") != current.get("bos") and "No BOS" not in str(current.get("bos")):
+            candidates.append({"type": "STRUCTURE_BREAK", "identity": f"bos:{current.get('bos')}",
+                               "text": f"BOS: {current.get('bos')}"})
+        was_in_zone = self._in_zone(float(previous.get("price") or 0), previous.get("preferred_entry_low"), previous.get("preferred_entry_high"))
+        is_in_zone = self._in_zone(current["price"], current.get("preferred_entry_low"), current.get("preferred_entry_high"))
+        if is_in_zone and not was_in_zone:
+            candidates.append({"type": "ENTRY_ZONE", "identity": "entry-zone:entered",
+                               "text": "Price entered the preferred entry zone"})
+        return candidates
 
     @staticmethod
     def _load_rows() -> list[dict]:
@@ -172,22 +221,46 @@ class WatchEngine:
                 raw_previous = row.get("snapshot_json")
                 previous = json.loads(raw_previous) if raw_previous else None
                 changes = self._material_changes(previous, current) if previous else []
-                self._save_state(row["telegram_id"], symbol, timeframe, current, notified=bool(changes), signal_id=signal_id)
+                candidates = self._alert_candidates(previous, current) if previous else []
+                eligible = []
+                for candidate in candidates:
+                    decision = self.alerts.evaluate(
+                        row["telegram_id"], symbol=symbol, timeframe=timeframe,
+                        alert_type=candidate["type"], state_identity=candidate["identity"],
+                        details={"change": candidate, "snapshot": current, "signal_id": signal_id},
+                    )
+                    if decision["status"] == "ELIGIBLE":
+                        eligible.append((candidate, decision))
+                notified = False
                 if signal_id:
                     self._add_event(row["telegram_id"], symbol, timeframe, "PROMOTED_TO_SIGNAL", {"signal_id": signal_id})
                 if changes:
                     self._add_event(row["telegram_id"], symbol, timeframe, "MATERIAL_CHANGE", {"changes": changes, "snapshot": current})
-                if changes and self.bot and bool(row.get("notifications_enabled", 1)):
+                if eligible and self.bot and bool(row.get("notifications_enabled", 1)):
+                    language = self.i18n.language(row["telegram_id"])
                     lines = [
-                        f"🔔 <b>{symbol} · {timeframe.upper()} WATCH UPDATE</b>", "",
-                        *[f"• {change}" for change in changes], "",
+                        f"🔔 <b>{self.i18n.market_token(symbol, language=language)} · "
+                        f"{self.i18n.market_token(timeframe.upper(), language=language)} WATCH UPDATE</b>", "",
+                        *[f"• {candidate['text']}" for candidate, _ in eligible], "",
                         f"Bias: {current.get('market_bias')}",
                         f"Recommendation: {current.get('recommendation')}",
-                        f"Direction / Ready: {current['direction_score']:.1f} / {current['readiness']:.1f}",
+                        f"Quality / Readiness: {current['quality']:.1f} / {current['readiness']:.1f}",
+                        f"Strategy: {current['strategy']} · Regime: {current['regime']}",
                         f"Price: <code>{current['price']}</code>",
                     ]
-                    await self.bot.send_message(row["telegram_id"], "\n".join(lines), parse_mode="HTML")
-                return {"ok": True, "signal_id": signal_id, "notified": bool(changes)}
+                    try:
+                        await self.bot.send_message(row["telegram_id"], "\n".join(lines), parse_mode="HTML")
+                    except Exception:
+                        for _, decision in eligible:
+                            self.alerts.mark_delivery_failed(decision["alert_key"])
+                        logging.exception("Watch alert delivery failed for %s %s", symbol, timeframe)
+                    else:
+                        notified = True
+                        for _, decision in eligible:
+                            self.alerts.mark_delivered(decision["alert_key"])
+                self._save_state(row["telegram_id"], symbol, timeframe, current, notified=notified, signal_id=signal_id)
+                return {"ok": True, "signal_id": signal_id, "notified": notified,
+                        "eligible_alerts": len(eligible)}
             except Exception as exc:
                 logging.exception("Watch engine failed for %s %s", symbol, timeframe)
                 self._save_error(row["telegram_id"], symbol, timeframe, str(exc))

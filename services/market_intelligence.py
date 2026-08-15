@@ -14,10 +14,10 @@ import numpy as np
 import pandas as pd
 
 
-INTELLIGENCE_VERSION = "market-intelligence-v3"
-STORY_VERSION = "market-story-v1"
+INTELLIGENCE_VERSION = "market-intelligence-v4"
+STORY_VERSION = "market-story-v2"
 LEVEL_VERSION = "level-intelligence-v1"
-MICROSTRUCTURE_VERSION = "microstructure-v1"
+MICROSTRUCTURE_VERSION = "microstructure-v2"
 QUALITY_VERSION = "signal-quality-v3"
 RANK_VERSION = "signal-ranking-v4"
 
@@ -750,6 +750,25 @@ class OrderBookMicrostructureEngine:
             behavior_labels.add("MICROSTRUCTURE_NEUTRAL" if len(books) >= 3 else "INSUFFICIENT_HISTORY")
         interaction_quality = _clip(min(len(books) / 5, 1) * 35 + min(len(walls), 3) * 10
                                     + sum(wall["touched"] for wall in walls) * 12)
+        persistence_quality = _clip(statistics.fmean(
+            [wall["persistence_ratio"] * 100 for wall in walls]
+        ) if walls else min(len(books) / 5, 1) * 55)
+        spread_quality = _clip(100 - latest["spread_pct"] * 2200)
+        depth_stability = _clip(100 - min(depth_turnover, 1) * 100)
+        microstructure_quality = _clip(
+            interaction_quality * .40 + persistence_quality * .20
+            + spread_quality * .20 + depth_stability * .20
+        )
+        imbalance_history = []
+        for book in books:
+            bid_depth = sum(size for _, size in book["bids"])
+            ask_depth = sum(size for _, size in book["asks"])
+            total = bid_depth + ask_depth
+            imbalance_history.append((bid_depth - ask_depth) / total if total else 0.0)
+        imbalance_trend = "STABLE"
+        if len(imbalance_history) >= 3:
+            delta = statistics.fmean(imbalance_history[-2:]) - statistics.fmean(imbalance_history[:2])
+            imbalance_trend = "BID_STRENGTHENING" if delta >= .12 else "ASK_STRENGTHENING" if delta <= -.12 else "STABLE"
         best_bid = latest["bids"][0][0]
         best_ask = latest["asks"][0][0]
         return {
@@ -767,6 +786,12 @@ class OrderBookMicrostructureEngine:
             "behavior_labels": sorted(behavior_labels),
             "executed_flow_available": executed_flow_available,
             "actor_identity_claimed": False, "interaction_quality": interaction_quality,
+            "microstructure_quality": microstructure_quality,
+            "quality_components": {"interaction": interaction_quality,
+                                   "persistence": persistence_quality,
+                                   "spread": spread_quality,
+                                   "depth_stability": depth_stability},
+            "imbalance_trend": imbalance_trend,
             "mid_change_pct": round(mid_change, 5), "depth_turnover": round(depth_turnover, 5),
             "raw_book_persisted": False, "spoofing_caveat": "Resting liquidity is untrusted until interaction confirms it.",
         }
@@ -970,8 +995,28 @@ class SignalQualityEngine:
         }
         family_count = sum(score >= 60 for score in family_scores.values())
         diversity = _clip(family_count / max(1, len(family_scores)) * 100)
+        setup_quality = _clip(
+            family_scores["STRUCTURE"] * .30 + family_scores["LIQUIDITY"] * .25
+            + family_scores["LOCATION"] * .20 + family_scores["MOMENTUM"] * .25
+            - min(penalty, 30)
+        )
+        entry_quality = _clip(
+            family_scores["LOCATION"] * .32 + family_scores["MICROSTRUCTURE"] * .28
+            + family_scores["INVALIDATION"] * .25 + family_scores["EXECUTION_COST"] * .15
+            - min(penalty, 25)
+        )
+        execution_quality = _clip(
+            family_scores["INVALIDATION"] * .35 + family_scores["TARGET_REALISM"] * .25
+            + family_scores["EXECUTION_COST"] * .25 + family_scores["MICROSTRUCTURE"] * .15
+        )
+        data_confidence = confidence["DATA_CONFIDENCE"]
         return {
             "version": QUALITY_VERSION, "overall_quality": overall, "market_quality": market_quality,
+            "setup_quality": setup_quality, "entry_quality": entry_quality,
+            "execution_quality": execution_quality, "data_confidence": data_confidence,
+            "quality_dimensions": {"setup": setup_quality, "entry": entry_quality,
+                                   "market": market_quality, "execution": execution_quality,
+                                   "data_confidence": data_confidence},
             "family_scores": family_scores, "normalized_components": dict(family_scores),
             "raw_components": raw_components,
             "family_aggregation": "MAX_65_PERCENT_PLUS_FAMILY_MEAN_35_PERCENT",
@@ -1001,12 +1046,31 @@ class MarketIntelligenceEngine:
         if benchmark is None or len(benchmark) < 3 or len(frame) < 3:
             return {"status": "UNAVAILABLE", "quality": 50, "reason": "benchmark series not supplied"}
         count = min(len(frame), len(benchmark), 25)
-        asset = float(frame["close"].iloc[-1] / frame["close"].iloc[-count] - 1) * 100
-        bench = float(benchmark["close"].iloc[-1] / benchmark["close"].iloc[-count] - 1) * 100
+        asset_close = frame["close"].astype(float).iloc[-count:].reset_index(drop=True)
+        bench_close = benchmark["close"].astype(float).iloc[-count:].reset_index(drop=True)
+        asset = float(asset_close.iloc[-1] / asset_close.iloc[0] - 1) * 100
+        bench = float(bench_close.iloc[-1] / bench_close.iloc[0] - 1) * 100
         spread = asset - bench
-        state = "INDEPENDENT_STRENGTH" if spread > 2 else "INDEPENDENT_WEAKNESS" if spread < -2 else "MARKET_BETA"
+        asset_returns = asset_close.pct_change().dropna()
+        bench_returns = bench_close.pct_change().dropna()
+        correlation = float(asset_returns.corr(bench_returns)) if len(asset_returns) >= 3 else 0.0
+        variance = float(bench_returns.var()) if len(bench_returns) >= 3 else 0.0
+        beta = float(asset_returns.cov(bench_returns) / variance) if variance > 1e-16 else 0.0
+        if spread > 2 and correlation < .75:
+            state = "INDEPENDENT_STRENGTH"
+        elif spread < -2 and correlation < .75:
+            state = "INDEPENDENT_WEAKNESS"
+        elif abs(beta) >= 1.25:
+            state = "HIGH_BETA"
+        elif abs(beta) <= .55:
+            state = "DEFENSIVE_DECOUPLING"
+        else:
+            state = "MARKET_BETA"
         return {"status": "AVAILABLE", "asset_move_pct": round(asset, 4), "benchmark_move_pct": round(bench, 4),
-                "relative_move_pct": round(spread, 4), "state": state, "quality": _clip(60 + min(abs(spread), 10) * 3)}
+                "relative_move_pct": round(spread, 4), "correlation": round(correlation, 4),
+                "beta": round(beta, 4), "state": state,
+                "benchmark_version": "btc-benchmark-v2",
+                "quality": _clip(55 + min(abs(spread), 10) * 3 + min(count, 25) / 5)}
 
     @staticmethod
     def _funding_oi(context: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -1021,8 +1085,22 @@ class MarketIntelligenceEngine:
         divergence = "UNKNOWN"
         if price_change is not None and oi_change is not None:
             divergence = f"PRICE_{'UP' if _number(price_change) >= 0 else 'DOWN'}_OI_{'UP' if _number(oi_change) >= 0 else 'DOWN'}"
-        return {"status": "AVAILABLE", "funding_rate": funding, "funding_percentile": context.get("funding_percentile"),
+        funding_history = [_number(value) for value in (context.get("funding_history") or [])][-12:]
+        oi_history = [_number(value) for value in (context.get("open_interest_history") or [])][-12:]
+        funding_trend = "UNAVAILABLE"
+        if len(funding_history) >= 3:
+            delta = statistics.fmean(funding_history[-2:]) - statistics.fmean(funding_history[:2])
+            funding_trend = "RISING" if delta > 0 else "FALLING" if delta < 0 else "STABLE"
+        oi_acceleration = "UNAVAILABLE"
+        if len(oi_history) >= 4 and all(value > 0 for value in oi_history):
+            recent = (oi_history[-1] / oi_history[-2] - 1) * 100
+            prior = (oi_history[-2] / oi_history[-3] - 1) * 100
+            oi_acceleration = "ACCELERATING" if recent - prior >= .25 else "DECELERATING" if prior - recent >= .25 else "STABLE"
+        return {"status": "AVAILABLE", "version": "funding-oi-research-v2",
+                "funding_rate": funding, "funding_percentile": context.get("funding_percentile"),
                 "open_interest": oi, "open_interest_change_pct": oi_change, "price_oi_state": divergence,
+                "funding_trend": funding_trend, "oi_acceleration": oi_acceleration,
+                "history_points": {"funding": len(funding_history), "open_interest": len(oi_history)},
                 "fabricated": False}
 
     @staticmethod
@@ -1058,36 +1136,126 @@ class MarketIntelligenceEngine:
 
     @staticmethod
     def _entry_readiness(*, plan: Mapping[str, Any], quality: Mapping[str, Any],
-                         microstructure: Mapping[str, Any], momentum: Mapping[str, Any]) -> dict[str, Any]:
+                         microstructure: Mapping[str, Any], momentum: Mapping[str, Any],
+                         structure: Mapping[str, Any] | None = None,
+                         data_quality: Mapping[str, Any] | None = None) -> dict[str, Any]:
         entry, stop = _number(plan.get("entry")), _number(plan.get("stop"))
         geometry = bool((quality.get("invalidation") or {}).get("valid_geometry"))
         rr = _number(plan.get("rr"))
         location = _number((quality.get("family_scores") or {}).get("LOCATION"), 50)
         momentum_score = _number((quality.get("family_scores") or {}).get("MOMENTUM"), 50)
         micro_score = _number((quality.get("family_scores") or {}).get("MICROSTRUCTURE"), 45)
-        score = _clip(location * .35 + momentum_score * .3 + micro_score * .2 + (80 if 1 <= rr <= 3 else 35) * .15)
+        trigger = _number((quality.get("family_scores") or {}).get("STRUCTURE"), 50)
+        invalidation = _number((quality.get("family_scores") or {}).get("INVALIDATION"), 0)
+        reward_cost = _number((quality.get("family_scores") or {}).get("TARGET_REALISM"), 40)
+        execution_cost = _number((quality.get("family_scores") or {}).get("EXECUTION_COST"), 50)
+        data_confidence = _number(quality.get("data_confidence") or (quality.get("confidence") or {}).get("DATA_CONFIDENCE"), 50)
+        components = {
+            "LOCATION": location,
+            "TRIGGER": trigger,
+            "MOMENTUM": momentum_score,
+            "MICROSTRUCTURE": micro_score,
+            "INVALIDATION": invalidation,
+            "REWARD_AFTER_COST": _clip(reward_cost * .65 + execution_cost * .35),
+            "DATA_CONFIDENCE": data_confidence,
+        }
+        weights = {"LOCATION": .20, "TRIGGER": .18, "MOMENTUM": .17,
+                   "MICROSTRUCTURE": .12, "INVALIDATION": .15,
+                   "REWARD_AFTER_COST": .10, "DATA_CONFIDENCE": .08}
+        score = _clip(sum(components[key] * weight for key, weight in weights.items()))
         reasons: list[str] = []
         if not geometry or entry <= 0 or stop <= 0:
             state, score = "INVALID_ENTRY", min(score, 20)
             reasons.append("INVALID_STOP_OR_ENTRY_GEOMETRY")
+        elif (data_quality or {}).get("status") == "INVALID":
+            state, score = "STALE_OR_INVALID_DATA", min(score, 15)
+            reasons.append("MARKET_DATA_INVALID")
         elif location < 35:
             state = "CHASING"
             reasons.append("POOR_LOCATION")
         elif momentum.get("state") in {"EXHAUSTING", "REVERSING"}:
             state = "WAIT_STRUCTURE"
             reasons.append("MOMENTUM_NOT_CONFIRMED")
+        elif trigger < 45 or str((structure or {}).get("break") or "") in {"NO_BREAK", "UNKNOWN"}:
+            state = "WAIT_CONFIRMATION"
+            reasons.append("STRUCTURE_TRIGGER_MISSING")
         elif microstructure.get("status") != "AVAILABLE":
-            state = "WAIT_RECLAIM" if score < 60 else "READY"
+            state = "READY_WITH_DATA_GAP" if score >= 65 else "WAIT_RECLAIM"
             reasons.append("MICROSTRUCTURE_UNAVAILABLE")
-        elif score >= 65:
+        elif score >= 72 and min(location, trigger, momentum_score, invalidation) >= 50:
             state = "READY"
-        elif score >= 50:
+        elif score >= 58:
             state = "EARLY"
         else:
             state = "WAIT_PULLBACK"
-        return {"version": "entry-quality-v1", "state": state, "score": round(score, 3),
+        weakest = sorted(components, key=components.get)[:2]
+        return {"version": "entry-readiness-v2", "state": state, "score": round(score, 3),
+                "components": components, "weights": weights, "weakest_components": weakest,
                 "reason_codes": reasons, "setup_quality_separate": True,
                 "score_is_probability": False, "execution_authority": False}
+
+    @staticmethod
+    def _strategy_fusion(scores: Mapping[str, float]) -> dict[str, Any]:
+        ranked = sorted(((str(name), _number(score)) for name, score in scores.items()),
+                        key=lambda item: (-item[1], item[0]))
+        primary = ranked[0] if ranked else ("UNCLASSIFIED", 0.0)
+        secondary = ranked[1] if len(ranked) > 1 else ("NONE", 0.0)
+        gap = primary[1] - secondary[1]
+        return {"version": "strategy-fusion-v2",
+                "primary": {"strategy": primary[0], "suitability": round(primary[1], 3)},
+                "secondary": {"strategy": secondary[0], "suitability": round(secondary[1], 3)},
+                "suitability_gap": round(gap, 3),
+                "fusion_state": "CLEAR_PRIMARY" if gap >= 12 else "BLENDED" if gap >= 5 else "AMBIGUOUS",
+                "scores": dict(scores), "score_is_probability": False,
+                "execution_authority": False}
+
+    @staticmethod
+    def _market_regime(*, story: Mapping[str, Any], trend: Mapping[str, Any],
+                       momentum: Mapping[str, Any], frame: pd.DataFrame) -> dict[str, Any]:
+        returns = frame["close"].astype(float).pct_change().dropna().tail(20)
+        realized = float(returns.std() * math.sqrt(max(len(returns), 1)) * 100) if len(returns) else 0.0
+        story_state = str(story.get("state") or "UNCERTAIN")
+        trend_state = str(trend.get("state") or "UNKNOWN")
+        if story_state in {"TREND_CONTINUATION", "BREAKOUT_ATTEMPT"}:
+            phase = "EXPANSION"
+        elif story_state in {"RANGE", "PULLBACK"}:
+            phase = "COMPRESSION_OR_ROTATION"
+        elif "EXHAUSTION" in story_state:
+            phase = "EXHAUSTION"
+        else:
+            phase = "UNCERTAIN"
+        volatility = "HIGH" if realized >= 6 else "LOW" if realized <= 1.5 else "NORMAL"
+        return {"version": "market-regime-v2", "phase": phase, "volatility": volatility,
+                "realized_volatility_pct": round(realized, 4),
+                "trend_state": trend_state, "momentum_state": momentum.get("state"),
+                "strategy_implication": {
+                    "EXPANSION": "favor continuation after cost and confirmation",
+                    "COMPRESSION_OR_ROTATION": "favor selective range or breakout preparation",
+                    "EXHAUSTION": "continuation risk is elevated; require reversal evidence",
+                    "UNCERTAIN": "reduce confidence and wait for differentiated evidence",
+                }[phase], "execution_authority": False}
+
+    @staticmethod
+    def _momentum_reacceleration(frame: pd.DataFrame, *, momentum: Mapping[str, Any],
+                                 trend: Mapping[str, Any], structure: Mapping[str, Any]) -> dict[str, Any]:
+        returns = frame["close"].astype(float).pct_change().dropna()
+        if len(returns) < 8:
+            return {"version": "momentum-reacceleration-v2", "state": "INSUFFICIENT_HISTORY",
+                    "quality": 0.0, "explosive_continuation": False}
+        recent = float(returns.tail(3).abs().mean())
+        prior = float(returns.iloc[-8:-3].abs().mean())
+        acceleration = recent / max(prior, 1e-12)
+        directional = abs(float(returns.tail(3).sum())) / max(float(returns.tail(3).abs().sum()), 1e-12)
+        structure_confirmed = structure.get("break") == "CLOSE_CONFIRMED_BREAK"
+        reaccelerating = acceleration >= 1.25 and directional >= .65
+        explosive = reaccelerating and acceleration >= 1.8 and structure_confirmed and trend.get("state") not in {"EXHAUSTED"}
+        state = "EXPLOSIVE_CONTINUATION_CANDIDATE" if explosive else "REACCELERATING" if reaccelerating else "NO_REACCELERATION"
+        return {"version": "momentum-reacceleration-v2", "state": state,
+                "acceleration_ratio": round(acceleration, 4), "directional_efficiency": round(directional, 4),
+                "structure_confirmed": structure_confirmed,
+                "quality": _clip(min(acceleration, 2.5) / 2.5 * 60 + directional * 40),
+                "explosive_continuation": explosive,
+                "research_only": True, "execution_authority": False}
 
     @staticmethod
     def _research_policies(plan: Mapping[str, Any], quality: Mapping[str, Any], timeframe: str) -> dict[str, Any]:
@@ -1148,7 +1316,7 @@ class MarketIntelligenceEngine:
         momentum, trend = MomentumTrendEngine.analyze(frame)
         reversal = self.reversals.analyze(frame, timeframe, momentum, structure, trend)
         if (microstructure_aggregate and
-                microstructure_aggregate.get("version") == MICROSTRUCTURE_VERSION and
+                microstructure_aggregate.get("version") in {MICROSTRUCTURE_VERSION, "microstructure-v1"} and
                 microstructure_aggregate.get("status") == "AVAILABLE" and
                 not microstructure_aggregate.get("raw_book_persisted") and
                 not contains_raw_order_book(microstructure_aggregate)):
@@ -1177,6 +1345,7 @@ class MarketIntelligenceEngine:
                                        funding_oi=funding_context)
         strategy = self._strategy_suitability(story=story, quality=quality, reversal=reversal,
                                                timeframe=timeframe)
+        strategy_fusion = self._strategy_fusion(strategy)
         strategy_assessments = {
             name: {"suitability_score": score,
                    "supporting_evidence": [story.get("state")],
@@ -1190,7 +1359,12 @@ class MarketIntelligenceEngine:
             for name, score in strategy.items()
         }
         entry_readiness = self._entry_readiness(plan=normalized_plan, quality=quality,
-                                                microstructure=microstructure, momentum=momentum)
+                                                microstructure=microstructure, momentum=momentum,
+                                                structure=structure, data_quality=data_quality)
+        regime = self._market_regime(story=story, trend=trend, momentum=momentum, frame=frame)
+        reacceleration = self._momentum_reacceleration(
+            frame, momentum=momentum, trend=trend, structure=structure,
+        )
         research = self._research_policies(normalized_plan, quality, timeframe)
         result = {
             "version": INTELLIGENCE_VERSION, "feature_version": "decision-features-v3",
@@ -1205,7 +1379,9 @@ class MarketIntelligenceEngine:
             "funding_open_interest": funding_context,
             "signal_quality_v2": quality, "signal_quality_v3": quality,
             "entry_readiness": entry_readiness,
-            "strategy_suitability": strategy, "strategy_assessments": strategy_assessments,
+            "strategy_suitability": strategy, "strategy_fusion_v2": strategy_fusion,
+            "strategy_assessments": strategy_assessments,
+            "market_regime_v2": regime, "momentum_reacceleration": reacceleration,
             "research_policies": research,
             "economic_authority": False, "execution_authority": False,
             "future_data_used": False, "raw_order_book_persisted": False,

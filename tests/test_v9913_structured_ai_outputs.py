@@ -19,7 +19,7 @@ def _request(mode=AIOutputMode.STRICT_JSON_SCHEMA):
 
 
 def test_release_and_schema_checksum_are_stable():
-    assert APP_VERSION == "10.1.0" and RELEASE_NAME == "Intelligence Product Platform"
+    assert APP_VERSION == "10.2.0" and RELEASE_NAME == "Multilingual Autonomous Intelligence Platform"
     assert SCHEMA_CHECKSUM == checksum(RESPONSE_SCHEMA)
     assert RESPONSE_SCHEMA["additionalProperties"] is False
     assert set(RESPONSE_SCHEMA["required"]) <= set(RESPONSE_SCHEMA["properties"])

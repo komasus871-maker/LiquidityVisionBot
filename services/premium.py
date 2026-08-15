@@ -23,7 +23,7 @@ class PremiumService:
             except ValueError:
                 remaining = 0
         assigned = self.entitlements.assign_plan(
-            telegram_id, tier, source="TELEGRAM_STARS",
+            telegram_id, tier, source="PURCHASE",
             duration_days=max(1, int(days)) + remaining,
             audit_metadata={"payment_product": "PRO_30_DAY"},
         )

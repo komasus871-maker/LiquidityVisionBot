@@ -18,18 +18,18 @@ from services.ai_operations import (
     promotion_evidence, provider_identity,
 )
 from services.ai_intelligence import AIObservationIntelligence
+from services.operator_authorization import OperatorAuthorizationService, OperatorCapability
 
 
 router = Router()
-
-
-def _admin_ids() -> set[int]:
-    raw = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", ""))
-    return {int(value.strip()) for value in raw.replace(";", ",").split(",") if value.strip().isdigit()}
+operators = OperatorAuthorizationService()
 
 
 def _is_admin(message: Message) -> bool:
-    return bool(message.from_user and message.from_user.id in _admin_ids())
+    actor = message.from_user.id if message.from_user else None
+    command = str(message.text or "").split(maxsplit=1)[0].lstrip("/").split("@", 1)[0].upper()
+    return operators.authorize(actor_telegram_id=actor, capability=OperatorCapability.AI_ADMIN,
+                               action=f"AI_ADMIN:{command or 'UNKNOWN'}")
 
 
 def _items(raw: str | None, limit: int = 4) -> str:

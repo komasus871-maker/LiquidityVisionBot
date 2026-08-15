@@ -913,6 +913,15 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS operator_audit_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, actor_telegram_id BIGINT,
+                target_telegram_id BIGINT, required_capability TEXT NOT NULL,
+                action TEXT NOT NULL, outcome TEXT NOT NULL, previous_state_json TEXT NOT NULL,
+                new_state_json TEXT NOT NULL, metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS user_preferences(
                 telegram_id BIGINT PRIMARY KEY, preferred_symbols_json TEXT NOT NULL DEFAULT '[]',
                 preferred_timeframes_json TEXT NOT NULL DEFAULT '[]',

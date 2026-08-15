@@ -1,3 +1,16 @@
+## v10.2.0 — Multilingual Autonomous Intelligence Platform
+
+- Replaced scattered admin-ID parsing with a fail-closed role service, fixed owner `7975010097`, role-scoped environment IDs, and database-backed authorization/action audits; the owner receives no automatic paid plan.
+- Added audited plan/status/revoke/extend/entitlement/user/usage/AI-usage/health dashboards and retained legacy plan command aliases behind the same authorization boundary.
+- Added persistent English, Russian, Ukrainian, Hebrew, and Arabic preferences, localized onboarding/help/menu/plans/settings/scanner/watchlist/system surfaces, English fallback, and bidi-isolated market tokens for Hebrew/Arabic.
+- Refined Free/Pro/Elite capabilities and daily limits, centralized usage enforcement, `/usage`, custom Elite scanner filters, and explicit plan-source/audit provenance.
+- Added Scanner V2 separation of Scanner Score, Quality, Entry Readiness and strategy fit; Entry Readiness V2 components/states; Strategy Fusion V2 primary/secondary suitability; Market Regime V2; momentum reacceleration and explosive-continuation research.
+- Added Quality dimension separation, Microstructure V2 quality/trends, BTC benchmark beta/correlation states, and funding/OI trend/acceleration diagnostics without fabricating missing history.
+- Integrated Alert Engine V3 with Watch Engine delivery, entitlement/category/usage/debounce checks and delivered/failed persistence; upgraded Smart Watchlist V2, freshness UX and stored-error sanitization.
+- Added PAPER copy cohorts by strategy/timeframe/symbol/decision-time Quality/Readiness and explicit MAX_SLIPPAGE/MAX_HEAT/LOW_CONFIDENCE counterfactuals, plus clearer decision-time versus outcome Trade Replay.
+- Added privacy-conscious command analytics, admin product/AI usage views, public error sanitization, System Health V3, and additive repeatable database schema.
+- Preserved deterministic execution policy, PAPER accounting, fail-closed LIVE gates, and zero AI execution authority; no paid AI request is required by this release.
+
 ## v9.9.18 — Market Intelligence & Signal Quality
 
 - Added a deterministic Market Story Engine with decision-time state transitions and explicit no-future-data provenance.

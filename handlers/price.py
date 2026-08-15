@@ -1,6 +1,7 @@
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from services.public_errors import public_error_message
 
 from services.market import Market
 from services.symbol_resolver import SymbolResolver
@@ -29,7 +30,7 @@ async def price(message: Message):
         resolved = await resolver.resolve(command[1], interval="1h")
         data = await market.provider.get_ticker(resolved.base)
     except Exception as exc:
-        await message.answer(f"❌ Инструмент OKX не найден или временно недоступен.\n\n{exc}")
+        await message.answer(f"❌ {public_error_message(exc, context='MARKET')}")
         return
 
     change = data["change_percent_24h"]

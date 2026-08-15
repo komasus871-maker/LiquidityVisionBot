@@ -49,8 +49,8 @@ def _journal_and_plan(tmp_path, monkeypatch):
 
 
 def test_release_identity() -> None:
-    assert APP_VERSION == "10.1.0"
-    assert RELEASE_NAME == "Intelligence Product Platform"
+    assert APP_VERSION == "10.2.0"
+    assert RELEASE_NAME == "Multilingual Autonomous Intelligence Platform"
 
 
 def test_transition_table_exposes_expected_execution_path() -> None:

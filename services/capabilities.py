@@ -7,8 +7,8 @@ from typing import Any
 from database.database import connect
 
 
-ENTITLEMENT_VERSION = "entitlements-v1"
-PLAN_VERSION = "product-plans-v1"
+ENTITLEMENT_VERSION = "entitlements-v2"
+PLAN_VERSION = "product-plans-v2"
 
 CAPABILITIES: dict[str, dict[str, Any]] = {
     "BASIC_SIGNALS": {"mode": "CORE", "description": "Basic signals and lifecycle"},
@@ -30,6 +30,10 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "PORTFOLIO_EDGE": {"mode": "RESEARCH_ONLY", "description": "Portfolio overlap research"},
     "ADVANCED_ALERTS": {"mode": "OBSERVE", "description": "Material intelligence alerts"},
     "PRIORITY_ANALYSIS": {"mode": "OBSERVE", "description": "Higher analysis usage allowance"},
+    "SCANNER_CUSTOM": {"mode": "RESEARCH_ONLY", "description": "Custom bounded opportunity filters"},
+    "ADVANCED_SETTINGS": {"mode": "OBSERVE", "description": "Strategy and timeframe personalization"},
+    "DETAILED_REPLAY": {"mode": "PAPER", "description": "Detailed immutable Trade Replay"},
+    "ADVANCED_COHORT_ANALYTICS": {"mode": "RESEARCH_ONLY", "description": "Exception and opportunity-cost cohorts"},
     # Compatibility capabilities retained as aliases for earlier callers.
     "COPY_TRADING": {"mode": "PAPER", "description": "Automatic deterministic PAPER copy"},
     "ADVANCED_ANALYTICS": {"mode": "OBSERVE", "description": "Cohort and outcome analytics"},
@@ -45,7 +49,9 @@ PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
         "name": "Free", "description": "Useful core market intelligence and PAPER experience",
         "capabilities": {"BASIC_SIGNALS", "BASIC_JOURNAL", "BASIC_PAPER_COPY", "COPY_TRADING",
                          "STRATEGY_LAB"},
-        "limits": {"watchlist_items": 20, "advanced_ai_daily": 0, "scanner_daily": 10},
+        "limits": {"watchlist_items": 20, "advanced_ai_daily": 0, "scanner_daily": 10,
+                   "advanced_research_daily": 2, "export_daily": 0,
+                   "alert_daily": 10, "heavy_analysis_concurrency": 1},
     },
     "PRO": {
         "name": "Pro", "description": "Advanced market intelligence and customization",
@@ -53,8 +59,10 @@ PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
         "capabilities": {"MARKET_STORY_FULL", "SIGNAL_QUALITY_FULL", "MICROSTRUCTURE_VIEW",
                          "DERIVATIVES_VIEW", "ADVANCED_RANKING", "COPY_CUSTOM_PROFILE",
                          "COPY_ADVANCED_FILTERS", "ADVANCED_ANALYTICS", "ADVANCED_RISK_PROFILES",
-                         "ADVANCED_ALERTS", "PRIORITY_ANALYSIS"},
-        "limits": {"watchlist_items": 100, "advanced_ai_daily": 10, "scanner_daily": 50},
+                         "ADVANCED_ALERTS", "PRIORITY_ANALYSIS", "ADVANCED_SETTINGS", "DETAILED_REPLAY"},
+        "limits": {"watchlist_items": 100, "advanced_ai_daily": 10, "scanner_daily": 50,
+                   "advanced_research_daily": 10, "export_daily": 2,
+                   "alert_daily": 50, "heavy_analysis_concurrency": 2},
     },
     "ELITE": {
         "name": "Elite Intelligence", "description": "Full research and red-team intelligence",
@@ -62,8 +70,11 @@ PLAN_DEFINITIONS: dict[str, dict[str, Any]] = {
         "capabilities": {"RESEARCH_STRATEGY_LAB", "RESEARCH_EDGE_DISCOVERY",
                          "RESEARCH_FORWARD_TESTS", "SCALPING_RESEARCH", "AI_ADVANCED_COMMENTARY",
                          "EXPORT_RESEARCH_DATA", "PORTFOLIO_EDGE", "STRATEGY_LAB", "EDGE_DISCOVERY",
-                         "FORWARD_VALIDATION", "AI_ANALYSIS"},
-        "limits": {"watchlist_items": 250, "advanced_ai_daily": 30, "scanner_daily": 200},
+                         "FORWARD_VALIDATION", "AI_ANALYSIS", "SCANNER_CUSTOM",
+                         "ADVANCED_COHORT_ANALYTICS"},
+        "limits": {"watchlist_items": 250, "advanced_ai_daily": 30, "scanner_daily": 200,
+                   "advanced_research_daily": 50, "export_daily": 10,
+                   "alert_daily": 200, "heavy_analysis_concurrency": 4},
     },
 }
 
@@ -162,10 +173,19 @@ class CapabilityService:
                 return plan
         return "OPERATOR"
 
-    def preview(self, capability: str) -> str:
+    def preview(self, capability: str, telegram_id: int | None = None) -> str:
         key = str(capability or "").strip().upper()
         definition = CAPABILITIES.get(key) or {"description": key.replace("_", " ").title()}
-        return (f"{definition['description']} is available with {self.required_plan(key)}. "
+        current = self.plan(telegram_id)["plan"] if telegram_id is not None else "FREE"
+        details = {
+            "MICROSTRUCTURE_VIEW": "depth imbalance, wall persistence, replenishment and sweep diagnostics",
+            "MARKET_STORY_FULL": "the complete evidence-grounded story and state transitions",
+            "SIGNAL_QUALITY_FULL": "setup, entry, market, execution and data-confidence decomposition",
+            "ADVANCED_RANKING": "full ranking components, contradictions and suitability gaps",
+            "SCANNER_CUSTOM": "quality, readiness, timeframe, direction, strategy and symbol filters",
+        }.get(key, str(definition["description"]).lower())
+        return (f"{definition['description']}\nCurrent plan: {current}\n"
+                f"{self.required_plan(key)} unlocks {details}.\n"
                 "Use /plans to compare tiers. Plans never grant trading authority.")
 
     def set_entitlement(self, telegram_id: int, capability: str, *, enabled: bool,
@@ -197,6 +217,7 @@ class CapabilityService:
         now = _now()
         expires = ((now + timedelta(days=max(1, int(duration_days)))).isoformat()
                    if duration_days is not None else None)
+        previous = self.plan(telegram_id)
         with connect() as conn:
             conn.execute("""INSERT INTO user_plan_assignments(telegram_id,plan_key,plan_version,source,
                 granted_at,expires_at,override,audit_metadata_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
@@ -209,20 +230,52 @@ class CapabilityService:
             conn.execute("""INSERT INTO entitlement_audit_events(telegram_id,actor_telegram_id,event_type,
                 plan_key,capability,source,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
                 (telegram_id, actor_telegram_id, "PLAN_GRANTED", key, None, source,
-                 json.dumps({"duration_days": duration_days, **(audit_metadata or {})}, sort_keys=True),
+                 json.dumps({"duration_days": duration_days, "previous_plan": previous["plan"],
+                             "previous_expires_at": previous.get("expires_at"),
+                             **(audit_metadata or {})}, sort_keys=True),
                  now.isoformat()))
             conn.execute("UPDATE users SET premium=?,premium_tier=?,premium_until=? WHERE telegram_id=?",
                          (int(key != "FREE"), key, expires, telegram_id))
         return self.plan(telegram_id)
 
+    def extend_plan(self, telegram_id: int, days: int, *, source: str,
+                    actor_telegram_id: int | None = None,
+                    audit_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        amount = int(days)
+        if amount < 1 or amount > 3650:
+            raise ValueError("Duration must be between 1 and 3650 days")
+        previous = self.plan(telegram_id)
+        if previous["plan"] == "FREE":
+            raise ValueError("Cannot extend the default FREE plan")
+        now = _now()
+        try:
+            current_expiry = datetime.fromisoformat(str(previous.get("expires_at") or "").replace("Z", "+00:00"))
+            base = max(now, current_expiry)
+        except ValueError:
+            base = now
+        new_expiry = (base + timedelta(days=amount)).isoformat()
+        with connect() as conn:
+            conn.execute("""UPDATE user_plan_assignments SET expires_at=?,source=?,updated_at=?
+                WHERE telegram_id=?""", (new_expiry, source, now.isoformat(), telegram_id))
+            conn.execute("UPDATE users SET premium_until=? WHERE telegram_id=?", (new_expiry, telegram_id))
+            conn.execute("""INSERT INTO entitlement_audit_events(telegram_id,actor_telegram_id,event_type,
+                plan_key,capability,source,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (telegram_id, actor_telegram_id, "PLAN_EXTENDED", previous["plan"], None, source,
+                 json.dumps({"days": amount, "previous_expires_at": previous.get("expires_at"),
+                             **(audit_metadata or {})}, sort_keys=True), now.isoformat()))
+        return self.plan(telegram_id)
+
     def revoke_plan(self, telegram_id: int, *, source: str,
                     actor_telegram_id: int | None = None) -> dict[str, Any]:
         now = _now().isoformat()
+        previous = self.plan(telegram_id)
         with connect() as conn:
             conn.execute("DELETE FROM user_plan_assignments WHERE telegram_id=?", (telegram_id,))
             conn.execute("UPDATE users SET premium=0,premium_tier='FREE',premium_until=NULL WHERE telegram_id=?",
                          (telegram_id,))
             conn.execute("""INSERT INTO entitlement_audit_events(telegram_id,actor_telegram_id,event_type,
                 plan_key,capability,source,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
-                (telegram_id, actor_telegram_id, "PLAN_REVOKED", "FREE", None, source, "{}", now))
+                (telegram_id, actor_telegram_id, "PLAN_REVOKED", "FREE", None, source,
+                 json.dumps({"previous_plan": previous["plan"],
+                             "previous_expires_at": previous.get("expires_at")}, sort_keys=True), now))
         return self.plan(telegram_id)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import html
 import json
-import os
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -10,52 +9,50 @@ from aiogram.types import Message
 
 from services.runtime_diagnostics import collect_runtime_diagnostics
 from services.historical_execution_migration import HistoricalExecutionMigrationService
+from services.operator_authorization import OperatorAuthorizationService, OperatorCapability
+from services.localization import LocalizationService
 
 router = Router()
 migration_service = HistoricalExecutionMigrationService()
-
-
-def _admin_ids() -> set[int]:
-    values = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", ""))
-    result: set[int] = set()
-    for value in values.replace(";", ",").split(","):
-        value = value.strip()
-        if value.isdigit():
-            result.add(int(value))
-    return result
+operators = OperatorAuthorizationService()
+i18n = LocalizationService()
 
 
 @router.message(Command("system_health"))
 async def system_health(message: Message) -> None:
+    language = i18n.language(message.from_user.id if message.from_user else None)
     try:
         report = collect_runtime_diagnostics()
     except Exception:
-        await message.answer("<b>System Health V2</b>\n\nDiagnostics are temporarily unavailable.")
+        await message.answer(f"<b>{i18n.t('system.title', language=language)}</b>\n\n"
+                             f"{i18n.t('common.unavailable', language=language)}")
         return
-    lines = ["<b>Liquidity Vision · System Health V2</b>", "",
-             f"Database: <code>{html.escape(str(report['database_backend']).upper())}</code> · "
-             f"<code>{'HEALTHY' if report['database'].get('ok') else 'FAILED'}</code>"]
+    lines = [f"<b>{i18n.t('system.title', language=language)}</b>", "",
+             i18n.t("system.database", language=language,
+                    backend=html.escape(str(report['database_backend']).upper()),
+                    status="HEALTHY" if report['database'].get('ok') else "DEGRADED")]
     provider = (report.get("market_data") or {}).get("primary_provider") or {}
-    lines.append(f"Market provider: <code>{html.escape(str(provider.get('provider') or 'OKX'))}</code> · "
-                 f"<code>{html.escape(str(provider.get('status') or 'UNKNOWN'))}</code>")
+    lines.append(i18n.t("system.provider", language=language,
+                        provider=html.escape(str(provider.get('provider') or 'PUBLIC MARKET DATA')),
+                        status=html.escape(str(provider.get('status') or 'UNKNOWN'))))
     for worker in report.get("workers", []):
         state = str(worker.get("health_status") or "UNKNOWN")
-        reason = worker.get("configuration_reason")
         age = worker.get("age_seconds")
         line = f"{html.escape(str(worker.get('worker_name')))}: <code>{html.escape(state)}</code> · age {age if age is not None else '—'}s"
-        if reason:
-            line += f" · <code>{html.escape(str(reason))}</code>"
         lines.append(line)
     ai = report.get("ai") or {}
-    lines += [f"AI advisory: <code>{html.escape(str(ai.get('mode') or 'DISABLED'))}</code>",
-              "", "Detailed errors and user/account counts are operator-only: <code>/admin_status</code>."]
+    lines += [i18n.t("system.ai", language=language,
+                     status=html.escape(str(ai.get('mode') or 'DISABLED'))),
+              "", i18n.t("system.details", language=language)]
     await message.answer("\n".join(lines))
 
 
 @router.message(Command("admin_status"))
 async def admin_status(message: Message) -> None:
-    if not message.from_user or message.from_user.id not in _admin_ids():
-        await message.answer("⛔ Admin command. Add your Telegram ID to <code>ADMIN_IDS</code> in Render.")
+    actor = message.from_user.id if message.from_user else None
+    if not operators.authorize(actor_telegram_id=actor, capability=OperatorCapability.SYSTEM_ADMIN,
+                               action="ADMIN_STATUS_VIEW"):
+        await message.answer("⛔ Operator authorization required. The denied attempt was audited.")
         return
 
     try:
@@ -134,7 +131,9 @@ async def admin_status(message: Message) -> None:
 
 @router.message(Command("migration_status"))
 async def migration_status(message: Message) -> None:
-    if not message.from_user or message.from_user.id not in _admin_ids():
+    actor = message.from_user.id if message.from_user else None
+    if not operators.authorize(actor_telegram_id=actor, capability=OperatorCapability.SYSTEM_ADMIN,
+                               action="MIGRATION_STATUS_VIEW"):
         await message.answer("⛔ Admin command.")
         return
     report = migration_service.latest_report()
@@ -154,7 +153,9 @@ async def migration_status(message: Message) -> None:
 
 @router.message(Command("workers"))
 async def workers_status(message: Message) -> None:
-    if not message.from_user or message.from_user.id not in _admin_ids():
+    actor = message.from_user.id if message.from_user else None
+    if not operators.authorize(actor_telegram_id=actor, capability=OperatorCapability.SYSTEM_ADMIN,
+                               action="WORKER_STATUS_VIEW"):
         await message.answer("⛔ Admin command.")
         return
     report = collect_runtime_diagnostics()

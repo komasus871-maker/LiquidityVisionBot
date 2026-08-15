@@ -14,6 +14,7 @@ from aiogram.types import BotCommand
 from config import BOT_TOKEN
 from database.database import create_tables, database_backend, persistent_database, ping_database
 from handlers.admin import router as admin_router
+from handlers.operator import router as operator_router
 from handlers.ai_trading import router as ai_trading_router
 from handlers.analyze import router as analyze_router
 from handlers.copy_trading import router as copy_trading_router
@@ -21,6 +22,7 @@ from handlers.fear import router as fear_router
 from handlers.exchanges import router as exchanges_router
 from handlers.help import router as help_router
 from handlers.journal import router as journal_router
+from handlers.language import router as language_router
 from handlers.intelligence_hub import router as intelligence_hub_router
 from handlers.market import router as market_router
 from handlers.menu import router as menu_router
@@ -45,7 +47,9 @@ from services.ai_intelligence import AIObservationIntelligence
 from services.research_worker import ResearchWorker
 from services.microstructure_observer import MicrostructureObserver
 from services.command_catalog import MAIN_MENU_COMMANDS
+from services.localization import LocalizationService, SUPPORTED_LANGUAGES
 from services.operational_retention import OperationalRetentionService
+from services.product_analytics_middleware import ProductAnalyticsMiddleware
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -55,9 +59,12 @@ logging.basicConfig(
 
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher()
+    dp.message.outer_middleware(ProductAnalyticsMiddleware())
+    dp.include_router(operator_router)
     dp.include_router(admin_router)
     dp.include_router(ai_trading_router)
     dp.include_router(start_router)
+    dp.include_router(language_router)
     dp.include_router(help_router)
     dp.include_router(price_router)
     dp.include_router(analyze_router)
@@ -140,6 +147,12 @@ async def main() -> None:
     if callable(set_commands):
         await set_commands([BotCommand(command=name, description=description)
                             for name, description in MAIN_MENU_COMMANDS])
+        i18n = LocalizationService()
+        for language_code in SUPPORTED_LANGUAGES:
+            commands = [BotCommand(command=name,
+                                   description=i18n.t(f"menu.{name}", language=language_code))
+                        for name, _ in MAIN_MENU_COMMANDS]
+            await set_commands(commands, language_code=language_code)
     dp = build_dispatcher()
     logging.info("Startup initialization complete duration_ms=%.1f", (time.perf_counter() - startup_started) * 1000)
 
