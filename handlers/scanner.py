@@ -17,8 +17,8 @@ i18n = LocalizationService()
 
 FILTERS = {
     "strongest": lambda item: True,
-    "quality": lambda item: item["quality"] >= 65,
-    "ready": lambda item: item["readiness_state"] in {"READY", "READY_WITH_DATA_GAP"},
+    "quality": lambda item: item["quality"] is not None and item["quality"] >= 65,
+    "ready": lambda item: item["readiness_state"] == "READY",
     "breakout": lambda item: "BREAKOUT" in item["strategy"],
     "liquidity": lambda item: "LIQUIDITY" in item["strategy"],
     "continuation": lambda item: "CONTINUATION" in item["strategy"],
@@ -31,12 +31,15 @@ def _ranked(results: list[dict], limit: int = 8, *, language: str = "en") -> str
     if not results:
         return i18n.t("scanner.no_results", language=language)
     lines = []
+    def shown(value) -> str:
+        return "—" if value is None else f"{float(value):.0f}"
     for index, coin in enumerate(results[:limit], 1):
         lines.append(
             f"<b>{index}. {i18n.market_token(coin['symbol'], language=language)} "
             f"{i18n.market_token(coin['direction'], language=language)} · {i18n.market_token('1H', language=language)}</b>\n"
-            f"   Scanner <b>{coin['scanner_score']:.0f}</b> · Quality <b>{coin['quality']:.0f}</b> "
+            f"   Priority <b>{shown(coin['priority_score'])}</b> · Setup Quality <b>{shown(coin['setup_quality'])}</b> "
             f"· Readiness <b>{float(coin['readiness']):.0f}</b> ({escape(coin['readiness_state'])})\n"
+            f"   Data Confidence: <b>{shown(coin['data_confidence'])}</b> ({escape(str(coin['data_confidence_state']))})\n"
             f"   Primary: {escape(coin['primary_strategy'].replace('_', ' ').title())} "
             f"({coin['strategy_fit']:.0f}) · Secondary: {escape(coin['secondary_strategy'].replace('_', ' ').title())} "
             f"· gap {coin['strategy_gap']:.0f}\n"
@@ -87,7 +90,7 @@ async def scanner_menu(message: Message):
                    if (not strategy or strategy in item["strategy"])
                    and (not direction or direction == item["direction"])
                    and (not symbol or symbol in item["symbol"])
-                   and item["quality"] >= minimum_quality
+                   and item["quality"] is not None and item["quality"] >= minimum_quality
                    and item["readiness"] >= minimum_readiness]
     else:
         results = [item for item in results if FILTERS[selected](item)]

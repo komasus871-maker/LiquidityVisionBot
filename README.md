@@ -21,20 +21,27 @@ Signals are now converted into deterministic, side-effect-free execution plans b
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 
-# LiquidityVisionBot v10.2.0
+# LiquidityVisionBot v10.3.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
-## Multilingual Autonomous Intelligence Platform
+## Operational Intelligence and Fail-Closed LIVE Foundation
 
-v10.2 centralizes owner/operator authorization and immutable action audits;
-adds persistent English, Russian, Ukrainian, Hebrew, and Arabic UI with
-RTL-safe market tokens; refines Free/Pro/Elite entitlements and visible usage;
-and upgrades Scanner, Entry Readiness, Strategy Fusion, Market Regime,
-microstructure, BTC benchmark, derivatives research, alerts, watchlists,
-settings, replay, PAPER cohorts, counterfactuals, and operator analytics.
-All intelligence and AI paths remain advisory/research-only, PAPER is
-simulated, and plans do not grant execution authority.
+v10.3 fixes the production microstructure collector's empty-database no-op,
+persists depth/funding/OI independently, adds durable collector and source
+health, and separates current source health from immutable decision snapshot
+availability. Signal Quality V4, Entry Readiness V3, Scanner Priority V3 and
+Signal Ranking V5 preserve missing evidence as missing and represent strategy
+ties honestly. Help V3, localized command menus, AI identity history, research
+diagnostics and bounded histories make the product observable and discoverable.
+
+The release also adds a disabled-by-default, per-user LIVE foundation:
+versioned Fernet credential keyrings, audited lifecycle transitions, complete
+deterministic risk policies, immutable intents, idempotent execution recovery,
+partial fills, a durable position ledger, periodic reconciliation, critical safety alerts and four kill-switch scopes. Connecting,
+Premium, confirmation and certification never enable LIVE. AI and research
+have no execution dependency or authority. See
+`V10_3_OPERATIONAL_INTELLIGENCE_LIVE_FOUNDATION.md`.
 
 v9.9.18 adds a deterministic, research-only market-story layer built from confirmed candles; a 4H → 1H → 15M hierarchy; family-aware level and liquidity clustering; bounded BingX order-book interaction aggregates; pump/dump exhaustion research; contradiction, confidence and invalidation decomposition; Signal Quality V2; and Signal Ranking V3. New intelligence is captured at decision time and cannot affect deterministic policy, copy admission, risk, sizing, accounting, positions, or exchange execution.
 
@@ -111,7 +118,7 @@ TELEGRAM_SYSTEM_ADMIN_USER_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=10.2.0
+APP_VERSION=10.3.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

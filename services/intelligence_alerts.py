@@ -18,6 +18,7 @@ ALERT_CAPABILITY = {
     "FUNDING_EXTREME": "ADVANCED_ALERTS", "LIQUIDITY_SWEEP": "ADVANCED_ALERTS",
     "QUALITY_CHANGE": "ADVANCED_ALERTS", "MICROSTRUCTURE_CHANGE": "ADVANCED_ALERTS",
     "STRATEGY_CHANGE": "ADVANCED_ALERTS", "REGIME_CHANGE": "ADVANCED_ALERTS",
+    "PROVIDER_DEGRADATION": "ADVANCED_ALERTS",
 }
 
 ALERT_CATEGORY = {
@@ -29,7 +30,16 @@ ALERT_CATEGORY = {
     "ORDER_BOOK_WALL_APPEARS": "MICROSTRUCTURE", "WALL_REMOVED": "MICROSTRUCTURE",
     "WALL_REPLENISHED": "MICROSTRUCTURE", "OI_ACCELERATION": "MARKET",
     "FUNDING_EXTREME": "MARKET",
+    "TRADE_ACTIVATION": "TRADE_LIFECYCLE", "TAKE_PROFIT": "TRADE_LIFECYCLE",
+    "STOP": "TRADE_LIFECYCLE", "INVALIDATION": "TRADE_LIFECYCLE",
+    "PROVIDER_DEGRADATION": "SYSTEM", "LIVE_RISK_EVENT": "LIVE_SAFETY",
+    "RECONCILIATION_MISMATCH": "LIVE_SAFETY",
 }
+
+CRITICAL_LIVE_TYPES = frozenset({"LIVE_RISK_EVENT", "RECONCILIATION_MISMATCH"})
+IDENTITY_SENSITIVE_TYPES = frozenset({
+    "TRADE_ACTIVATION", "TAKE_PROFIT", "STOP", "INVALIDATION", *CRITICAL_LIVE_TYPES,
+})
 
 
 class IntelligenceAlertService:
@@ -48,6 +58,7 @@ class IntelligenceAlertService:
         kind = str(alert_type).strip().upper()
         occurred = occurred_at or datetime.now(timezone.utc)
         capability = ALERT_CAPABILITY.get(kind)
+        critical_live = severity.strip().upper() == "CRITICAL" and kind in CRITICAL_LIVE_TYPES
         categories = set(self.preferences.get(telegram_id)["notification_categories"])
         required_category = ALERT_CATEGORY.get(kind)
         status, reason = "ELIGIBLE", None
@@ -55,11 +66,12 @@ class IntelligenceAlertService:
             user = conn.execute("SELECT notifications_enabled FROM users WHERE telegram_id=?",
                                 (telegram_id,)).fetchone()
         notifications_enabled = user is None or bool(user[0])
-        if not notifications_enabled or not categories:
+        if (not notifications_enabled or not categories) and not critical_live:
             status, reason = "SUPPRESSED", "USER_ALERTS_DISABLED"
-        elif capability and not self.capabilities.has(telegram_id, capability):
+        elif capability and not self.capabilities.has(telegram_id, capability) and not critical_live:
             status, reason = "SUPPRESSED", "ENTITLEMENT_REQUIRED"
-        elif required_category and required_category not in categories and "ALL" not in categories:
+        elif (required_category and required_category not in categories and "ALL" not in categories
+              and not critical_live):
             status, reason = "SUPPRESSED", "CATEGORY_DISABLED"
         debounce_cutoff = (occurred - timedelta(minutes=self.debounce_minutes)).isoformat()
         identity = f"{telegram_id}|{canonical}|{timeframe.lower()}|{kind}|{state_identity}"
@@ -72,9 +84,9 @@ class IntelligenceAlertService:
                 (telegram_id, canonical, timeframe.lower(), kind, debounce_cutoff)).fetchone()
             if existing and status == "ELIGIBLE":
                 status, reason = "SUPPRESSED", "UNCHANGED_STATE"
-            elif duplicate and status == "ELIGIBLE":
+            elif duplicate and status == "ELIGIBLE" and kind not in IDENTITY_SENSITIVE_TYPES:
                 status, reason = "SUPPRESSED", "DEBOUNCE_WINDOW"
-        if status == "ELIGIBLE":
+        if status == "ELIGIBLE" and not critical_live:
             allowance = self.usage.consume(telegram_id, "INTELLIGENCE_ALERT", "alert_daily",
                                            metadata={"type": kind, "symbol": canonical})
             if not allowance["allowed"]:
@@ -89,6 +101,7 @@ class IntelligenceAlertService:
                  datetime.now(timezone.utc).isoformat()))
         return {"alert_key": alert_key, "status": status, "suppressed_reason": reason,
                 "capability": capability, "category": required_category or "LEGACY",
+                "critical_live_override": critical_live,
                 "version": "alert-engine-v3", "economic_authority": False}
 
     @staticmethod

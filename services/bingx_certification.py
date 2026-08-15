@@ -155,7 +155,7 @@ class BingXCertificationService:
         entry = await coordinator.submit(
             execution_key=economic_key, plan_id=None, telegram_id=telegram_id,
             account_id=account_id, exchange="bingx", mode=ExecutionMode.LIVE,
-            request=entry_request, readiness_passed=True,
+            request=entry_request, readiness_passed=True, authority_source="VST_CERTIFICATION",
         )
         if entry.state is not LiveExecutionState.ACKNOWLEDGED:
             return self._economic_report(telegram_id, account_id, base, "VST_ENTRY_NOT_ACKNOWLEDGED", 1)
@@ -182,7 +182,7 @@ class BingXCertificationService:
         close = await coordinator.submit(
             execution_key=close_key, plan_id=None, telegram_id=telegram_id,
             account_id=account_id, exchange="bingx", mode=ExecutionMode.LIVE,
-            request=close_request, readiness_passed=True,
+            request=close_request, readiness_passed=True, authority_source="VST_CERTIFICATION",
         )
         if close.state is not LiveExecutionState.ACKNOWLEDGED:
             return self._economic_report(telegram_id, account_id, base, "VST_CLOSE_NOT_ACKNOWLEDGED", 2)
@@ -241,13 +241,17 @@ class BingXCertificationService:
                   report.expires_at, report.readiness_blockers[0] if report.readiness_blockers else None))
             conn.execute("""
                 UPDATE live_exchange_accounts SET adapter_environment=?,adapter_version=?,account_mode=?,
-                    margin_mode=?,last_sync_at=?,sync_status=?,server_time_drift_ms=?,
+                    margin_mode=?,server_time_drift_ms=?,
                     capability_snapshot_json=?,permission_snapshot_json=?,certification_status=?,
-                    certification_expires_at=?,updated_at=? WHERE id=? AND telegram_id=?
+                    certification_expires_at=?,lifecycle_state=CASE
+                        WHEN ?='VST_ECONOMIC_PASSED' THEN 'LIVE_CERTIFIED'
+                        WHEN ? LIKE '%BLOCKED' THEN 'ERROR' ELSE lifecycle_state END,
+                    updated_at=? WHERE id=? AND telegram_id=?
             """, (report.environment, report.adapter_version, report.account_mode, report.margin_mode,
-                  report.timestamp, report.status, report.server_time_drift_ms,
+                  report.server_time_drift_ms,
                   json.dumps(report.capabilities), json.dumps(permissions, sort_keys=True), report.status,
-                  report.expires_at, report.timestamp, account_id, telegram_id))
+                  report.expires_at, report.status, report.status, report.timestamp,
+                  account_id, telegram_id))
 
     def _cache_rules(self, account_id: int, rules, expires: datetime) -> None:
         now = datetime.now(timezone.utc).isoformat()

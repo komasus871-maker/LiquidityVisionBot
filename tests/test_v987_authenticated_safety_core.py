@@ -74,8 +74,8 @@ def _rules():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "10.2.0"
-    assert RELEASE_NAME == "Multilingual Autonomous Intelligence Platform"
+    assert APP_VERSION == "10.3.0"
+    assert RELEASE_NAME == "Operational Intelligence and Fail-Closed LIVE Foundation"
 
 
 @pytest.mark.asyncio

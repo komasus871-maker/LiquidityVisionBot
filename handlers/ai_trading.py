@@ -40,6 +40,29 @@ def _items(raw: str | None, limit: int = 4) -> str:
     return "\n".join(f"• {escape(str(value))}" for value in values[:limit]) or "• none recorded"
 
 
+def _identity_scope(message: Message) -> tuple[str, str]:
+    parts = (message.text or "").split()
+    scope = parts[1].lower() if len(parts) > 1 else "current"
+    if scope not in {"current", "history"}:
+        scope = "current"
+    identity = provider_identity(build_ai_provider())["identity_checksum"]
+    return scope, identity
+
+
+def _dedupe_ai_rows(rows: list[dict], limit: int) -> list[dict]:
+    result, seen = [], set()
+    for row in rows:
+        key = (row.get("provider_identity_checksum"), row.get("signal_id"),
+               row.get("validation_code"), row.get("recommended_action"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _values(raw: str | None) -> list:
     try:
         value = json.loads(raw or "[]")
@@ -264,11 +287,15 @@ async def ai_history(message: Message) -> None:
 
 @router.message(Command("ai_abstentions"))
 async def ai_abstentions(message: Message) -> None:
+    scope, current_identity = _identity_scope(message)
+    predicate = "provider_identity_checksum=?" if scope == "current" else "COALESCE(provider_identity_checksum,'LEGACY')<>?"
     with connect() as conn:
         rows = [dict(row) for row in conn.execute("""SELECT signal_id,symbol,timeframe,validation_code,
-            abstention_reason_codes_json,what_would_change_decision_json,opportunity_quality,created_at
-            FROM ai_decisions WHERE telegram_id=? AND recommended_action='ABSTAIN'
-            ORDER BY id DESC LIMIT 12""", (message.from_user.id,)).fetchall()]
+            abstention_reason_codes_json,what_would_change_decision_json,opportunity_quality,created_at,
+            provider_identity_checksum,provider_attempt_count,recommended_action
+            FROM ai_decisions WHERE telegram_id=? AND recommended_action='ABSTAIN' AND """ + predicate +
+            " ORDER BY id DESC LIMIT 60", (message.from_user.id, current_identity)).fetchall()]
+    rows = _dedupe_ai_rows(rows, 12)
     lines = []
     for row in rows:
         genuine = row.get("validation_code") == "VALID"
@@ -277,21 +304,27 @@ async def ai_abstentions(message: Message) -> None:
         changes = ", ".join(map(str, _values(row.get("what_would_change_decision_json"))))
         line = (f"• <b>#{row['signal_id']} {escape(str(row['symbol']))} {escape(str(row['timeframe']))}</b> "
                 f"· <code>{kind}</code> · Q {float(row.get('opportunity_quality') or 0):.0f}\n"
+                f"  identity <code>{escape(str(row.get('provider_identity_checksum') or 'LEGACY')[:16])}</code> "
+                f"· attempt {int(row.get('provider_attempt_count') or 0)} · {escape(str(row.get('created_at')))}\n"
                 f"  {escape(reasons)}")
         if changes:
             line += f"\n  Observable change: {escape(changes[:220])}"
         lines.append(line)
-    await message.answer("<b>AI Abstentions</b>\n\n" + ("\n\n".join(lines) if lines else
+    await message.answer(f"<b>AI Abstentions · {scope.upper()} IDENTITY</b>\n\n" + ("\n\n".join(lines) if lines else
                          "No abstentions recorded."), parse_mode="HTML")
 
 
 @router.message(Command("ai_failures"))
 async def ai_failures(message: Message) -> None:
+    scope, current_identity = _identity_scope(message)
+    predicate = "provider_identity_checksum=?" if scope == "current" else "COALESCE(provider_identity_checksum,'LEGACY')<>?"
     with connect() as conn:
         rows = [dict(row) for row in conn.execute("""SELECT signal_id,symbol,timeframe,
-            validation_stage,validation_code,provider_invoked,created_at FROM ai_decisions
-            WHERE telegram_id=? AND validation_code<>'VALID' ORDER BY id DESC LIMIT 15""",
-            (message.from_user.id,)).fetchall()]
+            validation_stage,validation_code,provider_invoked,created_at,provider_identity_checksum,
+            provider_attempt_count,recommended_action FROM ai_decisions
+            WHERE telegram_id=? AND validation_code<>'VALID' AND """ + predicate +
+            " ORDER BY id DESC LIMIT 60", (message.from_user.id, current_identity)).fetchall()]
+    rows = _dedupe_ai_rows(rows, 15)
     lines = []
     for row in rows:
         code = str(row.get("validation_code") or "UNKNOWN")
@@ -304,8 +337,10 @@ async def ai_failures(message: Message) -> None:
         else:
             kind = "PRE_REQUEST_REJECTION"
         lines.append(f"• <b>#{row['signal_id']} {escape(str(row['symbol']))} {escape(str(row['timeframe']))}</b> "
-                     f"· <code>{kind}</code>\n  {escape(str(row.get('validation_stage') or 'UNKNOWN'))} / {escape(code)}")
-    await message.answer("<b>AI Failures</b>\n\n" + ("\n\n".join(lines) if lines else
+                     f"· <code>{kind}</code>\n  {escape(str(row.get('validation_stage') or 'UNKNOWN'))} / {escape(code)}"
+                     f" · identity <code>{escape(str(row.get('provider_identity_checksum') or 'LEGACY')[:16])}</code>"
+                     f" · attempt {int(row.get('provider_attempt_count') or 0)} · {escape(str(row.get('created_at')))}")
+    await message.answer(f"<b>AI Failures · {scope.upper()} IDENTITY</b>\n\n" + ("\n\n".join(lines) if lines else
                          "No failures recorded."), parse_mode="HTML")
 
 

@@ -213,7 +213,7 @@ def test_quality_decomposition_critical_invalidation_and_no_probability_claim():
         "DATA_CONFIDENCE", "DIRECTION_CONFIDENCE", "SETUP_CONFIDENCE", "ENTRY_CONFIDENCE",
         "INVALIDATION_CONFIDENCE", "TARGET_CONFIDENCE", "EXECUTION_CONFIDENCE", "OVERALL_QUALITY"}
     assert quality["score_is_probability"] is False and quality["economic_authority"] is False
-    assert quality["family_aggregation"].startswith("MAX_65_PERCENT")
+    assert quality["family_aggregation"] == "INDEPENDENT_FAMILY_MAX_65_PLUS_MEAN_35_COVERAGE_NORMALIZED"
     assert quality["normalized_components"] == quality["family_scores"]
     assert quality["contradiction_aggregation"].startswith("MAX_PER_FAMILY")
 
@@ -264,7 +264,7 @@ def test_repository_is_immutable_idempotent_restart_safe_and_tracks_story_transi
     assert stored_second["story"]["previous_state"] == repo.get_signal(5001, 88)["story"]["state"]
     with connect() as conn:
         assert conn.execute("SELECT COUNT(*) n FROM market_intelligence_snapshots").fetchone()["n"] == 2
-        assert conn.execute("SELECT COUNT(*) n FROM research_signal_rankings WHERE rank_version='signal-ranking-v4'").fetchone()["n"] == 2
+        assert conn.execute("SELECT COUNT(*) n FROM research_signal_rankings WHERE rank_version='signal-ranking-v5'").fetchone()["n"] == 2
         assert conn.execute("SELECT COUNT(*) n FROM paper_execution_orders").fetchone()["n"] == 0
 
 
@@ -328,7 +328,7 @@ def test_quality_threshold_curves_count_missed_winners_and_avoided_losses(intell
         _insert_research_parent(research)
         intelligence = MarketIntelligenceEngine().analyze_timeframe(
             _frame(), timeframe="1h", side="LONG", plan=_plan())
-        intelligence["signal_quality_v3"]["overall_quality"] = quality_override
+        intelligence["signal_quality_v4"]["overall_quality"] = quality_override
         repo.persist_signal(research, {"market_intelligence": intelligence})
         outcome = {"pure_market": {"eligible": True, "signal_r": realized_r}}
         with connect() as conn:
@@ -345,7 +345,7 @@ def test_quality_threshold_curves_count_missed_winners_and_avoided_losses(intell
     assert threshold["trades"] == 1 and threshold["missed_winners"] == 1
     assert threshold["avoided_losses"] == 2
     rankings = ResearchEngine().rankings(88)
-    assert rankings and rankings[0]["rank_version"] == "signal-ranking-v4"
+    assert rankings and rankings[0]["rank_version"] == "signal-ranking-v5"
     assert rankings[0]["components"]["strongest_advantages"]
     assert rankings[0]["components"]["strongest_weaknesses"]
 
@@ -373,7 +373,7 @@ def test_replayed_capture_projects_only_immutable_snapshot_features(intelligence
     original_state = first["market_story"]["state"]
     with connect() as conn:
         conn.execute("DELETE FROM market_intelligence_snapshots WHERE signal_id=5150")
-        conn.execute("DELETE FROM research_signal_rankings WHERE snapshot_id=? AND rank_version='signal-ranking-v4'",
+        conn.execute("DELETE FROM research_signal_rankings WHERE snapshot_id=? AND rank_version='signal-ranking-v5'",
                      (stored_snapshot["snapshot_id"],))
         conn.execute("UPDATE signals SET features_json=? WHERE id=5150",
                      (json.dumps({"market_intelligence": second}),))
@@ -559,7 +559,8 @@ async def test_derivatives_outage_does_not_discard_valid_depth_aggregate(intelli
     monkeypatch.setenv("MICROSTRUCTURE_SAMPLE_SPACING_MS", "100")
     result = await observer_module.MicrostructureObserver(interval_seconds=30).check_once()
 
-    assert result["persisted"] == 1 and result["errors"] == 0
+    assert result["persisted"] == 1 and result["errors"] == 2
+    assert result["state"] == "DEGRADED"
     row = observer_module.MarketIntelligenceRepository().latest_microstructure("BTCUSDT")
     assert row["aggregate"]["status"] == "AVAILABLE"
     assert row["aggregate"]["funding_open_interest"]["status"] == "UNAVAILABLE"

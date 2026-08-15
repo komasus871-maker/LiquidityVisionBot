@@ -1,2 +1,2 @@
-APP_VERSION = "10.2.0"
-RELEASE_NAME = "Multilingual Autonomous Intelligence Platform"
+APP_VERSION = "10.3.0"
+RELEASE_NAME = "Operational Intelligence and Fail-Closed LIVE Foundation"

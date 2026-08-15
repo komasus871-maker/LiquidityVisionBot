@@ -14,12 +14,12 @@ import numpy as np
 import pandas as pd
 
 
-INTELLIGENCE_VERSION = "market-intelligence-v4"
+INTELLIGENCE_VERSION = "market-intelligence-v5"
 STORY_VERSION = "market-story-v2"
 LEVEL_VERSION = "level-intelligence-v1"
 MICROSTRUCTURE_VERSION = "microstructure-v2"
-QUALITY_VERSION = "signal-quality-v3"
-RANK_VERSION = "signal-ranking-v4"
+QUALITY_VERSION = "signal-quality-v4"
+RANK_VERSION = "signal-ranking-v5"
 
 TIMEFRAME_SECONDS = {
     "1m": 60, "3m": 180, "5m": 300, "15m": 900,
@@ -872,10 +872,10 @@ class MarketStoryEngine:
 
 class SignalQualityEngine:
     @staticmethod
-    def _aggregate(factors: Iterable[tuple[str, float]]) -> tuple[float, list[dict[str, Any]]]:
+    def _aggregate(factors: Iterable[tuple[str, float]]) -> tuple[float | None, list[dict[str, Any]]]:
         normalized = [{"factor": label, "score": _clip(score)} for label, score in factors]
         if not normalized:
-            return 50.0, []
+            return None, []
         scores = [item["score"] for item in normalized]
         aggregate = max(scores) * .65 + statistics.fmean(scores) * .35
         return _clip(aggregate), normalized
@@ -923,15 +923,22 @@ class SignalQualityEngine:
             "MOMENTUM": [("momentum quality", _number(momentum.get("score"), 50)),
                          ("direction alignment", 82 if momentum.get("direction") == direction else 35)],
             "VOLATILITY": [("trend extension", 35 if trend.get("state") in {"EXTENDED", "EXHAUSTED"} else 75)],
-            "MICROSTRUCTURE": [("interaction quality", _number((microstructure or {}).get("interaction_quality"), 45))],
-            "HTF_CONTEXT": [("hierarchy supplied", _number(plan.get("htf_context_score"), 50))],
-            "RELATIVE_STRENGTH": [("benchmark context", _number(relative_strength.get("quality"), 50))],
+            "MICROSTRUCTURE": ([("interaction quality", _number((microstructure or {}).get("microstructure_quality"), 0))]
+                               if (microstructure or {}).get("status") == "AVAILABLE" else []),
+            "HTF_CONTEXT": ([("hierarchy supplied", _number(plan.get("htf_context_score"), 0))]
+                            if plan.get("htf_context_score") is not None else []),
+            "RELATIVE_STRENGTH": ([("benchmark context", _number(relative_strength.get("quality"), 0))]
+                                  if relative_strength.get("status") == "AVAILABLE" else []),
+            "DERIVATIVES": ([("funding and open-interest context", 65)]
+                            if funding_oi.get("status") == "AVAILABLE" else []),
             "INVALIDATION": [("thesis invalidation", invalidation["score"])],
             "TARGET_REALISM": [("planned RR realism", 80 if 1 <= _number(plan.get("rr")) <= 3 else 55 if _number(plan.get("rr")) <= 4 else 30)],
-            "EXECUTION_COST": [("cost coverage", _number(plan.get("execution_cost_quality"), 70))],
-            "PORTFOLIO_CONTEXT": [("advisory-only portfolio context", _number(plan.get("portfolio_context_quality"), 50))],
+            "EXECUTION_COST": ([("cost coverage", _number(plan.get("execution_cost_quality"), 0))]
+                               if plan.get("execution_cost_quality") is not None else []),
+            "PORTFOLIO_CONTEXT": ([("advisory-only portfolio context", _number(plan.get("portfolio_context_quality"), 0))]
+                                  if plan.get("portfolio_context_quality") is not None else []),
         }
-        family_scores: dict[str, float] = {}
+        family_scores: dict[str, float | None] = {}
         raw_components: dict[str, list[dict[str, Any]]] = {}
         for family, items in factors.items():
             family_scores[family], raw_components[family] = self._aggregate(items)
@@ -972,44 +979,55 @@ class SignalQualityEngine:
             for values in contradiction_families.values()
         ), 3)
         weights = {"MARKET_QUALITY": .13, "STRUCTURE": .12, "LIQUIDITY": .10, "LOCATION": .08,
-                   "MOMENTUM": .10, "VOLATILITY": .06, "MICROSTRUCTURE": .07, "HTF_CONTEXT": .08,
-                   "RELATIVE_STRENGTH": .04, "INVALIDATION": .10, "TARGET_REALISM": .06,
-                   "EXECUTION_COST": .04, "PORTFOLIO_CONTEXT": .02}
-        raw_score = sum(family_scores[key] * weights[key] for key in weights)
+                   "MOMENTUM": .10, "VOLATILITY": .06, "MICROSTRUCTURE": .07, "HTF_CONTEXT": .06,
+                   "RELATIVE_STRENGTH": .04, "DERIVATIVES": .04, "INVALIDATION": .10,
+                   "TARGET_REALISM": .06, "EXECUTION_COST": .03, "PORTFOLIO_CONTEXT": .01}
+        available_weight = sum(weight for key, weight in weights.items() if family_scores.get(key) is not None)
+        raw_score = (sum(float(family_scores[key]) * weights[key] for key in weights
+                         if family_scores.get(key) is not None) / max(available_weight, 1e-12))
         overall = _clip(raw_score - min(penalty, 45))
         if critical:
             overall = min(overall, 35.0)
-        market_quality = _clip(family_scores["MARKET_QUALITY"] * .3 + family_scores["LIQUIDITY"] * .2
-                               + family_scores["STRUCTURE"] * .2 + family_scores["VOLATILITY"] * .1
-                               + family_scores["MICROSTRUCTURE"] * .1 + family_scores["EXECUTION_COST"] * .1
+        market_parts = {"MARKET_QUALITY": .30, "LIQUIDITY": .20, "STRUCTURE": .20,
+                        "VOLATILITY": .10, "MICROSTRUCTURE": .10, "EXECUTION_COST": .10}
+        market_weight = sum(weight for key, weight in market_parts.items() if family_scores.get(key) is not None)
+        market_quality = _clip(sum(float(family_scores[key]) * weight for key, weight in market_parts.items()
+                                   if family_scores.get(key) is not None) / max(market_weight, 1e-12)
                                - min(penalty, 30))
+        unavailable = [key for key, value in family_scores.items() if value is None]
+        coverage = (len(family_scores) - len(unavailable)) / max(1, len(family_scores))
+        data_confidence = _clip((95 if data_quality.get("status") == "GOOD" else 60) * (.65 + .35 * coverage))
+        def family(name: str, fallback: float = 50.0) -> float:
+            value = family_scores.get(name)
+            return fallback if value is None else float(value)
         confidence = {
-            "DATA_CONFIDENCE": _clip(90 if data_quality.get("status") == "GOOD" else 55),
-            "DIRECTION_CONFIDENCE": _clip((family_scores["STRUCTURE"] + family_scores["MOMENTUM"] + family_scores["HTF_CONTEXT"]) / 3),
-            "SETUP_CONFIDENCE": _clip((family_scores["LIQUIDITY"] + family_scores["LOCATION"] + family_scores["STRUCTURE"]) / 3),
-            "ENTRY_CONFIDENCE": _clip((family_scores["LOCATION"] + family_scores["MICROSTRUCTURE"]) / 2),
+            "DATA_CONFIDENCE": data_confidence,
+            "DIRECTION_CONFIDENCE": _clip(statistics.fmean([family("STRUCTURE"), family("MOMENTUM"), family("HTF_CONTEXT")])),
+            "SETUP_CONFIDENCE": _clip(statistics.fmean([family("LIQUIDITY"), family("LOCATION"), family("STRUCTURE")])),
+            "ENTRY_CONFIDENCE": _clip(statistics.fmean([family("LOCATION"), family("MICROSTRUCTURE")])),
             "INVALIDATION_CONFIDENCE": invalidation["score"],
-            "TARGET_CONFIDENCE": family_scores["TARGET_REALISM"],
-            "EXECUTION_CONFIDENCE": _clip((family_scores["EXECUTION_COST"] + family_scores["MICROSTRUCTURE"]) / 2),
+            "TARGET_CONFIDENCE": family("TARGET_REALISM"),
+            "EXECUTION_CONFIDENCE": _clip(statistics.fmean([family("EXECUTION_COST"), family("MICROSTRUCTURE")])),
             "OVERALL_QUALITY": overall,
         }
-        family_count = sum(score >= 60 for score in family_scores.values())
-        diversity = _clip(family_count / max(1, len(family_scores)) * 100)
+        family_count = sum(score is not None and score >= 60 for score in family_scores.values())
+        diversity = _clip(family_count / max(1, len(family_scores) - len(unavailable)) * 100)
         setup_quality = _clip(
-            family_scores["STRUCTURE"] * .30 + family_scores["LIQUIDITY"] * .25
-            + family_scores["LOCATION"] * .20 + family_scores["MOMENTUM"] * .25
+            family("STRUCTURE") * .30 + family("LIQUIDITY") * .25
+            + family("LOCATION") * .20 + family("MOMENTUM") * .25
             - min(penalty, 30)
         )
-        entry_quality = _clip(
-            family_scores["LOCATION"] * .32 + family_scores["MICROSTRUCTURE"] * .28
-            + family_scores["INVALIDATION"] * .25 + family_scores["EXECUTION_COST"] * .15
-            - min(penalty, 25)
-        )
-        execution_quality = _clip(
-            family_scores["INVALIDATION"] * .35 + family_scores["TARGET_REALISM"] * .25
-            + family_scores["EXECUTION_COST"] * .25 + family_scores["MICROSTRUCTURE"] * .15
-        )
-        data_confidence = confidence["DATA_CONFIDENCE"]
+        entry_parts = {"LOCATION": .32, "MICROSTRUCTURE": .28,
+                       "INVALIDATION": .25, "EXECUTION_COST": .15}
+        entry_weight = sum(weight for key, weight in entry_parts.items() if family_scores.get(key) is not None)
+        entry_quality = _clip(sum(float(family_scores[key]) * weight for key, weight in entry_parts.items()
+                                  if family_scores.get(key) is not None) / max(entry_weight, 1e-12)
+                              - min(penalty, 25))
+        execution_parts = {"INVALIDATION": .35, "TARGET_REALISM": .25,
+                           "EXECUTION_COST": .25, "MICROSTRUCTURE": .15}
+        execution_weight = sum(weight for key, weight in execution_parts.items() if family_scores.get(key) is not None)
+        execution_quality = _clip(sum(float(family_scores[key]) * weight for key, weight in execution_parts.items()
+                                      if family_scores.get(key) is not None) / max(execution_weight, 1e-12))
         return {
             "version": QUALITY_VERSION, "overall_quality": overall, "market_quality": market_quality,
             "setup_quality": setup_quality, "entry_quality": entry_quality,
@@ -1019,8 +1037,10 @@ class SignalQualityEngine:
                                    "data_confidence": data_confidence},
             "family_scores": family_scores, "normalized_components": dict(family_scores),
             "raw_components": raw_components,
-            "family_aggregation": "MAX_65_PERCENT_PLUS_FAMILY_MEAN_35_PERCENT",
+            "family_aggregation": "INDEPENDENT_FAMILY_MAX_65_PLUS_MEAN_35_COVERAGE_NORMALIZED",
             "evidence_family_count": family_count, "evidence_diversity_score": diversity,
+            "evidence_coverage": round(coverage, 4), "unavailable_families": unavailable,
+            "evaluation_state": "EVALUATED",
             "supporting_evidence": supporting, "contradicting_evidence": contradicting,
             "critical_disqualifiers": critical, "uncertainties": uncertainties,
             "contradiction_penalty": penalty,
@@ -1105,14 +1125,25 @@ class MarketIntelligenceEngine:
 
     @staticmethod
     def _strategy_suitability(*, story: Mapping[str, Any], quality: Mapping[str, Any],
-                              reversal: Mapping[str, Any], timeframe: str) -> dict[str, float]:
+                              reversal: Mapping[str, Any], timeframe: str,
+                              structure: Mapping[str, Any], liquidity: Mapping[str, Any],
+                              momentum: Mapping[str, Any]) -> dict[str, float]:
         market = _number(quality.get("market_quality"), 50)
         state = str(story.get("state") or "UNCERTAIN")
-        base = {key: market * .55 + 22 for key in (
+        families = quality.get("family_scores") or {}
+        structure_score = _number(families.get("STRUCTURE"), 40)
+        liquidity_score = _number(families.get("LIQUIDITY"), 40)
+        location_score = _number(families.get("LOCATION"), 40)
+        momentum_score = _number(families.get("MOMENTUM"), 40)
+        base = {key: market * .35 + 18 for key in (
             "LIQUIDITY_SMC", "TREND_CONTINUATION", "BREAKOUT", "MEAN_REVERSION",
             "PUMP_REVERSAL", "PUMP_CONTINUATION", "LIQUIDITY_SWEEP_REVERSAL",
             "SCALPING_TREND", "SCALPING_BREAKOUT", "SCALPING_MEAN_REVERSION",
             "SCALPING_LIQUIDITY_SWEEP")}
+        base["LIQUIDITY_SMC"] += liquidity_score * .25 + location_score * .15
+        base["BREAKOUT"] += structure_score * .30 + momentum_score * .10
+        base["TREND_CONTINUATION"] += momentum_score * .25 + structure_score * .15
+        base["MEAN_REVERSION"] += location_score * .25 + (100 - momentum_score) * .10
         if state == "TREND_CONTINUATION":
             base["TREND_CONTINUATION"] += 25
             base["MEAN_REVERSION"] -= 20
@@ -1144,12 +1175,14 @@ class MarketIntelligenceEngine:
         rr = _number(plan.get("rr"))
         location = _number((quality.get("family_scores") or {}).get("LOCATION"), 50)
         momentum_score = _number((quality.get("family_scores") or {}).get("MOMENTUM"), 50)
-        micro_score = _number((quality.get("family_scores") or {}).get("MICROSTRUCTURE"), 45)
+        raw_micro = (quality.get("family_scores") or {}).get("MICROSTRUCTURE")
+        micro_score = _number(raw_micro) if raw_micro is not None else None
         trigger = _number((quality.get("family_scores") or {}).get("STRUCTURE"), 50)
         invalidation = _number((quality.get("family_scores") or {}).get("INVALIDATION"), 0)
         reward_cost = _number((quality.get("family_scores") or {}).get("TARGET_REALISM"), 40)
         execution_cost = _number((quality.get("family_scores") or {}).get("EXECUTION_COST"), 50)
-        data_confidence = _number(quality.get("data_confidence") or (quality.get("confidence") or {}).get("DATA_CONFIDENCE"), 50)
+        data_confidence = _number(quality.get("data_confidence") if quality.get("data_confidence") is not None
+                                  else (quality.get("confidence") or {}).get("DATA_CONFIDENCE"), 50)
         components = {
             "LOCATION": location,
             "TRIGGER": trigger,
@@ -1157,41 +1190,51 @@ class MarketIntelligenceEngine:
             "MICROSTRUCTURE": micro_score,
             "INVALIDATION": invalidation,
             "REWARD_AFTER_COST": _clip(reward_cost * .65 + execution_cost * .35),
-            "DATA_CONFIDENCE": data_confidence,
         }
         weights = {"LOCATION": .20, "TRIGGER": .18, "MOMENTUM": .17,
-                   "MICROSTRUCTURE": .12, "INVALIDATION": .15,
-                   "REWARD_AFTER_COST": .10, "DATA_CONFIDENCE": .08}
-        score = _clip(sum(components[key] * weight for key, weight in weights.items()))
+                   "MICROSTRUCTURE": .12, "INVALIDATION": .18,
+                   "REWARD_AFTER_COST": .15}
+        available_weight = sum(weight for key, weight in weights.items() if components[key] is not None)
+        score = _clip(sum(float(components[key]) * weight for key, weight in weights.items()
+                          if components[key] is not None) / max(available_weight, 1e-12))
         reasons: list[str] = []
+        structure_conflict = any(
+            item.get("family") == "STRUCTURE" and item.get("severity") in {"HIGH", "CRITICAL"}
+            for item in quality.get("contradicting_evidence") or [] if isinstance(item, Mapping))
         if not geometry or entry <= 0 or stop <= 0:
-            state, score = "INVALID_ENTRY", min(score, 20)
+            state, score = "INVALID", min(score, 20)
             reasons.append("INVALID_STOP_OR_ENTRY_GEOMETRY")
-        elif (data_quality or {}).get("status") == "INVALID":
-            state, score = "STALE_OR_INVALID_DATA", min(score, 15)
-            reasons.append("MARKET_DATA_INVALID")
+        elif (data_quality or {}).get("status") == "INVALID" or data_confidence < 45:
+            state, score = "INSUFFICIENT_DATA", min(score, 35)
+            reasons.append("MARKET_DATA_INSUFFICIENT")
         elif location < 35:
             state = "CHASING"
             reasons.append("POOR_LOCATION")
-        elif momentum.get("state") in {"EXHAUSTING", "REVERSING"}:
+        elif structure_conflict:
             state = "WAIT_STRUCTURE"
+            score = min(score, 64)
+            reasons.append("STRUCTURE_OPPOSES_DIRECTION")
+        elif momentum.get("state") in {"EXHAUSTING", "REVERSING"}:
+            state = "WAIT_CONFIRMATION"
             reasons.append("MOMENTUM_NOT_CONFIRMED")
         elif trigger < 45 or str((structure or {}).get("break") or "") in {"NO_BREAK", "UNKNOWN"}:
             state = "WAIT_CONFIRMATION"
             reasons.append("STRUCTURE_TRIGGER_MISSING")
-        elif microstructure.get("status") != "AVAILABLE":
-            state = "READY_WITH_DATA_GAP" if score >= 65 else "WAIT_RECLAIM"
-            reasons.append("MICROSTRUCTURE_UNAVAILABLE")
         elif score >= 72 and min(location, trigger, momentum_score, invalidation) >= 50:
             state = "READY"
-        elif score >= 58:
-            state = "EARLY"
         else:
             state = "WAIT_PULLBACK"
-        weakest = sorted(components, key=components.get)[:2]
-        return {"version": "entry-readiness-v2", "state": state, "score": round(score, 3),
+        if microstructure.get("status") != "AVAILABLE":
+            reasons.append("MICROSTRUCTURE_NOT_CAPTURED")
+        available_components = {key: value for key, value in components.items() if value is not None}
+        weakest = sorted(available_components, key=available_components.get)[:2]
+        data_state = "COMPLETE" if data_confidence >= 80 else "INCOMPLETE" if data_confidence >= 45 else "INSUFFICIENT"
+        return {"version": "entry-readiness-v3", "state": state, "score": round(score, 3),
                 "components": components, "weights": weights, "weakest_components": weakest,
-                "reason_codes": reasons, "setup_quality_separate": True,
+                "reason_codes": reasons, "setup_quality": quality.get("setup_quality"),
+                "data_confidence": data_confidence, "data_confidence_state": data_state,
+                "component_coverage": round(len(available_components) / max(1, len(components)), 4),
+                "setup_quality_separate": True,
                 "score_is_probability": False, "execution_authority": False}
 
     @staticmethod
@@ -1201,11 +1244,19 @@ class MarketIntelligenceEngine:
         primary = ranked[0] if ranked else ("UNCLASSIFIED", 0.0)
         secondary = ranked[1] if len(ranked) > 1 else ("NONE", 0.0)
         gap = primary[1] - secondary[1]
+        tied = [name for name, score in ranked if abs(score - primary[1]) <= .5]
+        state = ("LOW_CLASSIFICATION_CONFIDENCE" if primary[1] < 45 else
+                 "TIE" if len(tied) > 1 else
+                 "HYBRID" if gap < 5 else "PRIMARY")
         return {"version": "strategy-fusion-v2",
-                "primary": {"strategy": primary[0], "suitability": round(primary[1], 3)},
-                "secondary": {"strategy": secondary[0], "suitability": round(secondary[1], 3)},
+                "primary": {"strategy": None if state == "TIE" else primary[0],
+                            "suitability": round(primary[1], 3),
+                            "classification": state},
+                "secondary": {"strategy": secondary[0], "suitability": round(secondary[1], 3),
+                              "classification": "SECONDARY"},
                 "suitability_gap": round(gap, 3),
-                "fusion_state": "CLEAR_PRIMARY" if gap >= 12 else "BLENDED" if gap >= 5 else "AMBIGUOUS",
+                "fusion_state": state, "tied_strategies": tied if state == "TIE" else [],
+                "near_tie_threshold": 5.0,
                 "scores": dict(scores), "score_is_probability": False,
                 "execution_authority": False}
 
@@ -1344,7 +1395,8 @@ class MarketIntelligenceEngine:
                                        microstructure=microstructure, relative_strength=relative,
                                        funding_oi=funding_context)
         strategy = self._strategy_suitability(story=story, quality=quality, reversal=reversal,
-                                               timeframe=timeframe)
+                                               timeframe=timeframe, structure=structure,
+                                               liquidity=liquidity, momentum=momentum)
         strategy_fusion = self._strategy_fusion(strategy)
         strategy_assessments = {
             name: {"suitability_score": score,
@@ -1367,7 +1419,7 @@ class MarketIntelligenceEngine:
         )
         research = self._research_policies(normalized_plan, quality, timeframe)
         result = {
-            "version": INTELLIGENCE_VERSION, "feature_version": "decision-features-v3",
+            "version": INTELLIGENCE_VERSION, "feature_version": "decision-features-v4",
             "mode": "SHADOW_RESEARCH_ONLY", "timeframe": timeframe, "side": normalized_side,
             "captured_at": datetime.now(timezone.utc).isoformat(), "data_quality": data_quality,
             "market_story": story, "level_map": level_map, "liquidity_map": liquidity,
@@ -1378,6 +1430,7 @@ class MarketIntelligenceEngine:
             "reversal_research": reversal, "relative_strength": relative,
             "funding_open_interest": funding_context,
             "signal_quality_v2": quality, "signal_quality_v3": quality,
+            "signal_quality_v4": quality,
             "entry_readiness": entry_readiness,
             "strategy_suitability": strategy, "strategy_fusion_v2": strategy_fusion,
             "strategy_assessments": strategy_assessments,
@@ -1423,7 +1476,7 @@ def concise_market_story(snapshot: Mapping[str, Any]) -> str:
     trend = snapshot.get("trend_maturity") or {}
     structure = snapshot.get("structure_quality") or {}
     momentum = snapshot.get("momentum") or {}
-    quality = snapshot.get("signal_quality_v3") or snapshot.get("signal_quality_v2") or {}
+    quality = snapshot.get("signal_quality_v4") or snapshot.get("signal_quality_v3") or snapshot.get("signal_quality_v2") or {}
     facts = [f"Market state is {str(story.get('state') or 'unknown').replace('_', ' ').lower()}.",
              f"Trend is {str(trend.get('state') or 'unknown').lower()} ({str(trend.get('direction') or 'unknown').lower()}).",
              f"Structure is {str(structure.get('break') or 'unknown').replace('_', ' ').lower()}.",

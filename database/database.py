@@ -186,6 +186,7 @@ def create_tables() -> None:
                 id {id_col}, telegram_id BIGINT NOT NULL, exchange TEXT NOT NULL,
                 api_key_encrypted TEXT NOT NULL, api_secret_encrypted TEXT NOT NULL,
                 passphrase_encrypted TEXT DEFAULT '', testnet INTEGER NOT NULL DEFAULT 1,
+                key_version TEXT NOT NULL DEFAULT 'v1', key_fingerprint TEXT,
                 status TEXT NOT NULL DEFAULT 'connected', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 UNIQUE(telegram_id, exchange)
             )
@@ -460,6 +461,7 @@ def create_tables() -> None:
             CREATE TABLE IF NOT EXISTS live_exchange_accounts(
                 id {id_col}, telegram_id BIGINT NOT NULL, exchange TEXT NOT NULL,
                 credential_ref TEXT NOT NULL, execution_mode TEXT NOT NULL DEFAULT 'PAPER',
+                lifecycle_state TEXT NOT NULL DEFAULT 'NOT_CONNECTED',
                 live_enabled INTEGER NOT NULL DEFAULT 0, dry_run_enabled INTEGER NOT NULL DEFAULT 0,
                 confirmation_hash TEXT, confirmation_expires_at TEXT, confirmed_at TEXT,
                 kill_switch INTEGER NOT NULL DEFAULT 1, max_order_notional DOUBLE PRECISION,
@@ -475,6 +477,7 @@ def create_tables() -> None:
                 mode TEXT NOT NULL, client_order_id TEXT NOT NULL, exchange_order_id TEXT,
                 symbol TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL,
                 quantity DOUBLE PRECISION NOT NULL, price DOUBLE PRECISION, reduce_only INTEGER NOT NULL DEFAULT 0,
+                position_side TEXT, margin_mode TEXT, leverage INTEGER,
                 state TEXT NOT NULL, executed_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
                 average_fill_price DOUBLE PRECISION, commission DOUBLE PRECISION NOT NULL DEFAULT 0,
                 next_retry_at TEXT,
@@ -504,10 +507,70 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_positions(
+                id {id_col}, account_id BIGINT NOT NULL, telegram_id BIGINT NOT NULL,
+                exchange TEXT NOT NULL, symbol TEXT NOT NULL, position_side TEXT NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL DEFAULT 0, status TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'EXECUTION_LEDGER', version INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(account_id,symbol,position_side)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS live_readiness_audits(
                 id {id_col}, telegram_id BIGINT NOT NULL, account_id BIGINT,
                 exchange TEXT NOT NULL, requested_mode TEXT NOT NULL, ready INTEGER NOT NULL,
                 reason_codes_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_risk_profiles(
+                id {id_col}, account_id BIGINT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
+                policy_version TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'BLOCKED',
+                max_positions INTEGER, max_order_notional DOUBLE PRECISION,
+                max_portfolio_exposure DOUBLE PRECISION, max_symbol_exposure DOUBLE PRECISION,
+                max_daily_realized_loss DOUBLE PRECISION, max_daily_total_loss DOUBLE PRECISION,
+                max_modeled_slippage_bps DOUBLE PRECISION, cooldown_seconds INTEGER,
+                allowed_symbols_json TEXT NOT NULL DEFAULT '[]', blocked_symbols_json TEXT NOT NULL DEFAULT '[]',
+                allowed_timeframes_json TEXT NOT NULL DEFAULT '[]', allowed_strategies_json TEXT NOT NULL DEFAULT '[]',
+                allowed_directions_json TEXT NOT NULL DEFAULT '[]', leverage_cap INTEGER,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_order_intents(
+                id {id_col}, intent_key TEXT NOT NULL UNIQUE, execution_key TEXT NOT NULL UNIQUE,
+                telegram_id BIGINT NOT NULL, account_id BIGINT NOT NULL, exchange TEXT NOT NULL,
+                signal_id BIGINT, plan_id TEXT, strategy TEXT, symbol TEXT NOT NULL,
+                direction TEXT NOT NULL, requested_quantity TEXT NOT NULL,
+                calculated_quantity TEXT NOT NULL, reference_price TEXT,
+                position_side TEXT, margin_mode TEXT, leverage INTEGER,
+                modeled_cost_json TEXT NOT NULL DEFAULT '{{}}', risk_policy_version TEXT,
+                guardrail_results_json TEXT NOT NULL, client_order_id TEXT NOT NULL,
+                authority_source TEXT NOT NULL, intent_checksum TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_reconciliation_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
+                account_id BIGINT NOT NULL, exchange TEXT NOT NULL, mismatch_type TEXT NOT NULL,
+                severity TEXT NOT NULL, local_ref TEXT, exchange_ref TEXT,
+                details_json TEXT NOT NULL, resolved_at TEXT, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS live_audit_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, telegram_id BIGINT,
+                account_id BIGINT, exchange TEXT, event_type TEXT NOT NULL,
+                outcome TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_kill_switches(
+                scope TEXT NOT NULL, scope_key TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                reason_code TEXT NOT NULL, actor_telegram_id BIGINT, updated_at TEXT NOT NULL,
+                PRIMARY KEY(scope,scope_key)
             )
         """)
         conn.execute(f"""
@@ -891,6 +954,47 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS market_source_snapshots(
+                id {id_col}, symbol TEXT NOT NULL, exchange TEXT NOT NULL,
+                environment TEXT NOT NULL, source_type TEXT NOT NULL,
+                provider TEXT NOT NULL, snapshot_version TEXT NOT NULL,
+                snapshot_checksum TEXT NOT NULL UNIQUE, snapshot_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_source_health(
+                symbol TEXT NOT NULL, source_type TEXT NOT NULL, provider TEXT NOT NULL,
+                state TEXT NOT NULL, last_attempt_at TEXT, last_success_at TEXT,
+                last_error_code TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                samples_collected BIGINT NOT NULL DEFAULT 0,
+                samples_rejected BIGINT NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol,source_type,provider)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS microstructure_worker_health(
+                worker_name TEXT PRIMARY KEY, configured_value TEXT,
+                configured_enabled INTEGER NOT NULL DEFAULT 0,
+                effective_enabled INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                worker_started_at TEXT, heartbeat_at TEXT,
+                lease_state TEXT NOT NULL DEFAULT 'NOT_ACQUIRED', lease_owner TEXT,
+                active_symbols_json TEXT NOT NULL DEFAULT '[]',
+                source_health_json TEXT NOT NULL DEFAULT '{}',
+                last_cycle_started_at TEXT, last_cycle_completed_at TEXT,
+                last_depth_success_at TEXT, last_funding_success_at TEXT,
+                last_oi_success_at TEXT, last_persist_success_at TEXT,
+                last_error_code TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                samples_collected INTEGER NOT NULL DEFAULT 0,
+                samples_rejected INTEGER NOT NULL DEFAULT 0,
+                symbols_attempted INTEGER NOT NULL DEFAULT 0,
+                symbols_succeeded INTEGER NOT NULL DEFAULT 0,
+                cycle_duration_ms DOUBLE PRECISION,
+                provider TEXT NOT NULL DEFAULT 'BINGX_PUBLIC_FUTURES',
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS capability_entitlements(
                 id {id_col}, telegram_id BIGINT NOT NULL, capability TEXT NOT NULL,
                 enabled INTEGER NOT NULL, source TEXT NOT NULL, expires_at TEXT,
@@ -981,6 +1085,8 @@ def create_tables() -> None:
             "notifications_enabled": "INTEGER DEFAULT 1",
         }.items():
             _add_column(conn, "users", name, definition)
+        _add_column(conn, "user_exchange_credentials", "key_version", "TEXT NOT NULL DEFAULT 'v1'")
+        _add_column(conn, "user_exchange_credentials", "key_fingerprint", "TEXT")
         for name, definition in {
             "owner_telegram_id": "BIGINT", "triggered_at": "TEXT", "activated_at": "TEXT",
             "expires_at": "TEXT", "invalidated_at": "TEXT", "preferred_entry_low": "DOUBLE PRECISION",
@@ -1080,8 +1186,15 @@ def create_tables() -> None:
             "permission_snapshot_json": "TEXT",
             "certification_status": "TEXT",
             "certification_expires_at": "TEXT",
+            "lifecycle_state": "TEXT NOT NULL DEFAULT 'NOT_CONNECTED'",
         }.items():
             _add_column(conn, "live_exchange_accounts", name, definition)
+        for name, definition in {"position_side": "TEXT", "margin_mode": "TEXT",
+                                 "leverage": "INTEGER"}.items():
+            _add_column(conn, "live_executions", name, definition)
+        for name, definition in {"position_side": "TEXT", "margin_mode": "TEXT",
+                                 "leverage": "INTEGER"}.items():
+            _add_column(conn, "live_order_intents", name, definition)
         for name, definition in {
             "schema_version": "TEXT", "schema_checksum": "TEXT", "context_version": "TEXT",
             "request_format_version": "TEXT",
@@ -1235,12 +1348,16 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_live_execution_owner ON live_executions(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_live_attempt_execution ON live_execution_attempts(execution_id,attempt_number)",
             "CREATE INDEX IF NOT EXISTS idx_live_fill_execution ON live_execution_fills(execution_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_position_account ON live_positions(account_id,status,symbol)",
             "CREATE INDEX IF NOT EXISTS idx_bingx_cert_account ON bingx_certification_audits(account_id,started_at)",
             "CREATE INDEX IF NOT EXISTS idx_symbol_rules_expiry ON exchange_symbol_rules_cache(exchange,environment,expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_copy_journal_due ON copy_execution_journal(status,next_attempt_at,id)",
             "CREATE INDEX IF NOT EXISTS idx_copy_journal_expired_lease ON copy_execution_journal(status,lease_expires_at,id)",
             "CREATE INDEX IF NOT EXISTS idx_live_account_sync ON live_exchange_accounts(exchange,sync_status,last_sync_at)",
             "CREATE INDEX IF NOT EXISTS idx_live_readiness_account_time ON live_readiness_audits(account_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_intent_account_time ON live_order_intents(account_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_reconciliation_account_time ON live_reconciliation_events(account_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_live_audit_user_time ON live_audit_events(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_user_time ON ai_decisions(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_signal ON ai_decisions(signal_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_decisions_eval ON ai_decisions(provider,model_version,prompt_version,created_at)",
@@ -1274,6 +1391,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_market_intelligence_story ON market_intelligence_snapshots(story_state,decision_at)",
             "CREATE INDEX IF NOT EXISTS idx_microstructure_symbol_time ON microstructure_aggregates(symbol,sampled_at)",
             "CREATE INDEX IF NOT EXISTS idx_microstructure_expiry ON microstructure_aggregates(expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_source_symbol_type_time ON market_source_snapshots(symbol,source_type,observed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_source_expiry ON market_source_snapshots(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_capability_entitlements_user ON capability_entitlements(telegram_id,capability)",
             "CREATE INDEX IF NOT EXISTS idx_plan_assignments_expiry ON user_plan_assignments(plan_key,expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_entitlement_audit_user_time ON entitlement_audit_events(telegram_id,created_at)",

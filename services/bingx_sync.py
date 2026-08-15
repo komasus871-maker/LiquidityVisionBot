@@ -65,13 +65,15 @@ class BingXAccountSyncService:
                     margin_mode=COALESCE(?,margin_mode),server_time_drift_ms=COALESCE(?,server_time_drift_ms),
                     capability_snapshot_json=COALESCE(?,capability_snapshot_json),
                     permission_snapshot_json=COALESCE(?,permission_snapshot_json),
-                    last_sync_at=CASE WHEN ?='SUCCESS' THEN ? ELSE last_sync_at END,updated_at=?
+                    last_sync_at=CASE WHEN ?='SUCCESS' THEN ? ELSE last_sync_at END,
+                    lifecycle_state=CASE WHEN ?='SUCCESS' THEN 'PREFLIGHT_READY'
+                        WHEN ?='FAILED' THEN 'ERROR' ELSE lifecycle_state END,updated_at=?
                 WHERE id=? AND telegram_id=?
                 """, (
                 self.adapter.environment, self.adapter.ADAPTER_VERSION, stage, status,
                 error_code, error_message, values.get("account_mode"), values.get("margin_mode"),
                 values.get("server_time_drift_ms"), values.get("capabilities"), values.get("permissions"),
-                status, now, now, account_id, telegram_id,
+                status, now, status, status, now, account_id, telegram_id,
                 ))
         except Exception as exc:
             raise BingXSyncPersistenceError("BingX synchronization state could not be persisted") from exc

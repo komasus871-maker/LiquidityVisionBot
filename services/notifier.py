@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from aiogram import Bot
 
 from services.probability_engine import ProbabilityEngine
+from services.intelligence_alerts import IntelligenceAlertService
 from utils.price import fmt_price
 from utils.presentation import action_label, status_label
 
@@ -16,6 +17,7 @@ class Notifier:
     def __init__(self, bot: Bot | None = None):
         self.bot = bot
         self.probability = ProbabilityEngine()
+        self.alerts = IntelligenceAlertService()
 
     @staticmethod
     def _duration(started_at: str | None) -> str | None:
@@ -74,18 +76,38 @@ class Notifier:
         move = (price - entry) if signal.get("side") == "LONG" else (entry - price)
         return move / risk
 
-    async def _send(self, signal: dict, lines: list[str]) -> None:
+    async def _send(self, signal: dict, lines: list[str]) -> bool:
         if not self.bot:
-            return
+            return False
         chat_id = signal.get("notification_chat_id") or signal.get("owner_telegram_id")
         if not chat_id:
-            return
+            return False
         try:
             await self.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
         except Exception:
             logging.exception("Failed to send notification for signal %s", signal.get("id"))
+            return False
+        return True
 
     async def lifecycle(self, signal: dict, event: str, price: float, extra: str = "") -> None:
+        if not self.bot:
+            return
+        telegram_id = signal.get("notification_chat_id") or signal.get("owner_telegram_id")
+        if not telegram_id:
+            return
+        alert_type = {
+            "ACTIVE": "TRADE_ACTIVATION", "TP1": "TAKE_PROFIT", "TP2": "TAKE_PROFIT",
+            "TP3": "TAKE_PROFIT", "STOP": "STOP", "BREAKEVEN": "STOP",
+            "INVALIDATED": "INVALIDATION", "EXPIRED": "INVALIDATION",
+            "TRIGGERED": "ENTRY_ZONE",
+        }.get(event, "STATUS_CHANGE")
+        decision = self.alerts.evaluate(
+            int(telegram_id), symbol=str(signal.get("symbol") or "UNKNOWN"),
+            timeframe=str(signal.get("timeframe") or "1h"), alert_type=alert_type,
+            state_identity=f"signal:{signal.get('id')}:{event}", severity="INFO",
+            details={"signal_id": signal.get("id"), "event": event})
+        if decision["status"] != "ELIGIBLE":
+            return
         icons = {
             "TRIGGERED": "🔔", "ACTIVE": "🟢", "TP1": "🎯", "TP2": "🏆", "TP3": "👑",
             "STOP": "🛑", "BREAKEVEN": "🛡", "INVALIDATED": "⚠️", "EXPIRED": "⌛",
@@ -158,7 +180,11 @@ class Notifier:
             ])
         if extra:
             lines.extend(["", html.escape(extra)])
-        await self._send(signal, lines)
+        delivered = await self._send(signal, lines)
+        if delivered:
+            self.alerts.mark_delivered(decision["alert_key"])
+        else:
+            self.alerts.mark_delivery_failed(decision["alert_key"])
 
     @staticmethod
     def _confidence_components(signal: dict) -> tuple[float, dict[str, float]]:

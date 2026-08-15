@@ -290,35 +290,61 @@ class BingXSwapAdapter(ExchangeAdapter):
             "source": "BINGX_PUBLIC_FUTURES_DEPTH",
         }
 
-    async def funding_open_interest(self, symbol: str) -> dict[str, Any]:
-        """Return only exchange-reported public funding and open-interest context."""
+    async def funding_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Return one independently validated public funding observation."""
         normalized = _symbol(symbol)
-        premium, interest = await asyncio.gather(
-            self._request("/openApi/swap/v2/quote/premiumIndex", params={"symbol": normalized}),
-            self._request("/openApi/swap/v2/quote/openInterest", params={"symbol": normalized}),
-        )
+        premium = await self._request(
+            "/openApi/swap/v2/quote/premiumIndex", params={"symbol": normalized})
         premium_row = premium[0] if isinstance(premium, list) and premium else premium
-        interest_row = interest[0] if isinstance(interest, list) and interest else interest
         premium_row = premium_row if isinstance(premium_row, dict) else {}
-        interest_row = interest_row if isinstance(interest_row, dict) else {}
         funding = premium_row.get("lastFundingRate")
         if funding is None:
             funding = premium_row.get("fundingRate")
-        open_interest = interest_row.get("openInterest")
-        if open_interest is None:
-            open_interest = interest_row.get("openInterestAmount")
-        if funding is None and open_interest is None:
-            raise ExchangeResponseError("BingX funding/open-interest response was empty")
+        if funding is None:
+            raise ExchangeResponseError("BingX funding response was empty")
         return {
-            "symbol": normalized,
-            "funding_rate": None if funding is None else str(funding),
-            "open_interest": None if open_interest is None else str(open_interest),
+            "symbol": normalized, "funding_rate": str(funding),
             "mark_price": premium_row.get("markPrice"),
             "index_price": premium_row.get("indexPrice"),
             "next_funding_time": premium_row.get("nextFundingTime"),
-            "reported_at": premium_row.get("time") or interest_row.get("time") or int(time.time() * 1000),
-            "source": "BINGX_PUBLIC_FUTURES_MARKET",
+            "reported_at": premium_row.get("time") or int(time.time() * 1000),
+            "source": "BINGX_PUBLIC_FUTURES_FUNDING",
         }
+
+    async def open_interest_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Return one independently validated public open-interest observation."""
+        normalized = _symbol(symbol)
+        interest = await self._request(
+            "/openApi/swap/v2/quote/openInterest", params={"symbol": normalized})
+        interest_row = interest[0] if isinstance(interest, list) and interest else interest
+        interest_row = interest_row if isinstance(interest_row, dict) else {}
+        open_interest = interest_row.get("openInterest")
+        if open_interest is None:
+            open_interest = interest_row.get("openInterestAmount")
+        if open_interest is None:
+            raise ExchangeResponseError("BingX open-interest response was empty")
+        return {
+            "symbol": normalized, "open_interest": str(open_interest),
+            "reported_at": interest_row.get("time") or int(time.time() * 1000),
+            "source": "BINGX_PUBLIC_FUTURES_OPEN_INTEREST",
+        }
+
+    async def funding_open_interest(self, symbol: str) -> dict[str, Any]:
+        """Backward-compatible combined view without coupling source success."""
+        funding, interest = await asyncio.gather(
+            self.funding_snapshot(symbol), self.open_interest_snapshot(symbol),
+            return_exceptions=True)
+        if isinstance(funding, Exception) and isinstance(interest, Exception):
+            raise funding
+        result: dict[str, Any] = {"symbol": _symbol(symbol),
+                                  "source": "BINGX_PUBLIC_FUTURES_MARKET"}
+        if not isinstance(funding, Exception):
+            result.update(funding)
+        if not isinstance(interest, Exception):
+            result.update(interest)
+        result["funding_status"] = "UNAVAILABLE" if isinstance(funding, Exception) else "AVAILABLE"
+        result["open_interest_status"] = "UNAVAILABLE" if isinstance(interest, Exception) else "AVAILABLE"
+        return result
 
     async def rate_limits(self) -> ExchangeRateLimits:
         return self._last_rate_limit

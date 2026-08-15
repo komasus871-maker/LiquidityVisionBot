@@ -124,13 +124,13 @@ def test_market_intelligence_v102_separates_scores_and_fusion():
                     "funding_history": [.0001, .00012, .00014, .0002],
                     "open_interest_history": [900, 930, 960, 1000]},
     )
-    quality = result["signal_quality_v3"]
+    quality = result["signal_quality_v4"]
     assert set(quality["quality_dimensions"]) == {"setup", "entry", "market", "execution", "data_confidence"}
     readiness = result["entry_readiness"]
-    assert readiness["version"] == "entry-readiness-v2"
+    assert readiness["version"] == "entry-readiness-v3"
     assert set(readiness["components"]) == {
         "LOCATION", "TRIGGER", "MOMENTUM", "MICROSTRUCTURE", "INVALIDATION",
-        "REWARD_AFTER_COST", "DATA_CONFIDENCE",
+        "REWARD_AFTER_COST",
     }
     fusion = result["strategy_fusion_v2"]
     assert fusion["primary"]["strategy"] != fusion["secondary"]["strategy"]
@@ -165,7 +165,7 @@ def test_entry_readiness_v2_differentiates_location_trigger_and_data():
         data_quality={"status": "INVALID"})
     assert ready["state"] == "READY"
     assert chasing["state"] == "CHASING" and chasing["score"] < ready["score"]
-    assert stale["state"] == "STALE_OR_INVALID_DATA" and stale["score"] <= 15
+    assert stale["state"] == "INSUFFICIENT_DATA" and stale["score"] <= 35
 
 
 def test_alert_engine_v3_records_usage_delivery_and_unchanged_state(v102_db):

@@ -264,7 +264,7 @@ class AIContextBuilder:
                 rich = json.loads(market_intelligence_row["full_snapshot_json"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 rich = {}
-            quality = rich.get("signal_quality_v3") or rich.get("signal_quality_v2") or {}
+            quality = rich.get("signal_quality_v4") or rich.get("signal_quality_v3") or rich.get("signal_quality_v2") or {}
             liquidity = rich.get("liquidity_map") or {}
             safe_features["market_intelligence_v2"] = redact({
                 "market_story": rich.get("market_story") or {},

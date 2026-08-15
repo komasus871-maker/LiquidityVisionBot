@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from database.database import connect
 
 
-POLICY_VERSION = "operational-retention-v1"
+POLICY_VERSION = "operational-retention-v2"
 
 
 class OperationalRetentionService:
@@ -18,6 +18,8 @@ class OperationalRetentionService:
         "ai_provider_request_events": "PROVIDER_EVENT_RETENTION_DAYS",
         "feature_usage_events": "FEATURE_USAGE_RETENTION_DAYS",
         "intelligence_alert_events": "ALERT_EVENT_RETENTION_DAYS",
+        "microstructure_aggregates": "MICROSTRUCTURE_RETENTION_DAYS",
+        "market_source_snapshots": "DERIVATIVES_RETENTION_DAYS",
     }
 
     @staticmethod

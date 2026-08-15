@@ -23,7 +23,7 @@ def _plan_lines(plan: str) -> str:
     definitions = {
         "FREE": ["Core signals and lifecycle", "Basic journal and PAPER copy",
                  "Useful market-intelligence previews"],
-        "PRO": ["Full Quality V3, Market Story and Ranking V4", "Order book, funding and OI",
+        "PRO": ["Full Quality V4, Market Story and Ranking V5", "Order book, funding and OI",
                 "Advanced alerts and copy customization"],
         "ELITE": ["Strategy Lab and Edge Discovery", "Forward/scalping/portfolio research",
                   "Advanced AI red-team comparison and exports"],

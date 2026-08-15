@@ -46,6 +46,16 @@ def _number(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 def _checksum(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
@@ -68,23 +78,32 @@ class MarketIntelligenceRepository:
     def strategy_distribution(self, telegram_id: int, limit: int = 500) -> dict[str, Any]:
         safe = max(1, min(int(limit), 2000))
         with connect() as conn:
-            rows = conn.execute(f"""SELECT strategy_suitability_json FROM market_intelligence_snapshots
+            rows = conn.execute(f"""SELECT strategy_suitability_json,full_snapshot_json FROM market_intelligence_snapshots
                 WHERE (owner_telegram_id=? OR owner_telegram_id IS NULL)
                 ORDER BY id DESC LIMIT {safe}""", (telegram_id,)).fetchall()
         counts: dict[str, int] = {}
         margins: list[float] = []
+        classification_states: dict[str, int] = {}
         for row in rows:
             scores = _loads(row["strategy_suitability_json"], {})
+            full = _loads(row.get("full_snapshot_json"), {})
+            fusion = full.get("strategy_fusion_v2") or {}
             ranked = sorted(((str(key), float(value)) for key, value in scores.items()),
                             key=lambda item: (-item[1], item[0]))
             if not ranked:
                 continue
-            counts[ranked[0][0]] = counts.get(ranked[0][0], 0) + 1
+            state = str(fusion.get("fusion_state") or
+                        ("TIE" if len(ranked) > 1 and abs(ranked[0][1] - ranked[1][1]) <= .5 else "PRIMARY"))
+            classification_states[state] = classification_states.get(state, 0) + 1
+            label = "TIE" if state == "TIE" else ranked[0][0]
+            counts[label] = counts.get(label, 0) + 1
             if len(ranked) > 1:
                 margins.append(ranked[0][1] - ranked[1][1])
         return {"snapshots": len(rows), "classified": sum(counts.values()),
                 "distribution": sorted(counts.items(), key=lambda item: (-item[1], item[0])),
                 "average_top_margin": sum(margins) / len(margins) if margins else None,
+                "classification_states": classification_states,
+                "exact_ties_are_not_assigned_alphabetically": True,
                 "forced_diversity": False, "execution_authority": False}
 
     """Persistence and read APIs for immutable, advisory market-intelligence rows."""
@@ -120,7 +139,7 @@ class MarketIntelligenceRepository:
                                      if previous_state != story.get("state") else "UNCHANGED")
         snapshot["market_story"] = story
         snapshot_checksum = _checksum(snapshot)
-        quality = snapshot.get("signal_quality_v3") or snapshot.get("signal_quality_v2") or {}
+        quality = snapshot.get("signal_quality_v4") or snapshot.get("signal_quality_v3") or snapshot.get("signal_quality_v2") or {}
         reversal = snapshot.get("reversal_research") or {}
         market_quality = _number(quality.get("market_quality"), 0) or 0
         overall_quality = _number(quality.get("overall_quality"), 0) or 0
@@ -275,57 +294,323 @@ class MarketIntelligenceRepository:
             result["stale"] = True
         return result
 
+    def persist_source_snapshot(self, *, symbol: str, exchange: str, environment: str,
+                                source_type: str, provider: str, snapshot: Mapping[str, Any],
+                                observed_at: str | None = None,
+                                ttl_seconds: int | None = None) -> bool:
+        """Persist one independently valid bounded public-source observation."""
+        source_key = str(source_type).strip().upper()
+        required = {"FUNDING": "funding_rate", "OPEN_INTEREST": "open_interest"}
+        if source_key not in required:
+            raise ValueError("unsupported market source type")
+        if snapshot.get(required[source_key]) is None:
+            raise ValueError(f"{source_key.lower()} snapshot has no reported value")
+        payload = dict(snapshot)
+        payload.pop("bids", None)
+        payload.pop("asks", None)
+        serialized = _canonical(payload)
+        if len(serialized.encode("utf-8")) > 65_536:
+            raise ValueError("market source snapshot exceeds the persistence size bound")
+        observed = observed_at or datetime.now(timezone.utc).isoformat()
+        parsed = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+        parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        ttl = max(30, min(int(ttl_seconds or 300), 86_400))
+        expires = (parsed + timedelta(seconds=ttl)).isoformat()
+        identity = {"symbol": str(symbol).upper(), "exchange": str(exchange).lower(),
+                    "environment": environment, "source_type": source_key,
+                    "provider": provider, "observed_at": observed, "snapshot": payload}
+        checksum = _checksum(identity)
+        now = datetime.now(timezone.utc).isoformat()
+        with connect() as conn:
+            cur = conn.execute("""INSERT INTO market_source_snapshots(symbol,exchange,environment,
+                source_type,provider,snapshot_version,snapshot_checksum,snapshot_json,
+                observed_at,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(snapshot_checksum) DO NOTHING""", (
+                identity["symbol"], identity["exchange"], environment, source_key, provider,
+                "market-source-history-v1", checksum, serialized, observed, expires, now))
+        return cur.rowcount == 1
+
+    def latest_source_snapshot(self, symbol: str, source_type: str,
+                               as_of: str | None = None) -> dict[str, Any] | None:
+        normalized = str(symbol).upper().replace("-", "")
+        source_key = str(source_type).upper()
+        cutoff = as_of or datetime.now(timezone.utc).isoformat()
+        with connect() as conn:
+            row = conn.execute("""SELECT * FROM market_source_snapshots
+                WHERE REPLACE(UPPER(symbol),'-','')=? AND source_type=? AND observed_at<=?
+                ORDER BY observed_at DESC,id DESC LIMIT 1""",
+                (normalized, source_key, cutoff)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["snapshot"] = _loads(result.pop("snapshot_json", None), {})
+        expires = _parse_datetime(result.get("expires_at"))
+        result["stale"] = expires is None or expires < datetime.now(timezone.utc)
+        return result
+
+    def source_history(self, symbol: str, source_type: str, *, limit: int = 96,
+                       as_of: str | None = None) -> dict[str, Any]:
+        """Return chronological, bounded history and leakage-safe descriptive features."""
+        normalized = str(symbol).upper().replace("-", "")
+        source_key = str(source_type).upper()
+        safe = max(2, min(int(limit), 500))
+        cutoff = as_of or datetime.now(timezone.utc).isoformat()
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT * FROM (
+                    SELECT * FROM market_source_snapshots
+                    WHERE REPLACE(UPPER(symbol),'-','')=? AND source_type=? AND observed_at<=?
+                    ORDER BY observed_at DESC,id DESC LIMIT ?
+                ) bounded ORDER BY observed_at,id""",
+                (normalized, source_key, cutoff, safe)).fetchall()]
+        key = "funding_rate" if source_key == "FUNDING" else "open_interest"
+        observations = []
+        for row in rows:
+            payload = _loads(row.get("snapshot_json"), {})
+            value = _number(payload.get(key))
+            if value is not None:
+                observations.append({"observed_at": row["observed_at"], "value": value,
+                                     "payload": payload})
+        values = [item["value"] for item in observations]
+        current = values[-1] if values else None
+        delta = current - values[-2] if len(values) >= 2 else None
+        change_pct = (delta / values[-2] * 100
+                      if delta is not None and values[-2] != 0 else None)
+        acceleration = None
+        if len(values) >= 3:
+            acceleration = (values[-1] - values[-2]) - (values[-2] - values[-3])
+        percentile = None
+        if source_key == "FUNDING" and len(values) >= 20 and current is not None:
+            percentile = sum(value <= current for value in values) / len(values) * 100
+        price_state = "INSUFFICIENT_HISTORY"
+        if source_key == "OPEN_INTEREST" and len(observations) >= 2:
+            current_price = _number(observations[-1]["payload"].get("reference_price"))
+            prior_price = _number(observations[-2]["payload"].get("reference_price"))
+            if current_price is not None and prior_price and delta is not None:
+                price_state = f"PRICE_{'UP' if current_price >= prior_price else 'DOWN'}_OI_{'UP' if delta >= 0 else 'DOWN'}"
+        return {"version": "market-source-history-v1", "source_type": source_key,
+                "history_points": len(values), "status": ("AVAILABLE" if len(values) >= 3
+                else "INSUFFICIENT_HISTORY" if values else "WAITING_FOR_FIRST_SAMPLE"),
+                "current": current, "delta": delta, "change_pct": change_pct,
+                "acceleration": acceleration, "percentile": percentile,
+                "price_oi_state": price_state, "as_of": cutoff,
+                "future_data_used": False,
+                "observations": [{"observed_at": item["observed_at"], "value": item["value"]}
+                                 for item in observations]}
+
+    def microstructure_history(self, symbol: str, *, limit: int = 96,
+                               as_of: str | None = None) -> dict[str, Any]:
+        normalized = str(symbol).upper().replace("-", "")
+        safe = max(2, min(int(limit), 500))
+        cutoff = as_of or datetime.now(timezone.utc).isoformat()
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT * FROM (
+                    SELECT sampled_at,aggregate_json FROM microstructure_aggregates
+                    WHERE REPLACE(UPPER(symbol),'-','')=? AND sampled_at<=?
+                    ORDER BY sampled_at DESC,id DESC LIMIT ?
+                ) bounded ORDER BY sampled_at""", (normalized, cutoff, safe)).fetchall()]
+        points = []
+        for row in rows:
+            aggregate = _loads(row.get("aggregate_json"), {})
+            imbalance = _number(((aggregate.get("depth_bands") or {}).get("0.5") or {}).get("imbalance"))
+            points.append({"sampled_at": row["sampled_at"], "spread_bps": _number(aggregate.get("spread_bps")),
+                           "imbalance": imbalance, "book_pressure": imbalance,
+                           "wall_count": len(aggregate.get("walls") or []),
+                           "behavior_labels": list(aggregate.get("behavior_labels") or [])[:8]})
+        def trend(key: str) -> str:
+            values = [item[key] for item in points if item.get(key) is not None]
+            if len(values) < 3:
+                return "INSUFFICIENT_HISTORY"
+            delta = sum(values[-2:]) / 2 - sum(values[:2]) / 2
+            threshold = .05 if key != "spread_bps" else .5
+            return "RISING" if delta > threshold else "FALLING" if delta < -threshold else "STABLE"
+        return {"version": "microstructure-history-v1", "history_points": len(points),
+                "status": "AVAILABLE" if len(points) >= 3 else "INSUFFICIENT_HISTORY",
+                "imbalance_trend": trend("imbalance"), "spread_trend": trend("spread_bps"),
+                "book_pressure_acceleration": (None if len(points) < 3 or any(
+                    point.get("book_pressure") is None for point in points[-3:]) else
+                    (points[-1]["book_pressure"] - points[-2]["book_pressure"])
+                    - (points[-2]["book_pressure"] - points[-3]["book_pressure"])),
+                "points": points, "as_of": cutoff, "future_data_used": False}
+
+    def record_source_health(self, *, symbol: str, source_type: str, provider: str,
+                             success: bool, error_code: str | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        normalized = str(symbol).upper().replace("-", "")
+        state = "HEALTHY" if success else "FAILED"
+        with connect() as conn:
+            conn.execute("""INSERT INTO market_source_health(symbol,source_type,provider,state,
+                last_attempt_at,last_success_at,last_error_code,consecutive_failures,
+                samples_collected,samples_rejected,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(symbol,source_type,provider) DO UPDATE SET
+                    state=excluded.state,last_attempt_at=excluded.last_attempt_at,
+                    last_success_at=CASE WHEN excluded.state='HEALTHY' THEN excluded.last_success_at
+                        ELSE market_source_health.last_success_at END,
+                    last_error_code=CASE WHEN excluded.state='HEALTHY' THEN NULL ELSE excluded.last_error_code END,
+                    consecutive_failures=CASE WHEN excluded.state='HEALTHY' THEN 0
+                        ELSE market_source_health.consecutive_failures+1 END,
+                    samples_collected=market_source_health.samples_collected+excluded.samples_collected,
+                    samples_rejected=market_source_health.samples_rejected+excluded.samples_rejected,
+                    updated_at=excluded.updated_at""", (
+                    normalized, str(source_type).upper(), provider, state, now,
+                    now if success else None, None if success else str(error_code or "SOURCE_ERROR")[:80],
+                    0 if success else 1, int(success), int(not success), now))
+
+    def update_worker_health(self, **changes: Any) -> dict[str, Any]:
+        worker_name = str(changes.pop("worker_name", "microstructure_observer"))
+        existing = self.worker_health(worker_name) or {}
+        defaults = {"configured_value": None, "configured_enabled": 0, "effective_enabled": 0,
+                    "state": "NOT_STARTED", "worker_started_at": None, "heartbeat_at": None,
+                    "lease_state": "NOT_ACQUIRED", "lease_owner": None, "active_symbols": [],
+                    "source_health": {}, "last_cycle_started_at": None, "last_cycle_completed_at": None,
+                    "last_depth_success_at": None, "last_funding_success_at": None,
+                    "last_oi_success_at": None, "last_persist_success_at": None,
+                    "last_error_code": None, "consecutive_failures": 0,
+                    "samples_collected": 0, "samples_rejected": 0,
+                    "symbols_attempted": 0, "symbols_succeeded": 0,
+                    "cycle_duration_ms": None, "provider": "BINGX_PUBLIC_FUTURES"}
+        values = {**defaults, **existing, **changes}
+        now = datetime.now(timezone.utc).isoformat()
+        values["updated_at"] = now
+        with connect() as conn:
+            conn.execute("""INSERT INTO microstructure_worker_health(worker_name,configured_value,
+                configured_enabled,effective_enabled,state,worker_started_at,heartbeat_at,
+                lease_state,lease_owner,active_symbols_json,source_health_json,
+                last_cycle_started_at,last_cycle_completed_at,last_depth_success_at,
+                last_funding_success_at,last_oi_success_at,last_persist_success_at,last_error_code,
+                consecutive_failures,samples_collected,samples_rejected,symbols_attempted,
+                symbols_succeeded,cycle_duration_ms,provider,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(worker_name) DO UPDATE SET
+                    configured_value=excluded.configured_value,configured_enabled=excluded.configured_enabled,
+                    effective_enabled=excluded.effective_enabled,state=excluded.state,
+                    worker_started_at=excluded.worker_started_at,heartbeat_at=excluded.heartbeat_at,
+                    lease_state=excluded.lease_state,lease_owner=excluded.lease_owner,
+                    active_symbols_json=excluded.active_symbols_json,source_health_json=excluded.source_health_json,
+                    last_cycle_started_at=excluded.last_cycle_started_at,
+                    last_cycle_completed_at=excluded.last_cycle_completed_at,
+                    last_depth_success_at=excluded.last_depth_success_at,
+                    last_funding_success_at=excluded.last_funding_success_at,
+                    last_oi_success_at=excluded.last_oi_success_at,
+                    last_persist_success_at=excluded.last_persist_success_at,
+                    last_error_code=excluded.last_error_code,consecutive_failures=excluded.consecutive_failures,
+                    samples_collected=excluded.samples_collected,samples_rejected=excluded.samples_rejected,
+                    symbols_attempted=excluded.symbols_attempted,symbols_succeeded=excluded.symbols_succeeded,
+                    cycle_duration_ms=excluded.cycle_duration_ms,provider=excluded.provider,
+                    updated_at=excluded.updated_at""", (
+                    worker_name, values["configured_value"], int(bool(values["configured_enabled"])),
+                    int(bool(values["effective_enabled"])), values["state"], values["worker_started_at"],
+                    values["heartbeat_at"], values["lease_state"], values["lease_owner"],
+                    _canonical(values["active_symbols"]), _canonical(values["source_health"]),
+                    values["last_cycle_started_at"], values["last_cycle_completed_at"],
+                    values["last_depth_success_at"], values["last_funding_success_at"],
+                    values["last_oi_success_at"], values["last_persist_success_at"],
+                    values["last_error_code"], int(values["consecutive_failures"] or 0),
+                    int(values["samples_collected"] or 0), int(values["samples_rejected"] or 0),
+                    int(values["symbols_attempted"] or 0), int(values["symbols_succeeded"] or 0),
+                    values["cycle_duration_ms"], values["provider"], now))
+        return self.worker_health(worker_name) or {}
+
+    def worker_health(self, worker_name: str = "microstructure_observer") -> dict[str, Any] | None:
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM microstructure_worker_health WHERE worker_name=?",
+                               (worker_name,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["active_symbols"] = _loads(result.pop("active_symbols_json", None), [])
+        result["source_health"] = _loads(result.pop("source_health_json", None), {})
+        return result
+
     def data_health(self, symbol: str | None = None,
                     owner_telegram_id: int | None = None) -> dict[str, Any]:
-        """Return bounded availability, never inferred values, for operator diagnostics."""
+        """Separate current global sources from immutable decision-time availability."""
         market = self.latest_symbol(symbol, owner_telegram_id) if symbol else None
         micro = self.latest_microstructure(symbol) if symbol else None
         snapshot = (market or {}).get("full_snapshot") or {}
-        derivatives = ((micro or {}).get("aggregate") or {}).get("funding_open_interest") or {}
-
+        funding = self.latest_source_snapshot(symbol, "FUNDING") if symbol else None
+        open_interest = self.latest_source_snapshot(symbol, "OPEN_INTEREST") if symbol else None
+        funding_history = self.source_history(symbol, "FUNDING") if symbol else {}
+        oi_history = self.source_history(symbol, "OPEN_INTEREST") if symbol else {}
+        worker = self.worker_health() or {}
         micro_enabled = os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower() in {
             "1", "true", "yes", "on"}
+        collector_state = str(worker.get("state") or (
+            "NOT_STARTED" if micro_enabled else "DISABLED_BY_CONFIGURATION"))
 
-        def state(available: bool, *, stale: bool = False, insufficient: bool = False,
-                  missing: str = "UNAVAILABLE") -> str:
-            if stale:
-                return "STALE"
-            if available and insufficient:
-                return "INSUFFICIENT_HISTORY"
-            return "AVAILABLE" if available else missing
+        def source_state(row: Mapping[str, Any] | None, history: Mapping[str, Any] | None = None) -> str:
+            if row:
+                if row.get("stale"):
+                    return "STALE"
+                if history and history.get("status") == "INSUFFICIENT_HISTORY":
+                    return "INSUFFICIENT_HISTORY"
+                return "HEALTHY"
+            if not micro_enabled:
+                return "DISABLED_BY_CONFIGURATION"
+            if collector_state in {"FAILED", "DEGRADED", "STALE", "NOT_STARTED"}:
+                return collector_state
+            return "WAITING_FOR_FIRST_SAMPLE"
 
-        funding_available = derivatives.get("funding_rate") is not None
-        oi_available = derivatives.get("open_interest") is not None
-        return {
-            "version": "data-availability-v2", "symbol": symbol,
-            "candles": state(bool(market), missing="DECISION_SNAPSHOT_MISSING"),
-            "benchmark": state((snapshot.get("relative_strength") or {}).get("status") == "AVAILABLE",
-                               missing="SYNCHRONIZED_FRAME_MISSING"),
-            "funding": state(funding_available, stale=bool(micro and micro.get("stale")),
-                             missing=("ENDPOINT_UNAVAILABLE" if micro else
-                                      "WAITING_FOR_FIRST_SAMPLE" if micro_enabled else
-                                      "DISABLED_BY_CONFIGURATION")),
-            "open_interest": state(oi_available, stale=bool(micro and micro.get("stale")),
-                                   insufficient=oi_available and derivatives.get("open_interest_change_pct") is None,
-                                   missing=("ENDPOINT_UNAVAILABLE" if micro else
-                                            "WAITING_FOR_FIRST_SAMPLE" if micro_enabled else
-                                            "DISABLED_BY_CONFIGURATION")),
-            "microstructure": state(bool(micro), stale=bool(micro and micro.get("stale")),
-                                    missing="WAITING_FOR_FIRST_SAMPLE" if micro_enabled else
-                                    "DISABLED_BY_CONFIGURATION"),
-            "liquidity_map": state(bool(snapshot.get("liquidity_map")),
-                                   missing="DECISION_SNAPSHOT_MISSING"),
+        try:
+            from services.providers.okx import OKXProvider
+            candle_provider = OKXProvider.health_snapshot()
+            candle_state = str(candle_provider.get("status") or "UNKNOWN")
+        except Exception:
+            candle_state = "UNKNOWN"
+        current_derivatives = (funding or {}).get("snapshot") or {}
+        current_oi = (open_interest or {}).get("snapshot") or {}
+        funding_context = {**current_derivatives,
+                           "history_status": funding_history.get("status"),
+                           "history_points": funding_history.get("history_points"),
+                           "funding_delta": funding_history.get("delta"),
+                           "funding_acceleration": funding_history.get("acceleration"),
+                           "funding_percentile": funding_history.get("percentile")} if funding else {}
+        oi_context = {**current_oi,
+                      "history_status": oi_history.get("status"),
+                      "history_points": oi_history.get("history_points"),
+                      "open_interest_delta": oi_history.get("delta"),
+                      "open_interest_change_pct": oi_history.get("change_pct"),
+                      "oi_acceleration": oi_history.get("acceleration"),
+                      "price_oi_state": oi_history.get("price_oi_state")} if open_interest else {}
+        global_health = {
+            "candles": candle_state,
+            "benchmark": "HEALTHY" if (snapshot.get("relative_strength") or {}).get("status") == "AVAILABLE" else "SOURCE_AVAILABLE_DECISION_FRAME_REQUIRED",
+            "funding": source_state(funding, funding_history),
+            "open_interest": source_state(open_interest, oi_history),
+            "microstructure": source_state(micro),
+            "collector": collector_state,
+        }
+        decision_health = {
+            "candles": "AVAILABLE" if market else "MISSING",
+            "benchmark": "AVAILABLE" if (snapshot.get("relative_strength") or {}).get("status") == "AVAILABLE" else "MISSING_SYNCHRONIZED_FRAME",
+            "funding": "CAPTURED" if (snapshot.get("funding_open_interest") or {}).get("funding_rate") is not None else "NOT_CAPTURED",
+            "open_interest": "CAPTURED" if (snapshot.get("funding_open_interest") or {}).get("open_interest") is not None else "NOT_CAPTURED",
+            "microstructure": "CAPTURED" if (snapshot.get("microstructure") or {}).get("status") == "AVAILABLE" else "NOT_CAPTURED",
+            "liquidity_map": "AVAILABLE" if snapshot.get("liquidity_map") else "MISSING",
             "ordered_path": "INSUFFICIENT_HISTORY",
-            "execution_costs": state(bool((snapshot.get("research_policies") or {}).get(
-                "estimated_roundtrip_cost_pct") is not None), missing="DECISION_SNAPSHOT_MISSING"),
+            "execution_costs": "AVAILABLE" if (snapshot.get("research_policies") or {}).get(
+                "estimated_roundtrip_cost_pct") is not None else "MISSING",
+        }
+        return {
+            "version": "data-availability-v3", "symbol": symbol,
+            "global_source_health": global_health,
+            "decision_snapshot_availability": decision_health,
+            "candles": decision_health["candles"], "benchmark": decision_health["benchmark"],
+            "funding": global_health["funding"], "open_interest": global_health["open_interest"],
+            "microstructure": global_health["microstructure"],
+            "liquidity_map": decision_health["liquidity_map"],
+            "ordered_path": decision_health["ordered_path"],
+            "execution_costs": decision_health["execution_costs"],
             "remediation": {
                 "microstructure": ("Set MICROSTRUCTURE_COLLECTION_ENABLED=true and redeploy the Render service."
-                                   if not micro_enabled else "Wait for a successful observer cycle and inspect /system_health."),
+                                   if not micro_enabled else
+                                   f"Collector state is {collector_state}; inspect operator worker telemetry and its last error code."),
                 "benchmark": "Supply a synchronized BTC decision-time frame; never backfill with future candles.",
                 "ordered_path": "Accumulate trustworthy ordered-path observations.",
             },
-            "funding_context": derivatives if funding_available else {},
-            "open_interest_context": derivatives if oi_available else {},
+            "funding_context": funding_context,
+            "open_interest_context": oi_context,
+            "microstructure_history": self.microstructure_history(symbol) if symbol else {},
+            "collector": worker,
             "automatic_policy_change": False,
         }
 

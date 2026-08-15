@@ -11,7 +11,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: APP_VERSION
-        value: 10.2.0
+        value: 10.3.0
       - key: TELEGRAM_OPERATOR_USER_IDS
         sync: false
       - key: TELEGRAM_PLAN_ADMIN_USER_IDS
@@ -116,6 +116,8 @@ services:
         value: "0.01"
       - key: MICROSTRUCTURE_COLLECTION_ENABLED
         value: "true"
+      - key: MICROSTRUCTURE_SYMBOLS
+        value: BTCUSDT
       - key: MICROSTRUCTURE_INTERVAL_SECONDS
         value: "60"
       - key: MICROSTRUCTURE_MAX_SYMBOLS
@@ -130,10 +132,48 @@ services:
         value: "90"
       - key: ALERT_EVENT_RETENTION_DAYS
         value: "90"
+      - key: MICROSTRUCTURE_RETENTION_DAYS
+        value: "90"
+      - key: DERIVATIVES_RETENTION_DAYS
+        value: "90"
       - key: MICROSTRUCTURE_SAMPLE_SPACING_MS
         value: "400"
       - key: MICROSTRUCTURE_MAX_LEVELS
         value: "50"
+      - key: LIVE_EXECUTION_ENABLED
+        value: "false"
+      - key: LIVE_EXCHANGE_BINGX_ENABLED
+        value: "false"
+      - key: LIVE_RECONCILIATION_ENABLED
+        value: "true"
+      - key: LIVE_RECONCILIATION_INTERVAL_SECONDS
+        value: "120"
+      - key: LIVE_GLOBAL_MAX_POSITIONS
+        value: "3"
+      - key: LIVE_GLOBAL_MAX_ORDER_NOTIONAL
+        value: "100"
+      - key: LIVE_GLOBAL_MAX_PORTFOLIO_EXPOSURE
+        value: "500"
+      - key: LIVE_GLOBAL_MAX_SYMBOL_EXPOSURE
+        value: "200"
+      - key: LIVE_GLOBAL_MAX_DAILY_REALIZED_LOSS
+        value: "100"
+      - key: LIVE_GLOBAL_MAX_DAILY_TOTAL_LOSS
+        value: "150"
+      - key: LIVE_GLOBAL_MAX_SLIPPAGE_BPS
+        value: "50"
+      - key: LIVE_GLOBAL_MAX_LEVERAGE
+        value: "3"
+      - key: LIVE_GLOBAL_MIN_COOLDOWN_SECONDS
+        value: "30"
+      - key: ALLOW_USER_LIVE_CONNECTIONS
+        value: "false"
+      - key: BINGX_PRODUCTION_ADAPTER_ALLOWED
+        value: "false"
+      - key: EXCHANGE_CREDENTIALS_KEY_VERSION
+        value: v1
+      - key: EXCHANGE_CREDENTIALS_MASTER_KEY
+        sync: false
       - key: REVERSAL_EXTREME_MOVE_PCT
         value: "12"
       - key: AI_TRADING_MODE

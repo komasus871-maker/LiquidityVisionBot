@@ -14,6 +14,7 @@ from services.execution_repositories import ExecutionRepository
 from services.live_readiness import configured_mode
 from services.ai_trading import configured_capabilities
 from services.providers.okx import OKXProvider
+from services.market_intelligence_repository import MarketIntelligenceRepository
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -94,6 +95,38 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "last_error": None, "details": {},
         })
 
+    micro_health = MarketIntelligenceRepository().worker_health() or {}
+    configured_micro = os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on"}
+    for item in workers:
+        if item.get("worker_name") != "microstructure_observer":
+            continue
+        heartbeat = _parse_time(micro_health.get("heartbeat_at"))
+        heartbeat_age = int((now - heartbeat).total_seconds()) if heartbeat else None
+        source_times = [_parse_time(micro_health.get(key)) for key in (
+            "last_depth_success_at", "last_funding_success_at", "last_oi_success_at")]
+        source_times = [value for value in source_times if value]
+        snapshot_age = int((now - max(source_times)).total_seconds()) if source_times else None
+        state = str(micro_health.get("state") or (
+            "NOT_STARTED" if configured_micro else "DISABLED_BY_CONFIGURATION"))
+        if not configured_micro:
+            state = "DISABLED_BY_CONFIGURATION"
+        elif not micro_health.get("worker_started_at"):
+            state = "NOT_STARTED"
+        elif heartbeat_age is None or heartbeat_age > stale_after:
+            state = "STALE"
+        item.update({
+            "enabled": configured_micro,
+            "effective_enabled": bool(micro_health.get("effective_enabled", configured_micro)),
+            "configuration_reason": ("ENABLED_BY_CONFIGURATION" if configured_micro
+                                     else "DISABLED_BY_CONFIGURATION"),
+            "health_status": state, "stale": state == "STALE",
+            "age_seconds": heartbeat_age, "snapshot_age_seconds": snapshot_age,
+            "details": {**(item.get("details") or {}), **micro_health},
+        })
+        if state == "STALE" and "microstructure_observer" not in stale_workers:
+            stale_workers.append("microstructure_observer")
+
     with connect() as conn:
         counts = {
             "users": _scalar(conn, "SELECT COUNT(*) FROM users"),
@@ -113,6 +146,12 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "live_unknown": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='UNKNOWN'"),
             "live_recovery_required": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RECOVERY_REQUIRED'"),
             "live_retry_wait": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state='RETRY_WAIT'"),
+            "exchange_connections": _scalar(conn, "SELECT COUNT(*) FROM user_exchange_credentials WHERE status='connected'"),
+            "live_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts"),
+            "live_enabled_accounts": _scalar(conn, "SELECT COUNT(*) FROM live_exchange_accounts WHERE live_enabled=1"),
+            "live_risk_profiles_active": _scalar(conn, "SELECT COUNT(*) FROM live_risk_profiles WHERE status='ACTIVE'"),
+            "live_reconciliation_unresolved": _scalar(conn, "SELECT COUNT(*) FROM live_reconciliation_events WHERE resolved_at IS NULL"),
+            "live_order_intents": _scalar(conn, "SELECT COUNT(*) FROM live_order_intents"),
             "bingx_certification_passed": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_PASSED'"),
             "bingx_certification_running": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_RUNNING'"),
             "ai_decisions": _scalar(conn, "SELECT COUNT(*) FROM ai_decisions"),
@@ -195,6 +234,13 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "required_render_variable": "MICROSTRUCTURE_COLLECTION_ENABLED=true",
         },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+        "live": {
+            "global_execution_enabled": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+            "bingx_exchange_enabled": os.getenv("LIVE_EXCHANGE_BINGX_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+            "production_adapter_allowed": os.getenv("BINGX_PRODUCTION_ADAPTER_ALLOWED", "false").strip().lower() in {"1", "true", "yes", "on"},
+            "default_state": "DISABLED_BY_DEFAULT",
+            "ai_execution_authority": False, "research_execution_authority": False,
+        },
         "environment": os.getenv("RENDER_SERVICE_NAME") or os.getenv("ENVIRONMENT", "local"),
         "database_backend": database_backend(),
         "persistent_database": persistent_database(),

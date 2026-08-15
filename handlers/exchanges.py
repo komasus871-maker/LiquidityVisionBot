@@ -31,6 +31,8 @@ from services.bingx_certification import BingXCertificationService, live_certifi
 from services.execution_portfolio import ExecutionPortfolioEngine
 from services.bingx_sync import BingXAccountSyncService, BingXSyncReport
 from services.public_errors import public_error_message
+from services.live_safety import LiveRiskRepository
+from services.live_reconciliation import LiveReconciliationService
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -47,6 +49,44 @@ execution_manager = DemoExecutionManager(
     registry, timeout_seconds=float(os.getenv("EXCHANGE_OPERATION_TIMEOUT", "25"))
 )
 live_accounts = LiveAccountRepository()
+
+
+_LIVE_RISK_FIELDS = frozenset({
+    "max_positions", "max_order", "max_portfolio", "max_symbol",
+    "max_realized_loss", "max_total_loss", "max_slippage_bps", "cooldown",
+    "leverage", "symbols", "blocked_symbols", "timeframes", "strategies", "directions",
+})
+
+
+def _parse_live_risk_settings(parts: list[str]) -> dict[str, object]:
+    pairs: dict[str, str] = {}
+    for item in parts:
+        key, separator, value = item.partition("=")
+        key = key.strip().lower()
+        if not separator or key not in _LIVE_RISK_FIELDS or key in pairs:
+            raise ValueError("LIVE_RISK_SETTING_INVALID")
+        pairs[key] = value.strip()
+    required = _LIVE_RISK_FIELDS - {"blocked_symbols"}
+    if required - pairs.keys():
+        raise ValueError("LIVE_RISK_COMPLETE_POLICY_REQUIRED")
+
+    def values(name: str) -> list[str]:
+        return [value.strip() for value in pairs.get(name, "").split(",") if value.strip()]
+
+    return {
+        "max_positions": int(pairs["max_positions"]),
+        "max_order_notional": Decimal(pairs["max_order"]),
+        "max_portfolio_exposure": Decimal(pairs["max_portfolio"]),
+        "max_symbol_exposure": Decimal(pairs["max_symbol"]),
+        "max_daily_realized_loss": Decimal(pairs["max_realized_loss"]),
+        "max_daily_total_loss": Decimal(pairs["max_total_loss"]),
+        "max_modeled_slippage_bps": Decimal(pairs["max_slippage_bps"]),
+        "cooldown_seconds": int(pairs["cooldown"]),
+        "leverage_cap": int(pairs["leverage"]),
+        "allowed_symbols": values("symbols"), "blocked_symbols": values("blocked_symbols"),
+        "allowed_timeframes": values("timeframes"), "allowed_strategies": values("strategies"),
+        "allowed_directions": values("directions"),
+    }
 
 
 def format_bingx_certification(report) -> str:
@@ -175,6 +215,7 @@ async def live_certify(message: Message) -> None:
 
 
 @router.message(Command("live_account"))
+@router.message(Command("live_status"))
 async def live_account(message: Message) -> None:
     exchange, _ = _parse_exchange((message.text or "").split()[1:])
     account = live_accounts.ensure(message.from_user.id, exchange.value)
@@ -184,6 +225,7 @@ async def live_account(message: Message) -> None:
         f"Environment: <code>{escape(account.adapter_environment or 'not synchronized')}</code>\n"
         f"Adapter: <code>{escape(account.adapter_version or 'unknown')}</code>\n"
         f"Mode: <code>{account.execution_mode.value}</code>\n"
+        f"Lifecycle: <code>{escape(account.lifecycle_state)}</code>\n"
         f"Account / margin mode: <code>{escape(account.account_mode or 'unknown')} / {escape(account.margin_mode or 'unknown')}</code>\n"
         f"Last sync: <code>{escape(account.last_sync_at or 'never')}</code>\n"
         f"Sync status: <code>{escape(account.sync_status or 'never')} · {escape(account.sync_stage or 'none')}</code>\n"
@@ -192,6 +234,96 @@ async def live_account(message: Message) -> None:
         f"Certification: <code>{escape(account.certification_status or 'none')}</code>\n"
         f"Unresolved executions: <b>{len(unresolved)}</b>\n"
         f"Kill switch: <b>{'ACTIVE' if account.kill_switch else 'RELEASED'}</b>", parse_mode="HTML")
+
+
+@router.message(Command("live_risk"))
+async def live_risk(message: Message) -> None:
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    repository = LiveRiskRepository()
+    if args and args[0].lower() == "set":
+        if getattr(message.chat, "type", "private") != "private":
+            await message.answer("⛔ LIVE risk configuration is available only in a private chat.")
+            return
+        try:
+            settings = _parse_live_risk_settings(args[1:])
+            profile = repository.configure(account_id=account.id, telegram_id=message.from_user.id,
+                                           actor_telegram_id=message.from_user.id, **settings)
+        except (ValueError, PermissionError) as exc:
+            await message.answer(
+                f"⛔ LIVE risk remains unchanged: <code>{escape(str(exc))}</code>\n\n"
+                "Use <code>/help live_risk</code> for the complete fail-closed policy format.",
+                parse_mode="HTML")
+            return
+    else:
+        profile = repository.ensure_blocked(account_id=account.id,
+                                            telegram_id=message.from_user.id)
+    await message.answer(
+        f"🛡 <b>LIVE risk · {escape(exchange.value)}</b>\n\n"
+        f"Policy: <code>{escape(str(profile.get('policy_version')))}</code> · "
+        f"status <b>{escape(str(profile.get('status')))}</b>\n"
+        f"Positions / order / portfolio / symbol: <code>{profile.get('max_positions') or 'unset'} / "
+        f"{profile.get('max_order_notional') or 'unset'} / {profile.get('max_portfolio_exposure') or 'unset'} / "
+        f"{profile.get('max_symbol_exposure') or 'unset'}</code>\n"
+        f"Daily realized / total loss: <code>{profile.get('max_daily_realized_loss') or 'unset'} / "
+        f"{profile.get('max_daily_total_loss') or 'unset'}</code>\n"
+        f"Slippage / cooldown / leverage: <code>{profile.get('max_modeled_slippage_bps') or 'unset'} bps / "
+        f"{profile.get('cooldown_seconds') or 'unset'}s / {profile.get('leverage_cap') or 'unset'}x</code>\n\n"
+        "A blocked or incomplete profile cannot submit LIVE entries. Premium cannot override it.\n"
+        "To replace the complete policy, use <code>/help live_risk</code>.",
+        parse_mode="HTML")
+
+
+@router.message(Command("live_enable"))
+async def live_enable(message: Message) -> None:
+    if getattr(message.chat, "type", "private") != "private":
+        await message.answer("⛔ LIVE enablement is available only in a private chat.")
+        return
+    exchange, args = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    if not args:
+        risk = LiveRiskRepository().get(account.id) or {}
+        await message.answer(
+            f"⚠️ <b>Explicit LIVE enablement · {escape(exchange.value)}</b>\n\n"
+            f"Connection: <code>#{account.id}</code> · LIVE <b>{'ON' if account.live_enabled else 'OFF'}</b>\n"
+            f"Risk: <code>{escape(str(risk.get('status') or 'BLOCKED'))}</code> · "
+            f"certification <code>{escape(account.certification_status or 'none')}</code>\n"
+            f"Only after every server-side gate passes, confirm exactly:\n"
+            f"<code>/live_enable {escape(exchange.value)} ENABLE_LIVE_{account.id}</code>\n\n"
+            "This is separate from connecting credentials, Premium, PAPER copy, and certification.",
+            parse_mode="HTML")
+        return
+    try:
+        enabled = live_accounts.enable_live(message.from_user.id, exchange.value, args[0])
+    except PermissionError as exc:
+        await message.answer(f"⛔ LIVE remains OFF: <code>{escape(str(exc))}</code>", parse_mode="HTML")
+        return
+    await message.answer(f"⚠️ LIVE is now <b>ON</b> for connection <code>#{enabled.id}</code>.", parse_mode="HTML")
+
+
+@router.message(Command("live_reconciliation"))
+async def live_reconciliation(message: Message) -> None:
+    exchange, _ = _parse_exchange((message.text or "").split()[1:])
+    account = live_accounts.ensure(message.from_user.id, exchange.value)
+    adapter = None
+    try:
+        adapter = _user_registry(message.from_user.id, exchange).create(exchange)
+        report = await LiveReconciliationService().reconcile(
+            adapter=adapter, telegram_id=message.from_user.id,
+            account_id=account.id, exchange=exchange.value)
+    except ExchangeError as exc:
+        await message.answer(f"⚠️ {public_error_message(exc, context='ACCOUNT')}", parse_mode="HTML")
+        return
+    finally:
+        if adapter is not None:
+            await adapter.close()
+    kinds = ", ".join(item["type"] for item in report["mismatches"]) or "none"
+    await message.answer(
+        f"🔎 <b>LIVE reconciliation · {escape(exchange.value)}</b>\n\n"
+        f"Status: <b>{escape(report['status'])}</b>\nMismatches: <code>{escape(kinds)}</code>\n"
+        f"New entries blocked: <b>{'YES' if report['new_entries_blocked'] else 'NO'}</b>\n"
+        "Exchange state is authoritative; economic mismatches are never silently repaired.",
+        parse_mode="HTML")
 
 
 @router.message(Command("live_dry_run"))
@@ -474,7 +606,7 @@ async def disconnect_exchange(message: Message) -> None:
 @router.message(Command("my_exchanges"))
 async def my_exchanges(message: Message) -> None:
     try:
-        connections = _credential_store().list(message.from_user.id)
+        connections = _credential_store().list_details(message.from_user.id)
     except ExchangeError as exc:
         await message.answer(f"⚠️ {public_error_message(exc, context='EXCHANGE')}", parse_mode="HTML")
         return
@@ -482,8 +614,10 @@ async def my_exchanges(message: Message) -> None:
         await message.answer("🔌 You have no connected exchanges. Use <code>/connect_exchange</code>.", parse_mode="HTML")
         return
     rows = [
-        f"• <b>{name.value.upper()}</b> · {'DEMO/TESTNET' if testnet else 'LIVE'} · {escape(status)}"
-        for name, testnet, status in connections
+        f"• <b>{str(item['exchange']).upper()}</b> · {'DEMO/TESTNET' if item['testnet'] else 'LIVE'} · "
+        f"{escape(str(item['status']))} · key <code>{escape(str(item['key_fingerprint']))}</code> "
+        f"({escape(str(item['key_version']))})"
+        for item in connections
     ]
     await message.answer("🔐 <b>Your exchange accounts</b>\n\n" + "\n".join(rows), parse_mode="HTML")
 

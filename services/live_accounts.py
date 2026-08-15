@@ -2,12 +2,48 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 
 from database.database import connect
 from services.execution_models import ExecutionMode
+from services.live_safety import LiveAuditRepository, LiveKillSwitchRepository, LiveRiskRepository
+
+
+class LiveAccountState(StrEnum):
+    NOT_CONNECTED = "NOT_CONNECTED"
+    READ_ONLY_CONNECTED = "READ_ONLY_CONNECTED"
+    PREFLIGHT_READY = "PREFLIGHT_READY"
+    LIVE_CERTIFIED = "LIVE_CERTIFIED"
+    LIVE_ENABLED = "LIVE_ENABLED"
+    SUSPENDED = "SUSPENDED"
+    REVOKED = "REVOKED"
+    ERROR = "ERROR"
+    KILLED = "KILLED"
+
+
+ALLOWED_LIVE_ACCOUNT_TRANSITIONS = {
+    LiveAccountState.NOT_CONNECTED: {LiveAccountState.READ_ONLY_CONNECTED, LiveAccountState.REVOKED,
+                                     LiveAccountState.ERROR},
+    LiveAccountState.READ_ONLY_CONNECTED: {LiveAccountState.PREFLIGHT_READY, LiveAccountState.REVOKED,
+                                           LiveAccountState.ERROR, LiveAccountState.KILLED},
+    LiveAccountState.PREFLIGHT_READY: {LiveAccountState.LIVE_CERTIFIED, LiveAccountState.READ_ONLY_CONNECTED,
+                                      LiveAccountState.REVOKED, LiveAccountState.ERROR, LiveAccountState.KILLED},
+    LiveAccountState.LIVE_CERTIFIED: {LiveAccountState.LIVE_ENABLED, LiveAccountState.PREFLIGHT_READY,
+                                     LiveAccountState.REVOKED, LiveAccountState.ERROR, LiveAccountState.KILLED},
+    LiveAccountState.LIVE_ENABLED: {LiveAccountState.SUSPENDED, LiveAccountState.REVOKED,
+                                   LiveAccountState.ERROR, LiveAccountState.KILLED},
+    LiveAccountState.SUSPENDED: {LiveAccountState.LIVE_CERTIFIED, LiveAccountState.REVOKED,
+                                LiveAccountState.ERROR, LiveAccountState.KILLED},
+    LiveAccountState.REVOKED: {LiveAccountState.READ_ONLY_CONNECTED},
+    LiveAccountState.ERROR: {LiveAccountState.READ_ONLY_CONNECTED, LiveAccountState.PREFLIGHT_READY,
+                             LiveAccountState.REVOKED, LiveAccountState.KILLED},
+    LiveAccountState.KILLED: {LiveAccountState.READ_ONLY_CONNECTED, LiveAccountState.PREFLIGHT_READY,
+                              LiveAccountState.REVOKED},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +53,7 @@ class LiveAccountConfig:
     exchange: str
     credential_ref: str
     execution_mode: ExecutionMode
+    lifecycle_state: str
     live_enabled: bool
     dry_run_enabled: bool
     confirmed_at: str | None
@@ -39,6 +76,13 @@ class LiveAccountConfig:
 
 
 class LiveAccountRepository:
+    @staticmethod
+    def transition_allowed(source: str, target: str) -> bool:
+        try:
+            return LiveAccountState(target) in ALLOWED_LIVE_ACCOUNT_TRANSITIONS[LiveAccountState(source)]
+        except (KeyError, ValueError):
+            return False
+
     def credentials_present(self, telegram_id: int, exchange: str) -> bool:
         with connect() as conn:
             row = conn.execute("""
@@ -55,9 +99,16 @@ class LiveAccountRepository:
                 INSERT INTO live_exchange_accounts(telegram_id,exchange,credential_ref,created_at,updated_at)
                 VALUES(?,?,?,?,?) ON CONFLICT(telegram_id,exchange) DO NOTHING
             """, (int(telegram_id), exchange, credential_ref, now, now))
+            conn.execute("""UPDATE live_exchange_accounts SET lifecycle_state='READ_ONLY_CONNECTED',updated_at=?
+                WHERE telegram_id=? AND exchange=? AND lifecycle_state='NOT_CONNECTED'
+                  AND EXISTS(SELECT 1 FROM user_exchange_credentials c
+                    WHERE c.telegram_id=? AND c.exchange=? AND c.status='connected')""",
+                (now, int(telegram_id), exchange, int(telegram_id), exchange))
             row = conn.execute("SELECT * FROM live_exchange_accounts WHERE telegram_id=? AND exchange=?",
                                (int(telegram_id), exchange)).fetchone()
-        return self._model(row)
+        model = self._model(row)
+        LiveRiskRepository().ensure_blocked(account_id=model.id, telegram_id=int(telegram_id))
+        return model
 
     def get(self, telegram_id: int, exchange: str) -> LiveAccountConfig | None:
         with connect() as conn:
@@ -112,8 +163,85 @@ class LiveAccountRepository:
         with connect() as conn:
             conn.execute("""
                 UPDATE live_exchange_accounts SET live_enabled=0,dry_run_enabled=0,execution_mode='DISABLED',
+                    lifecycle_state='KILLED',
                     kill_switch=1,confirmation_hash=NULL,confirmation_expires_at=NULL,updated_at=? WHERE id=?
             """, (now, account.id))
+        LiveAuditRepository().record(event_type="LIVE_DISABLED", outcome="COMPLETE",
+                                     telegram_id=telegram_id, account_id=account.id,
+                                     exchange=exchange, metadata={"new_entries_blocked": True,
+                                                                  "positions_auto_closed": False})
+        return self.get(telegram_id, exchange)  # type: ignore[return-value]
+
+    def suspend(self, telegram_id: int, exchange: str, *, reason_code: str) -> LiveAccountConfig:
+        account = self.ensure(telegram_id, exchange)
+        if not self.transition_allowed(account.lifecycle_state, LiveAccountState.SUSPENDED.value):
+            raise PermissionError("LIVE_ACCOUNT_TRANSITION_INVALID")
+        now = datetime.now(timezone.utc).isoformat()
+        with connect() as conn:
+            cur = conn.execute("""UPDATE live_exchange_accounts SET live_enabled=0,kill_switch=1,
+                execution_mode='DISABLED',lifecycle_state='SUSPENDED',updated_at=?
+                WHERE id=? AND telegram_id=? AND lifecycle_state=?""",
+                (now, account.id, telegram_id, account.lifecycle_state))
+        if cur.rowcount != 1:
+            raise PermissionError("LIVE_ACCOUNT_TRANSITION_CONFLICT")
+        LiveAuditRepository().record(event_type="LIVE_SUSPENDED", outcome="COMPLETE",
+                                     telegram_id=telegram_id, account_id=account.id,
+                                     exchange=exchange, metadata={"reason_code": reason_code})
+        return self.get(telegram_id, exchange)  # type: ignore[return-value]
+
+    def enable_live(self, telegram_id: int, exchange: str, confirmation: str) -> LiveAccountConfig:
+        """Explicit, transactional enablement; certification alone can never call this."""
+        account = self.ensure(telegram_id, exchange)
+        expected = f"ENABLE_LIVE_{account.id}"
+        if not hmac.compare_digest(confirmation.strip(), expected):
+            raise PermissionError("LIVE_ENABLE_CONFIRMATION_REQUIRED")
+        if exchange != "bingx":
+            raise PermissionError("LIVE_EXCHANGE_NOT_CERTIFIED")
+        blockers = LiveKillSwitchRepository().blockers(
+            exchange=exchange, telegram_id=telegram_id, account_id=account.id)
+        if blockers:
+            raise PermissionError(blockers[0].split(":", 1)[0])
+        if os.getenv("BINGX_PRODUCTION_ADAPTER_ALLOWED", "false").lower() not in {"1", "true", "yes", "on"}:
+            raise PermissionError("BINGX_PRODUCTION_ADAPTER_NOT_ALLOWED")
+        if os.getenv("ENVIRONMENT", "").lower() not in {"production", "render"}:
+            raise PermissionError("LIVE_DEPLOYMENT_ENVIRONMENT_INVALID")
+        risk = LiveRiskRepository().get(account.id)
+        if not risk or risk.get("status") != "ACTIVE":
+            raise PermissionError("LIVE_RISK_PROFILE_REQUIRED")
+        if not self.credentials_present(telegram_id, exchange) or not account.confirmed_at:
+            raise PermissionError("LIVE_CREDENTIALS_OR_CONFIRMATION_MISSING")
+        if account.lifecycle_state != LiveAccountState.LIVE_CERTIFIED.value:
+            raise PermissionError("LIVE_ACCOUNT_NOT_CERTIFIED")
+        with connect() as conn:
+            certification = conn.execute("""SELECT status,expires_at FROM bingx_certification_audits
+                WHERE account_id=? AND certification_type='VST_ECONOMIC'
+                ORDER BY started_at DESC LIMIT 1""", (account.id,)).fetchone()
+        certification = dict(certification) if certification else {}
+        expires_raw = certification.get("expires_at")
+        try:
+            expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+            expires = expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            expires = datetime.min.replace(tzinfo=timezone.utc)
+        if certification.get("status") != "VST_ECONOMIC_PASSED" or expires <= datetime.now(timezone.utc):
+            raise PermissionError("LIVE_CERTIFICATION_REQUIRED_OR_EXPIRED")
+        if account.sync_status != "SUCCESS" or account.account_mode not in {"HEDGE", "ONE_WAY"}:
+            raise PermissionError("LIVE_ACCOUNT_SYNC_REQUIRED")
+        if self.unresolved(telegram_id, exchange):
+            raise PermissionError("LIVE_RECONCILIATION_REQUIRED")
+        now = datetime.now(timezone.utc).isoformat()
+        with connect() as conn:
+            cur = conn.execute("""UPDATE live_exchange_accounts SET live_enabled=1,
+                dry_run_enabled=0,execution_mode='LIVE',lifecycle_state='LIVE_ENABLED',kill_switch=0,updated_at=?
+                WHERE id=? AND telegram_id=? AND live_enabled=0 AND confirmed_at IS NOT NULL
+                  AND lifecycle_state='LIVE_CERTIFIED'""",
+                (now, account.id, telegram_id))
+        if cur.rowcount != 1:
+            raise PermissionError("LIVE_ENABLE_STATE_CONFLICT")
+        LiveAuditRepository().record(event_type="LIVE_ENABLED", outcome="COMPLETE",
+                                     telegram_id=telegram_id, account_id=account.id,
+                                     exchange=exchange, metadata={"explicit_confirmation": True,
+                                                                  "risk_policy_version": risk.get("policy_version")})
         return self.get(telegram_id, exchange)  # type: ignore[return-value]
 
     @staticmethod
@@ -122,6 +250,7 @@ class LiveAccountRepository:
         return LiveAccountConfig(
             id=int(row["id"]), telegram_id=int(row["telegram_id"]), exchange=str(row["exchange"]),
             credential_ref=str(row["credential_ref"]), execution_mode=ExecutionMode(str(row["execution_mode"])),
+            lifecycle_state=str(row.get("lifecycle_state") or "NOT_CONNECTED"),
             live_enabled=bool(row["live_enabled"]), dry_run_enabled=bool(row["dry_run_enabled"]),
             confirmed_at=str(row["confirmed_at"]) if row["confirmed_at"] else None,
             kill_switch=bool(row["kill_switch"]),

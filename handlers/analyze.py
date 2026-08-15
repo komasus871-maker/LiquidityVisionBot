@@ -382,16 +382,19 @@ async def watchlist_view(message: Message):
         parsed_rows.append((row, snapshot))
     if rank_only:
         parsed_rows.sort(key=lambda item: (
-            float(item[1].get("quality") or 0) * .45
-            + float(item[1].get("readiness") or 0) * .35
+            float(item[1].get("quality") if item[1].get("quality") is not None else -1) * .45
+            + float(item[1].get("readiness") if item[1].get("readiness") is not None else -1) * .35
             + float(item[1].get("strategy_fit") or 0) * .20
         ), reverse=True)
     lines = [f"⭐ <b>{i18n.t('watchlist.title', language=language)}</b>",
              "Ranked by Quality, Entry Readiness and strategy fit." if rank_only else "Latest decision-time state.", ""]
     for index, (row, snapshot) in enumerate(parsed_rows, 1):
         status = snapshot.get("execution_status") or "INITIALIZING"
-        quality = float(snapshot.get("quality") or 0)
-        readiness = float(snapshot.get("readiness") or 0)
+        quality = snapshot.get("quality")
+        readiness = snapshot.get("readiness")
+        quality_text = "—" if quality is None else f"{float(quality):.0f}"
+        readiness_text = "—" if readiness is None else f"{float(readiness):.0f}"
+        quality_state = snapshot.get("quality_state") or ("LEGACY_SNAPSHOT" if snapshot else "NOT_EVALUATED")
         readiness_state = snapshot.get("readiness_state") or status
         strategy = str(snapshot.get("strategy") or "UNCLASSIFIED").replace("_", " ").title()
         regime = str(snapshot.get("regime") or "UNKNOWN").replace("_", " ").title()
@@ -400,7 +403,9 @@ async def watchlist_view(message: Message):
         symbol = i18n.market_token(row['symbol'], language=language)
         tf = i18n.market_token(row['timeframe'].upper(), language=language)
         lines.append(f"{index}. <b>{symbol}</b> · {tf}")
-        lines.append(f"   Quality {quality:.0f} · Readiness {readiness:.0f} ({readiness_state})")
+        lines.append(f"   Setup Quality {quality_text} ({quality_state}) · Readiness {readiness_text} ({readiness_state})")
+        if snapshot.get("data_confidence") is not None:
+            lines.append(f"   Data Confidence {float(snapshot['data_confidence']):.0f}")
         lines.append(f"   {strategy} · {regime}")
         lines.append(f"   {i18n.t('watchlist.checked', language=language, value=checked)}")
         if error:

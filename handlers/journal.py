@@ -332,7 +332,7 @@ async def trade_replay_handler(message: Message):
     intelligence = intelligence_layer.build_for_signal(signal)
     market_row = market_intelligence_repository.get_signal(signal_id, message.from_user.id)
     market_snapshot = (market_row or {}).get("full_snapshot") or {}
-    market_quality = market_snapshot.get("signal_quality_v3") or market_snapshot.get("signal_quality_v2") or {}
+    market_quality = market_snapshot.get("signal_quality_v4") or market_snapshot.get("signal_quality_v3") or market_snapshot.get("signal_quality_v2") or {}
     market_story = market_snapshot.get("market_story") or {}
     readiness = market_snapshot.get("entry_readiness") or {}
     fusion = market_snapshot.get("strategy_fusion_v2") or {}

@@ -4,13 +4,15 @@ from html import escape
 
 from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
 from services.capabilities import CapabilityService
 from services.edge_discovery import EdgeDiscoveryEngine
 from services.market_intelligence import concise_market_story
 from services.market_intelligence_repository import MarketIntelligenceRepository
 from services.research_engine import ResearchEngine
+from services.usage_policy import UsagePolicyService
+from services.user_analytics_export import UserAnalyticsExportService
 from utils.symbols import normalize_usdt_symbol
 
 
@@ -19,6 +21,7 @@ engine = ResearchEngine()
 edge_engine = EdgeDiscoveryEngine()
 capabilities = CapabilityService()
 market_repo = MarketIntelligenceRepository()
+usage = UsagePolicyService()
 
 
 async def _require_capability(message: Message, capability: str) -> bool:
@@ -76,6 +79,40 @@ async def research_dashboard(message: Message):
         "<code>/edge_discovery</code> · <code>/hypotheses</code> · <code>/forward_tests</code>",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("export_analytics"))
+async def export_analytics(message: Message):
+    if not await _require_capability(message, "EXPORT_RESEARCH_DATA"):
+        return
+    parts = (message.text or "").split()
+    format_name = parts[1].lower() if len(parts) > 1 else "json"
+    try:
+        days = int(parts[2]) if len(parts) > 2 else 90
+    except ValueError:
+        await message.answer("Usage: <code>/export_analytics [json|csv] [1-365 days]</code>",
+                             parse_mode="HTML")
+        return
+    if format_name not in {"json", "csv"}:
+        await message.answer("Usage: <code>/export_analytics [json|csv] [1-365 days]</code>",
+                             parse_mode="HTML")
+        return
+    allowance = usage.consume(message.from_user.id, "RESEARCH_EXPORT", "export_daily",
+                              metadata={"format": format_name, "days": max(1, min(days, 365))})
+    if not allowance["allowed"]:
+        await message.answer(
+            f"Daily export limit reached. Reset: <code>00:00 UTC</code> · "
+            f"remaining <b>{allowance['remaining']}</b>.", parse_mode="HTML")
+        return
+    try:
+        filename, payload = UserAnalyticsExportService().build(
+            message.from_user.id, format_name=format_name, days=days)
+    except ValueError as exc:
+        await message.answer(f"⚠️ <code>{escape(str(exc))}</code>. Use JSON or CSV.", parse_mode="HTML")
+        return
+    await message.answer_document(
+        BufferedInputFile(payload, filename=filename),
+        caption="Your user-scoped PAPER analytics export. It contains no exchange credentials or hidden AI reasoning.")
 
 
 @router.message(Command("strategy_lab", "strategy_compare"))
@@ -146,6 +183,7 @@ async def edge_report(message: Message):
 
 
 @router.message(Command("signal_rankings"))
+@router.message(Command("rankings"))
 async def signal_rankings(message: Message):
     if not await _require_capability(message, "ADVANCED_RANKING"):
         return
@@ -182,6 +220,7 @@ async def scalping_research(message: Message):
     if not await _require_capability(message, "SCALPING_RESEARCH"):
         return
     report = edge_engine.scalping_lab(message.from_user.id)
+    collection = report["collection"]
     lines = [
         f"<b>{escape(item['timeframe'])} {escape(item['strategy_family'])}</b> · "
         f"n={item['after_cost_metrics']['sample_size']} · after-cost E "
@@ -191,7 +230,9 @@ async def scalping_research(message: Message):
     await message.answer(
         "<b>Scalping Research (PAPER/SHADOW)</b>\n\n" +
         ("\n".join(lines) or "No resolved 1m/3m/5m samples yet.") +
-        f"\n\nAssumed round-trip cost: <b>{report['roundtrip_cost_pct']:.3f}%</b>. "
+        f"\n\nCollection: <code>{escape(collection['state'])}</code> · "
+        f"captured/resolved <b>{collection['captured']}/{collection['resolved']}</b>\n"
+        f"Assumed round-trip cost: <b>{report['roundtrip_cost_pct']:.3f}%</b>. "
         "Evidence requires sufficient samples and gross movement materially above modeled costs.",
         parse_mode="HTML",
     )
@@ -282,9 +323,12 @@ async def forward_tests(message: Message):
         f"· n={int((row['forward_metrics'] or {}).get('sample_size') or 0)}/{row['minimum_forward_samples']}"
         for row in rows[:10]
     ]
+    diagnostics = edge_engine.forward_diagnostics(message.from_user.id)
     await message.answer(
         "<b>Forward Validation</b>\n\n" + ("\n".join(lines) or "No frozen forward cohorts yet.") +
-        "\n\nOnly signals strictly after each frozen discovery cutoff are counted.", parse_mode="HTML")
+        f"\n\nPipeline: <code>{escape(diagnostics['state'])}</code> · eligible resolved "
+        f"<b>{diagnostics['eligible_resolved_samples']}</b> · frozen <b>{diagnostics['frozen_hypotheses']}</b>\n"
+        "Only signals strictly after each frozen discovery cutoff are counted.", parse_mode="HTML")
 
 
 @router.message(Command("rr_research"))
@@ -392,11 +436,12 @@ async def signal_quality(message: Message):
         await message.answer("No decision-time quality snapshot exists for that signal.")
         return
     quality = row["quality"]
-    families = sorted((quality.get("family_scores") or {}).items(), key=lambda item: -float(item[1]))
+    families = sorted(((name, score) for name, score in (quality.get("family_scores") or {}).items()
+                       if score is not None), key=lambda item: -float(item[1]))
     lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: {float(score):.1f}"
              for name, score in families[:8]]
     await message.answer(
-        f"<b>Signal Quality V3 · #{signal_id}</b>\n\n"
+        f"<b>Signal Quality V4 · #{signal_id}</b>\n\n"
         f"Overall / market: <b>{float(quality.get('overall_quality') or 0):.1f} / "
         f"{float(quality.get('market_quality') or 0):.1f}</b>\n"
         f"Evidence families / diversity: <b>{int(quality.get('evidence_family_count') or 0)} / "
@@ -463,7 +508,13 @@ async def orderbook(message: Message):
         return
     row = market_repo.latest_microstructure(symbol)
     if not row:
-        await message.answer("No bounded microstructure aggregate exists. Collection may be disabled.")
+        health = market_repo.data_health(symbol, message.from_user.id)
+        collector = health.get("collector") or {}
+        await message.answer(
+            f"No bounded microstructure aggregate exists for {escape(symbol)}.\n"
+            f"Collector: <code>{escape(str((health.get('global_source_health') or {}).get('collector') or 'NOT_STARTED'))}</code>"
+            f" · last error <code>{escape(str(collector.get('last_error_code') or 'none'))}</code>."
+        )
         return
     aggregate = row["aggregate"]
     walls = aggregate.get("walls") or []
@@ -477,7 +528,8 @@ async def orderbook(message: Message):
         f"Samples / interaction quality: <b>{int(aggregate.get('sample_count') or 0)} / "
         f"{float(aggregate.get('interaction_quality') or 0):.1f}</b>\n"
         f"Spread: <b>{float(aggregate.get('spread_pct') or 0):.4f}%</b>\n"
-        f"Inference: <code>{escape(str(aggregate.get('absorption_inference') or 'UNCONFIRMED'))}</code>\n\n"
+        f"Inference: <code>{escape(str(aggregate.get('absorption_inference') or 'UNCONFIRMED'))}</code>\n"
+        f"History: <code>{escape(str(market_repo.microstructure_history(symbol).get('status')))}</code>\n\n"
         f"{wall_lines}\n\nResting walls remain untrusted until price interaction confirms them.", parse_mode="HTML")
 
 
@@ -488,15 +540,20 @@ async def data_health(message: Message):
         await message.answer("Usage: <code>/data_health SYMBOL</code>\nExample: <code>/data_health BTCUSDT</code>", parse_mode="HTML")
         return
     report = market_repo.data_health(symbol, message.from_user.id)
-    fields = ("candles", "benchmark", "funding", "open_interest", "microstructure",
-              "liquidity_map", "ordered_path", "execution_costs")
-    lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: "
-             f"<code>{escape(str(report[name]))}</code>" for name in fields]
+    global_health = report.get("global_source_health") or {}
+    decision_health = report.get("decision_snapshot_availability") or {}
+    lines = ["<b>Global source health</b>"] + [
+        f"{escape(name.replace('_', ' ').title())}: <code>{escape(str(value))}</code>"
+        for name, value in global_health.items()
+    ] + ["", "<b>Decision snapshot availability</b>"] + [
+        f"{escape(name.replace('_', ' ').title())}: <code>{escape(str(value))}</code>"
+        for name, value in decision_health.items()
+    ]
     remediation = report.get("remediation") or {}
     hints = [f"• {escape(str(value))}" for value in remediation.values()
              if value and "Wait for" not in str(value)][:3]
     await message.answer(
-        f"<b>Decision Data Health · {escape(symbol)}</b>\n\n" + "\n".join(lines) +
+        f"<b>Data Health · {escape(symbol)}</b>\n\n" + "\n".join(lines) +
         ("\n\n<b>Remediation</b>\n" + "\n".join(hints) if hints else "") +
         "\n\nUnavailable inputs remain explicit and cannot be reconstructed with future data.",
         parse_mode="HTML")
@@ -522,6 +579,8 @@ async def _derivatives_context(message: Message, family: str) -> None:
         f"<b>{family.replace('_', ' ').title()} · {escape(symbol)}</b>\n\n"
         f"Status: <code>{status}</code>\nValue: <code>{escape(str(context.get(value_key)))}</code>\n"
         f"Reported: <code>{escape(str(context.get('reported_at') or 'unknown'))}</code>\n"
+        f"History: <code>{escape(str(context.get('history_status') or 'INSUFFICIENT_HISTORY'))}</code> "
+        f"({int(context.get('history_points') or 0)} points)\n"
         f"Source: <code>{escape(str(context.get('source') or 'BINGX_PUBLIC_FUTURES_MARKET'))}</code>\n\n"
         "Historical deltas and extremes remain unavailable until sufficient real snapshots accumulate.",
         parse_mode="HTML")

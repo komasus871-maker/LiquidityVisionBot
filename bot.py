@@ -46,6 +46,7 @@ from services.ai_operations import AIConfigurationValidator
 from services.ai_intelligence import AIObservationIntelligence
 from services.research_worker import ResearchWorker
 from services.microstructure_observer import MicrostructureObserver
+from services.live_reconciliation_worker import LiveReconciliationWorker
 from services.command_catalog import MAIN_MENU_COMMANDS
 from services.localization import LocalizationService, SUPPORTED_LANGUAGES
 from services.operational_retention import OperationalRetentionService
@@ -162,8 +163,10 @@ async def main() -> None:
     copy_execution = CopyExecutionWorker()
     ai_shadow = AIShadowWorker(interval_seconds=configured_ai_interval())
     research = ResearchWorker()
-    microstructure = MicrostructureObserver()
-    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research, microstructure]
+    microstructure = MicrostructureObserver(bot=bot)
+    live_reconciliation = LiveReconciliationWorker(bot=bot)
+    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research,
+               microstructure, live_reconciliation]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
@@ -172,6 +175,7 @@ async def main() -> None:
         asyncio.create_task(ai_shadow.run_forever(), name="ai-shadow"),
         asyncio.create_task(research.run_forever(), name="research-engine"),
         asyncio.create_task(microstructure.run_forever(), name="microstructure-observer"),
+        asyncio.create_task(live_reconciliation.run_forever(), name="live-reconciliation"),
     ]
 
     mode = deployment_mode()
@@ -191,6 +195,7 @@ async def main() -> None:
                 ai_result = await ai_shadow.check_once()
                 research_result = await research.check_once()
                 microstructure_result = await microstructure.check_once()
+                live_reconciliation_result = await live_reconciliation.check_once()
                 return {
                     "database_backend": database_backend(),
                     "persistent_database": persistent_database(),
@@ -201,6 +206,7 @@ async def main() -> None:
                     "ai_observation": ai_result,
                     "research_engine": research_result,
                     "microstructure_observer": microstructure_result,
+                    "live_reconciliation": live_reconciliation_result,
                 }
 
             webhook_server = WebhookServer(

@@ -760,6 +760,32 @@ class EdgeDiscoveryEngine:
             evaluated += int(cur.rowcount == 1)
         return evaluated
 
+    def forward_diagnostics(self, telegram_id: int | None = None) -> dict[str, Any]:
+        """Explain an empty forward screen without weakening any evidence gate."""
+        observations = self.observations(telegram_id)
+        hypotheses = self.hypotheses(telegram_id, limit=100)
+        minimum_discovery = max(3, int(os.getenv("EDGE_MIN_SAMPLES", "20")))
+        minimum_forward = max(5, int(os.getenv("EDGE_FORWARD_MIN_SAMPLES", "30")))
+        if not observations:
+            state = "NO_TRUSTWORTHY_RESOLVED_DECISION_SAMPLES"
+        elif not hypotheses and len(observations) < minimum_discovery * 2:
+            state = "DISCOVERY_CONTRAST_SAMPLE_GATE_NOT_MET"
+        elif not hypotheses:
+            state = "NO_ELIGIBLE_DISCOVERY_CONTRAST"
+        elif not any(int((row.get("forward_metrics") or {}).get("sample_size") or 0)
+                     for row in hypotheses):
+            state = "WAITING_FOR_POST_CUTOFF_SAMPLES"
+        else:
+            state = "FORWARD_EVALUATION_ACTIVE"
+        return {
+            "state": state, "eligible_resolved_samples": len(observations),
+            "frozen_hypotheses": len(hypotheses),
+            "minimum_discovery_samples_per_side": minimum_discovery,
+            "default_minimum_forward_samples": minimum_forward,
+            "immutable_cutoff_enforced": True, "future_samples_only": True,
+            "evidence_gates_lowered": False,
+        }
+
     @staticmethod
     def hypotheses(telegram_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
         del telegram_id  # Hypotheses are aggregate research artifacts and contain no user-private rows.
@@ -1007,10 +1033,28 @@ class EdgeDiscoveryEngine:
                             "gross_cost_multiple_required": material_multiple,
                             "movement_materially_exceeds_cost": material,
                             "evidence_state": evidence})
+        owner_clause = "" if telegram_id is None else "AND (r.owner_telegram_id IS NULL OR r.owner_telegram_id=0 OR r.owner_telegram_id=?)"
+        params = () if telegram_id is None else (telegram_id,)
+        with connect() as conn:
+            captured = [dict(row) for row in conn.execute(f"""SELECT r.timeframe,COUNT(*) AS captured,
+                SUM(CASE WHEN o.id IS NOT NULL THEN 1 ELSE 0 END) AS resolved
+                FROM research_signal_snapshots r
+                LEFT JOIN research_outcomes o ON o.snapshot_id=r.snapshot_id AND o.id=(
+                    SELECT MAX(o2.id) FROM research_outcomes o2 WHERE o2.snapshot_id=r.snapshot_id)
+                WHERE r.capture_quality='DECISION_TIME' AND r.timeframe IN ('1m','3m','5m')
+                {owner_clause} GROUP BY r.timeframe ORDER BY r.timeframe""", params).fetchall()]
+        captured_total = sum(int(row["captured"] or 0) for row in captured)
+        resolved_total = sum(int(row["resolved"] or 0) for row in captured)
+        collection_state = ("NO_ELIGIBLE_DECISION_TIME_SIGNALS" if not captured_total
+                            else "COLLECTING_FUTURE_OUTCOMES" if resolved_total < captured_total
+                            else "RESOLVED_SAMPLES_AVAILABLE")
         return {"candidates": reports, "roundtrip_cost_pct": cost_pct,
                 "minimum_notional": _number(os.getenv("PAPER_MIN_NOTIONAL_USDT",
                                                         os.getenv("PAPER_MIN_NOTIONAL", "5")), 5.0),
                 "precision_model": "EXCHANGE_RULES_REQUIRED_AT_EXECUTION",
+                "collection": {"state": collection_state, "captured": captured_total,
+                               "resolved": resolved_total, "by_timeframe": captured,
+                               "capture_path": "SIGNAL_RECORDER_TO_RESEARCH_WORKER"},
                 "mode": "PAPER_SHADOW_ONLY"}
 
     def portfolio_edge(self, telegram_id: int | None = None) -> dict[str, Any]:

@@ -7,8 +7,8 @@ from version import APP_VERSION, RELEASE_NAME
 
 
 def test_v98_release_metadata():
-    assert APP_VERSION == "10.2.0"
-    assert RELEASE_NAME == "Multilingual Autonomous Intelligence Platform"
+    assert APP_VERSION == "10.3.0"
+    assert RELEASE_NAME == "Operational Intelligence and Fail-Closed LIVE Foundation"
 
 
 def test_similarity_details_explain_groups_and_features():

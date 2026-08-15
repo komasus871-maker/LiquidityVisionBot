@@ -1,3 +1,15 @@
+## v10.3.0 — Operational Intelligence and Fail-Closed LIVE Foundation
+
+- Fixed the production collector's empty-universe no-op with a bounded `MICROSTRUCTURE_SYMBOLS` seed and durable worker telemetry; depth, funding and open interest now fail and persist independently.
+- Added bounded derivative and microstructure histories, source health, accurate global-source versus decision-snapshot semantics, retention and freshness diagnostics.
+- Added Signal Quality V4 coverage-normalized independent evidence families, true missing-value semantics, Entry Readiness V3, Scanner Priority V3, Signal Ranking V5 and honest Strategy Fusion ties/overlap diagnostics.
+- Added Help V3 categories/search/classification, an exact 15-command user menu, five-language menu/help coverage, RTL-safe command tokens and public-command discoverability invariants.
+- Split AI failures/abstentions by current versus historical provider identity and preserved deterministic bounded context reuse without provider calls.
+- Added a per-user, disabled-by-default LIVE lifecycle with versioned Fernet keyrings, audited credential access/rotation/revocation, deterministic complete risk profiles, hard global ceilings, immutable order intents, idempotent recovery, partial-fill and position ledgers, periodic exchange-truth reconciliation, critical safety delivery and global/exchange/user/connection kill switches.
+- Added entitled, daily-limited user-scoped JSON/CSV aggregate PAPER analytics export; credentials, provider secrets and hidden AI reasoning are excluded.
+- Added scalping collection and forward-validation empty-state diagnostics plus Strategy Lab overlap disclosure without lowering evidence gates or changing production policy.
+- LIVE, authenticated production trading and paid AI remain disabled; no economic authority is granted by Premium, AI, research, connection or certification.
+
 ## v10.2.0 — Multilingual Autonomous Intelligence Platform
 
 - Replaced scattered admin-ID parsing with a fail-closed role service, fixed owner `7975010097`, role-scoped environment IDs, and database-backed authorization/action audits; the owner receives no automatic paid plan.

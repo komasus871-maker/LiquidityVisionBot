@@ -561,6 +561,7 @@ class ResearchEngine:
                      OR r.owner_telegram_id=?) ORDER BY d.id""",
                 (telegram_id, telegram_id)).fetchall()]
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        actions_by_strategy: dict[str, dict[int, str]] = defaultdict(dict)
         for row in rows:
             outcome = _loads(row.get("outcome_json"), {})
             pure = outcome.get("pure_market") if isinstance(outcome.get("pure_market"), dict) else None
@@ -571,6 +572,7 @@ class ResearchEngine:
             outcome = {**outcome, "signal_r": signal_r}
             row["outcome"] = outcome
             grouped[row["strategy_key"]].append(row)
+            actions_by_strategy[row["strategy_key"]][int(row["signal_id"])] = str(row["action"])
         result = []
         for strategy, items in sorted(grouped.items()):
             accepted = [row for row in items if row["action"] == "ACCEPT"]
@@ -582,7 +584,23 @@ class ResearchEngine:
                            "expectancy_r": sum(rs) / len(rs) if rs else None,
                            "missed_wins": missed_wins,
                            "status": "SUFFICIENT" if len(accepted) >= minimum else "INSUFFICIENT_SAMPLES"})
+        overlap = []
+        names = sorted(actions_by_strategy)
+        for index, left in enumerate(names):
+            for right in names[index + 1:]:
+                shared = sorted(set(actions_by_strategy[left]) & set(actions_by_strategy[right]))
+                identical = sum(actions_by_strategy[left][signal_id] == actions_by_strategy[right][signal_id]
+                                for signal_id in shared)
+                overlap.append({
+                    "left": left, "right": right, "shared_samples": len(shared),
+                    "identical_actions": identical,
+                    "identical_action_rate": identical / len(shared) if shared else None,
+                    "state": "IDENTICAL_ON_AVAILABLE_COHORT" if shared and identical == len(shared)
+                    else "PARTIAL_OVERLAP" if shared else "NO_SHARED_COHORT",
+                })
         return {"strategies": result, "minimum_samples": minimum,
+                "overlap_audit": overlap,
+                "liquidity_smc_semantics": "PRODUCTION_ELIGIBILITY_BASELINE",
                 "execution_authority": False, "comparison_basis": "IDENTICAL_SIGNAL_SNAPSHOTS"}
 
     def edge_report(self, telegram_id: int | None = None) -> dict[str, Any]:
@@ -599,7 +617,8 @@ class ResearchEngine:
         safe_limit = max(1, min(int(limit), 50))
         rows = []
         with connect() as conn:
-            for rank_version in ("signal-ranking-v4", "signal-ranking-v3", "research-rank-v2", RANK_VERSION):
+            for rank_version in ("signal-ranking-v5", "signal-ranking-v4", "signal-ranking-v3",
+                                 "research-rank-v2", RANK_VERSION):
                 rows = conn.execute("""SELECT k.*,r.symbol,r.timeframe,r.side,r.primary_regime
                     FROM research_signal_rankings k JOIN research_signal_snapshots r ON r.snapshot_id=k.snapshot_id
                     WHERE k.rank_version=? AND r.capture_quality='DECISION_TIME'
@@ -617,9 +636,11 @@ class ResearchEngine:
         return result
 
     def scalping_report(self, telegram_id: int | None = None) -> dict[str, Any]:
-        rows = [row for row in self._rows(telegram_id) if row.get("capture_quality") == "DECISION_TIME"
-                and row["timeframe"] in {"1m", "3m", "5m"}
-                and row.get("outcome") and row["outcome"].get("signal_r") is not None
+        all_rows = self._rows(telegram_id)
+        eligible = [row for row in all_rows if row.get("capture_quality") == "DECISION_TIME"
+                    and row["timeframe"] in {"1m", "3m", "5m"}]
+        rows = [row for row in eligible
+                if row.get("outcome") and row["outcome"].get("signal_r") is not None
                 and not row["outcome"].get("manual_intervention")]
         fee = max(0.0, _number(os.getenv("SCALPING_TAKER_FEE_PCT", "0.05")))
         spread = max(0.0, _number(os.getenv("SCALPING_SPREAD_PCT", "0.02")))
@@ -640,8 +661,22 @@ class ResearchEngine:
                         "positive_after_cost": bool(values and len(values) >= minimum and sum(values) / len(values) > 0),
                         "status": "SUFFICIENT" if len(values) >= minimum else "INSUFFICIENT_SAMPLES"}
                   for key, values in sorted(groups.items())}
+        captured_by_timeframe = {timeframe: sum(row["timeframe"] == timeframe for row in eligible)
+                                 for timeframe in ("1m", "3m", "5m")}
+        unresolved = len(eligible) - len(rows)
+        if not eligible:
+            collection_state = "NO_ELIGIBLE_DECISION_TIME_SIGNALS"
+        elif unresolved:
+            collection_state = "COLLECTING_FUTURE_OUTCOMES"
+        else:
+            collection_state = "RESOLVED_SAMPLES_AVAILABLE"
         return {"timeframes": result, "roundtrip_cost_pct": roundtrip_cost_pct,
                 "minimum_required_movement_pct": roundtrip_cost_pct,
                 "assumptions": {"taker_fee_each_side_pct": fee, "spread_pct": spread,
                                 "slippage_each_side_pct": slippage, "latency_penalty_pct": latency},
-                "minimum_samples": minimum, "mode": "PAPER_SHADOW_ONLY"}
+                "minimum_samples": minimum, "mode": "PAPER_SHADOW_ONLY",
+                "collection": {"state": collection_state,
+                               "decision_time_samples": len(eligible),
+                               "resolved_samples": len(rows), "unresolved_samples": unresolved,
+                               "captured_by_timeframe": captured_by_timeframe,
+                               "capture_path": "SIGNAL_RECORDER_TO_RESEARCH_WORKER"}}

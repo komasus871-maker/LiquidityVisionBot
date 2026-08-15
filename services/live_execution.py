@@ -16,6 +16,8 @@ from services.exchanges.base import (
 from services.exchanges.models import (
     ExchangeCapability, ExchangeFill, ExchangeOrder, ExchangeOrderRequest, SymbolRules,
 )
+from services.live_safety import (LiveAuditRepository, LiveKillSwitchRepository,
+                                  LiveRiskRepository, intent_checksum)
 
 
 class LiveExecutionState(StrEnum):
@@ -69,6 +71,7 @@ def request_checksum(request: ExchangeOrderRequest) -> str:
         "side": request.side.upper(), "order_type": request.order_type.upper(),
         "quantity": str(request.quantity), "price": str(request.price) if request.price is not None else None,
         "leverage": request.leverage, "margin_mode": request.margin_mode,
+        "position_side": request.position_side,
         "reduce_only": request.reduce_only, "stop_loss": str(request.stop_loss) if request.stop_loss else None,
         "take_profit": str(request.take_profit) if request.take_profit else None,
     }
@@ -110,18 +113,58 @@ class SubmissionResult:
 
 class LiveExecutionRepository:
     def create(self, *, execution_key: str, plan_id: str | None, telegram_id: int, account_id: int,
-               exchange: str, mode: ExecutionMode, request: ExchangeOrderRequest) -> dict:
+               exchange: str, mode: ExecutionMode, request: ExchangeOrderRequest,
+               readiness_passed: bool = False,
+               authority_source: str = "DETERMINISTIC_APPROVED_PLAN",
+               signal_id: int | None = None, strategy: str | None = None,
+               modeled_cost: dict | None = None, risk_policy_version: str | None = None,
+               guardrail_results: dict | None = None) -> dict:
         now = datetime.now(timezone.utc).isoformat()
+        intent = {
+            "execution_key": execution_key, "telegram_id": telegram_id,
+            "account_id": account_id, "exchange": exchange, "plan_id": plan_id,
+            "signal_id": signal_id, "strategy": strategy,
+            "symbol": request.symbol, "direction": request.side,
+            "requested_quantity": str(request.quantity), "calculated_quantity": str(request.quantity),
+            "reference_price": str(request.price) if request.price is not None else None,
+            "position_side": request.position_side, "margin_mode": request.margin_mode,
+            "leverage": request.leverage,
+            "client_order_id": request.client_order_id, "authority_source": authority_source,
+            "modeled_cost": modeled_cost or {}, "risk_policy_version": risk_policy_version,
+            "guardrails": {"readiness_passed": bool(readiness_passed), "mode": mode.value,
+                           "reduce_only": request.reduce_only, **(guardrail_results or {})},
+        }
+        checksum = intent_checksum(intent)
+        intent_key = f"intent-{hashlib.sha256(execution_key.encode()).hexdigest()[:32]}"
         with connect() as conn:
+            conn.execute("""INSERT INTO live_order_intents(intent_key,execution_key,telegram_id,
+                account_id,exchange,signal_id,plan_id,strategy,symbol,direction,requested_quantity,
+                calculated_quantity,reference_price,modeled_cost_json,risk_policy_version,
+                position_side,margin_mode,leverage,guardrail_results_json,client_order_id,
+                authority_source,intent_checksum,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_key) DO NOTHING""", (
+                intent_key, execution_key, telegram_id, account_id, exchange, signal_id, plan_id, strategy,
+                request.symbol, request.side, str(request.quantity), str(request.quantity),
+                str(request.price) if request.price is not None else None,
+                json.dumps(modeled_cost or {}, sort_keys=True), risk_policy_version,
+                request.position_side, request.margin_mode, request.leverage,
+                json.dumps(intent["guardrails"], sort_keys=True), request.client_order_id,
+                authority_source, checksum, now))
+            stored_intent = conn.execute(
+                "SELECT intent_checksum FROM live_order_intents WHERE execution_key=?", (execution_key,)).fetchone()
+            if not stored_intent or stored_intent["intent_checksum"] != checksum:
+                raise PermissionError("LIVE_INTENT_IDEMPOTENCY_CONFLICT")
             conn.execute("""
                 INSERT INTO live_executions(
                     execution_key,plan_id,telegram_id,account_id,exchange,mode,client_order_id,
-                    symbol,side,order_type,quantity,price,reduce_only,state,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_key) DO NOTHING
+                    symbol,side,order_type,quantity,price,reduce_only,state,created_at,updated_at,
+                    position_side,margin_mode,leverage
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_key) DO NOTHING
             """, (execution_key, plan_id, telegram_id, account_id, exchange, mode.value,
                   request.client_order_id, request.symbol, request.side, request.order_type,
                   float(request.quantity), float(request.price) if request.price is not None else None,
-                  int(request.reduce_only), LiveExecutionState.CREATED.value, now, now))
+                  int(request.reduce_only), LiveExecutionState.CREATED.value, now, now,
+                  request.position_side, request.margin_mode, request.leverage))
             row = conn.execute("SELECT * FROM live_executions WHERE execution_key=?", (execution_key,)).fetchone()
         return dict(row)
 
@@ -194,6 +237,45 @@ class LiveExecutionRepository:
                        if qty else Decimal("0"))
             conn.execute("UPDATE live_executions SET executed_quantity=?,average_fill_price=?,commission=?,updated_at=? WHERE id=?",
                          (float(qty), float(average) if qty else None, float(commission), now, execution["id"]))
+            position_side = str(execution.get("position_side") or "").upper()
+            if position_side not in {"LONG", "SHORT"}:
+                order_side = str(execution.get("side") or "").upper()
+                if bool(execution.get("reduce_only")):
+                    position_side = "LONG" if order_side == "SELL" else "SHORT"
+                else:
+                    position_side = "LONG" if order_side == "BUY" else "SHORT"
+            ledger_rows = conn.execute("""SELECT side,position_side,reduce_only,executed_quantity
+                FROM live_executions WHERE account_id=? AND symbol=? AND executed_quantity>0
+                  AND state NOT IN ('REJECTED','FAILED')""",
+                (execution["account_id"], execution["symbol"])).fetchall()
+            ledger_quantity = Decimal("0")
+            for item in ledger_rows:
+                item_side = str(item["position_side"] or "").upper()
+                if item_side not in {"LONG", "SHORT"}:
+                    raw_side = str(item["side"] or "").upper()
+                    item_side = (("LONG" if raw_side == "SELL" else "SHORT")
+                                 if bool(item["reduce_only"])
+                                 else ("LONG" if raw_side == "BUY" else "SHORT"))
+                if item_side == position_side:
+                    delta = Decimal(str(item["executed_quantity"] or 0))
+                    ledger_quantity += -delta if bool(item["reduce_only"]) else delta
+            ledger_quantity = max(Decimal("0"), ledger_quantity)
+            conn.execute("""INSERT INTO live_positions(account_id,telegram_id,exchange,symbol,
+                position_side,quantity,status,source,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(account_id,symbol,position_side) DO UPDATE SET
+                quantity=excluded.quantity,status=excluded.status,source=excluded.source,
+                version=live_positions.version+1,updated_at=excluded.updated_at""", (
+                execution["account_id"], execution["telegram_id"], execution["exchange"],
+                execution["symbol"], position_side, float(ledger_quantity),
+                "OPEN" if ledger_quantity > 0 else "CLOSED", "EXECUTION_LEDGER", now, now))
+        if fills:
+            LiveAuditRepository().record(
+                event_type="FILL_INGESTED", outcome="COMPLETE",
+                telegram_id=int(execution["telegram_id"]), account_id=int(execution["account_id"]),
+                exchange=str(execution["exchange"]), metadata={"execution_id": execution["id"],
+                "fill_count": len(fills), "aggregate_quantity": str(qty),
+                "average_fill_price": str(average), "commission": str(commission)})
         return qty, average, commission
 
 
@@ -221,16 +303,30 @@ class LiveExecutionCoordinator:
         position = matches[0]
         quantity = safe_close_quantity(requested=request.quantity, open_quantity=position.quantity,
                                        side=request.side, position_side=position.side)
-        return replace(request, quantity=quantity, reduce_only=True)
+        return replace(request, quantity=quantity, reduce_only=True, position_side=position.side)
 
     async def submit(self, *, execution_key: str, plan_id: str | None, telegram_id: int,
                      account_id: int, exchange: str, mode: ExecutionMode,
-                     request: ExchangeOrderRequest, readiness_passed: bool = False) -> SubmissionResult:
+                     request: ExchangeOrderRequest, readiness_passed: bool = False,
+                     signal_id: int | None = None, strategy: str | None = None,
+                     timeframe: str | None = None, modeled_slippage_bps: Decimal | None = None,
+                     daily_realized_loss: Decimal | None = None,
+                      daily_total_loss: Decimal | None = None,
+                      seconds_since_last_entry: int | None = None,
+                      authority_source: str = "DETERMINISTIC_APPROVED_PLAN") -> SubmissionResult:
+        risk_evaluated = False
         if mode is ExecutionMode.LIVE and not readiness_passed:
             raise PermissionError("LIVE_READINESS_REQUIRED")
         if mode is ExecutionMode.LIVE and exchange.lower() == "bingx":
             environment = str(getattr(self.adapter, "environment", ""))
             if environment == "prod-live":
+                if authority_source != "DETERMINISTIC_APPROVED_PLAN":
+                    raise PermissionError("BINGX_LIVE_AUTHORITY_SOURCE_INVALID")
+                if not strategy:
+                    raise PermissionError("BINGX_APPROVED_PLAN_STRATEGY_REQUIRED")
+                self._require_approved_execution_plan(
+                    plan_id=plan_id, telegram_id=telegram_id, signal_id=signal_id,
+                    account_id=account_id, request=request, timeframe=timeframe)
                 limits = self._require_durable_bingx_live_gate(account_id)
                 if request.leverage > int(limits["max_leverage"]):
                     raise PermissionError("BINGX_MAX_LEVERAGE_EXCEEDED")
@@ -242,13 +338,32 @@ class LiveExecutionCoordinator:
                         raise PermissionError("BINGX_MAX_ORDER_NOTIONAL_EXCEEDED")
                     positions = await self.adapter.positions()
                     exposure = Decimal("0")
+                    symbol_exposure = Decimal("0")
+                    canonical = lambda value: "".join(char for char in value.upper() if char.isalnum())
                     for position in positions:
                         if position.quantity > 0 and position.mark_price <= 0:
                             raise PermissionError("BINGX_POSITION_MARK_PRICE_UNRESOLVED")
                         exposure += position.quantity * position.mark_price
+                        if canonical(position.symbol) == canonical(request.symbol):
+                            symbol_exposure += position.quantity * position.mark_price
                     if exposure + order_notional > Decimal(str(limits["max_account_exposure"])):
                         raise PermissionError("BINGX_MAX_ACCOUNT_EXPOSURE_EXCEEDED")
+                    risk = LiveRiskRepository().get(account_id)
+                    risk_failures = LiveRiskRepository().evaluate(
+                        profile=risk or {}, request=request,
+                        current_positions=sum(position.quantity > 0 for position in positions),
+                        current_portfolio_exposure=exposure,
+                        current_symbol_exposure=symbol_exposure,
+                        modeled_slippage_bps=modeled_slippage_bps, timeframe=timeframe,
+                        strategy=strategy, daily_realized_loss=daily_realized_loss,
+                        daily_total_loss=daily_total_loss,
+                        seconds_since_last_entry=seconds_since_last_entry)
+                    if risk_failures:
+                        raise PermissionError(risk_failures[0])
+                    risk_evaluated = True
             elif environment == "prod-vst":
+                if authority_source != "VST_CERTIFICATION":
+                    raise PermissionError("BINGX_VST_AUTHORITY_SOURCE_INVALID")
                 if os.getenv("BINGX_VST_CERTIFICATION_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
                     raise PermissionError("BINGX_VST_EXECUTION_DISABLED")
             else:
@@ -262,7 +377,22 @@ class LiveExecutionCoordinator:
                 request = await self.safe_close_request(request)
         execution = self.repository.create(execution_key=execution_key, plan_id=plan_id,
                                            telegram_id=telegram_id, account_id=account_id,
-                                           exchange=exchange, mode=mode, request=request)
+                                           exchange=exchange, mode=mode, request=request,
+                                           readiness_passed=readiness_passed, signal_id=signal_id,
+                                           strategy=strategy,
+                                            modeled_cost={"slippage_bps": str(modeled_slippage_bps)
+                                                          if modeled_slippage_bps is not None else None},
+                                           risk_policy_version=(LiveRiskRepository().get(account_id) or {}).get(
+                                               "policy_version"),
+                                            guardrail_results={"risk_passed": risk_evaluated,
+                                                               "risk_evaluated": risk_evaluated,
+                                                               "timeframe": timeframe},
+                                            authority_source=authority_source)
+        LiveAuditRepository().record(
+            event_type="ORDER_INTENT", outcome="PERSISTED", telegram_id=telegram_id,
+            account_id=account_id, exchange=exchange,
+            metadata={"execution_id": execution["id"], "execution_key": execution_key,
+                      "client_order_id": request.client_order_id, "mode": mode.value})
         state = LiveExecutionState(execution["state"])
         if mode in {ExecutionMode.DISABLED, ExecutionMode.PAPER, ExecutionMode.SHADOW}:
             return SubmissionResult(execution["id"], state, request.client_order_id)
@@ -293,6 +423,11 @@ class LiveExecutionCoordinator:
                                     request.client_order_id, current.get("exchange_order_id"))
         execution = self.repository.get(execution["id"])
         attempt = self.repository.begin_attempt(execution, request_checksum(request))
+        LiveAuditRepository().record(
+            event_type="EXCHANGE_SUBMISSION", outcome="ATTEMPTED", telegram_id=telegram_id,
+            account_id=account_id, exchange=exchange,
+            metadata={"execution_id": execution["id"], "attempt": attempt,
+                      "client_order_id": request.client_order_id})
         try:
             order = await self.adapter.place_order(request)
         except ExchangeTimeoutError as exc:
@@ -311,8 +446,47 @@ class LiveExecutionCoordinator:
         self.repository.finish_attempt(execution["id"], attempt, status="ACKNOWLEDGED", order=order)
         self.repository.transition(execution["id"], LiveExecutionState.SUBMITTING,
                                    LiveExecutionState.ACKNOWLEDGED, exchange_order_id=order.order_id)
+        LiveAuditRepository().record(
+            event_type="EXCHANGE_ACKNOWLEDGMENT", outcome="ACKNOWLEDGED", telegram_id=telegram_id,
+            account_id=account_id, exchange=exchange,
+            metadata={"execution_id": execution["id"], "attempt": attempt,
+                      "client_order_id": request.client_order_id, "exchange_order_id": order.order_id})
         return SubmissionResult(execution["id"], LiveExecutionState.ACKNOWLEDGED,
                                 request.client_order_id, order.order_id)
+
+    @staticmethod
+    def _require_approved_execution_plan(*, plan_id: str | None, telegram_id: int,
+                                         signal_id: int | None, account_id: int,
+                                         request: ExchangeOrderRequest,
+                                         timeframe: str | None) -> None:
+        if not plan_id or signal_id is None or not timeframe:
+            raise PermissionError("BINGX_APPROVED_PLAN_REQUIRED")
+        with connect() as conn:
+            row = conn.execute("""SELECT status,exchange_account_id,plan_json
+                FROM copy_execution_journal WHERE plan_id=? AND telegram_id=? AND signal_id=?
+                ORDER BY id DESC LIMIT 1""", (plan_id, telegram_id, signal_id)).fetchone()
+        if not row or row["status"] != "EXECUTING" or int(row["exchange_account_id"] or 0) != int(account_id):
+            raise PermissionError("BINGX_APPROVED_PLAN_NOT_CLAIMED")
+        try:
+            payload = json.loads(row["plan_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise PermissionError("BINGX_APPROVED_PLAN_INVALID") from None
+        canonical = lambda value: "".join(char for char in str(value).upper() if char.isalnum())
+        quantity = payload.get("quantity")
+        planned_price = payload.get("entry_price")
+        identity_valid = (
+            payload.get("status") == "APPROVED"
+            and canonical(payload.get("symbol")) == canonical(request.symbol)
+            and str(payload.get("side") or "").upper() == request.side.upper()
+            and str(payload.get("timeframe") or "").lower() == timeframe.lower()
+            and quantity is not None
+            and abs(Decimal(str(quantity)) - request.quantity) <= Decimal("0.000000000001")
+            and planned_price is not None and request.price is not None
+            and abs(Decimal(str(planned_price)) - request.price) <= Decimal("0.00000001")
+            and int(payload.get("leverage") or 1) == int(request.leverage)
+        )
+        if not identity_valid:
+            raise PermissionError("BINGX_APPROVED_PLAN_INTENT_MISMATCH")
 
     @staticmethod
     def _require_durable_bingx_live_gate(account_id: int) -> dict:
@@ -333,8 +507,20 @@ class LiveExecutionCoordinator:
                 SELECT COUNT(*) AS n FROM live_executions
                 WHERE account_id=? AND state IN ('UNKNOWN','RECOVERY_REQUIRED')
             """, (account_id,)).fetchone()
+            credentials = conn.execute("""SELECT 1 FROM user_exchange_credentials
+                WHERE telegram_id=? AND exchange='bingx' AND status='connected'""",
+                (account["telegram_id"],)).fetchone() if account else None
         if not account or not bool(account["live_enabled"]) or not account["confirmed_at"] or bool(account["kill_switch"]):
             raise PermissionError("BINGX_ACCOUNT_LIVE_GATE_FAILED")
+        if not credentials:
+            raise PermissionError("BINGX_CREDENTIALS_REVOKED_OR_MISSING")
+        kill_blockers = LiveKillSwitchRepository().blockers(
+            exchange="bingx", telegram_id=int(account["telegram_id"]), account_id=account_id)
+        if kill_blockers:
+            raise PermissionError(kill_blockers[0].split(":", 1)[0])
+        risk = LiveRiskRepository().get(account_id)
+        if not risk or risk.get("status") != "ACTIVE":
+            raise PermissionError("BINGX_LIVE_RISK_PROFILE_REQUIRED")
         if not account["max_order_notional"] or not account["max_account_exposure"] or not account["max_leverage"]:
             raise PermissionError("BINGX_ACCOUNT_LIMITS_MISSING")
         if int(unresolved["n"] or 0):

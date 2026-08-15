@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("market", "Compact market overview"), ("news", "Market news feed"),
         ("fear", "Fear and Greed context"),
         ("market_story", "Decision-time market narrative", "/market_story 434"),
-        ("signal_quality", "Signal Quality V3", "/signal_quality 434"),
+        ("signal_quality", "Signal Quality V4", "/signal_quality 434"),
         ("liquidity_map", "Unresolved and consumed liquidity", "/liquidity_map BTCUSDT"),
         ("orderbook", "Bounded order-book intelligence", "/orderbook BTCUSDT"),
         ("funding", "Public funding snapshot", "/funding BTCUSDT"),
@@ -61,7 +62,7 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("fills", "PAPER fills"), ("panic", "Fail-closed copy stop"),
     ),
     "intelligence": _entries(
-        ("signal_rankings", "Signal Ranking V4"), ("contradictions", "Supports and conflicts", "/contradictions 434"),
+        ("signal_rankings", "Signal Ranking V5"), ("contradictions", "Supports and conflicts", "/contradictions 434"),
         ("regimes", "Regime diagnostics"), ("ai_status", "AI advisory status"),
         ("ai_decision", "AI decision for a signal", "/ai_decision 434"),
         ("ai_explain", "Alias for AI decision", "/ai_explain 434"),
@@ -87,6 +88,8 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("quality_report", "Quality cohorts and missed winners"),
         ("quality_cohorts", "Exception cohorts for calibration and opportunity cost"),
         ("strategy_distribution", "Observed strategy-family assignment distribution"),
+        ("export_analytics", "Export your own aggregate PAPER analytics as JSON or CSV",
+         "/export_analytics json 90"),
     ),
     "system": _entries(
         ("system_health", "System Health V3"),
@@ -104,6 +107,66 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("exchange_symbol", "Instrument rules"), ("exchange_account", "Account state"),
         ("exchange_safety", "Exchange safety state"), ("exchange_preflight", "Readiness preflight"),
         ("start", "Onboarding and primary menu"), ("help", "Canonical command navigation"),
+        ("commands", "Search the public command catalog", "/commands orderbook"),
+    ),
+    "scanner": _entries(
+        ("scanner", "Priority Score V3 ranking and transparent filters", "/scanner breakout"),
+        ("signal_rankings", "Signal Ranking V5 research view"),
+        ("rankings", "Compact alias for signal rankings"),
+    ),
+    "watchlist": _entries(
+        ("watchlist", "View, rank, or edit your smart watchlist", "/watchlist add BTC SOL"),
+    ),
+    "alerts": _entries(
+        ("alerts", "Configure notification categories", "/alerts quality on"),
+    ),
+    "premium": _entries(
+        ("premium", "Plan overview"), ("plans", "Free, Pro, and Elite comparison"),
+        ("my_plan", "Effective plan, source, and limits"),
+        ("usage", "Daily plan limits and remaining usage"),
+        ("capabilities", "Effective entitlement capabilities"),
+    ),
+    "settings": _entries(
+        ("settings", "Personal output preferences", "/settings mode detailed"),
+        ("language", "Persist English, Russian, Ukrainian, Hebrew, or Arabic", "/language he"),
+        ("profile", "User profile and active plan"),
+    ),
+    "ai": _entries(
+        ("ai_status", "AI advisory mode and provider identity"),
+        ("ai_decision", "AI observation for a signal", "/ai_decision 434"),
+        ("ai_explain", "Alias for AI decision", "/ai_explain 434"),
+        ("ai_metrics", "Current-identity AI metrics"),
+        ("ai_compare", "Deterministic/AI comparison"),
+        ("ai_quality", "AI quality diagnostics"),
+        ("ai_dashboard", "AI cost and reuse dashboard"),
+        ("ai_history", "Recent AI observations"),
+        ("ai_abstentions", "Current or historical abstentions", "/ai_abstentions current"),
+        ("ai_failures", "Current or historical failures", "/ai_failures history"),
+        ("ai_regimes", "AI outcomes by regime"), ("ai_similarity", "Similarity diagnostics"),
+        ("ai_learning", "Bounded learning summary"), ("ai_statistics", "AI statistical report"),
+        ("ai_counterfactual", "AI counterfactual report"),
+        ("ai_provider_health", "Provider health"), ("ai_cost", "Provider cost report"),
+        ("ai_research_compare", "Advisory red-team comparison"),
+    ),
+    "live": _entries(
+        ("live_status", "Per-user LIVE state and connection health", "/live_status bingx"),
+        ("live_account", "Detailed LIVE account state", "/live_account bingx"),
+        ("live_sync", "Read-only account synchronization", "/live_sync bingx BTCUSDT"),
+        ("live_readiness", "Fail-closed readiness reasons", "/live_readiness bingx"),
+        ("live_certify", "Structural certification without production orders", "/live_certify bingx"),
+        ("live_dry_run", "Validate adapter paths without economic orders", "/live_dry_run bingx on"),
+        ("live_confirm", "Record a private two-step consent token", "/live_confirm bingx"),
+        ("live_enable", "Explicit enablement after every gate passes", "/live_enable bingx"),
+        ("live_disable", "Immediately block new LIVE entries", "/live_disable bingx"),
+        ("live_risk", "View or replace the complete deterministic risk policy",
+         "/live_risk bingx set max_positions=2 max_order=50 max_portfolio=200 max_symbol=100 max_realized_loss=20 max_total_loss=30 max_slippage_bps=20 cooldown=60 leverage=2 symbols=BTCUSDT blocked_symbols= timeframes=5m,15m strategies=SMC directions=BUY,SELL"),
+        ("live_reconciliation", "Exchange-vs-local mismatch check", "/live_reconciliation bingx"),
+        ("recovery", "Unresolved LIVE execution states", "/recovery bingx"),
+        ("demo_order", "Explicit BingX demo-account order", "/demo_order bingx BTCUSDT BUY MARKET 0.001 60000 3"),
+        ("demo_cancel", "Cancel a demo-account order", "/demo_cancel bingx BTCUSDT ORDER_ID"),
+        ("demo_status", "Inspect a demo-account order", "/demo_status bingx BTCUSDT ORDER_ID"),
+        ("demo_kill", "Disable demo execution for this runtime"),
+        ("demo_resume", "Release the runtime demo switch"),
     ),
 }
 
@@ -111,9 +174,7 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
 OPERATOR_COMMANDS = frozenset({
     "admin_status", "migration_status", "workers", "grant_plan", "revoke_plan",
     "ai_mode", "ai_disable", "ai_provider", "ai_certification", "ai_drift",
-    "ai_experiments", "ai_kill", "live_sync", "live_certify", "live_account",
-    "live_dry_run", "live_confirm", "live_disable", "live_readiness", "recovery",
-    "demo_order", "demo_cancel", "demo_status", "demo_kill", "demo_resume",
+    "ai_experiments", "ai_kill",
     "admin", "admin_plan", "admin_plan_status", "admin_plan_revoke", "admin_plan_extend",
     "admin_entitlements", "admin_users", "admin_usage", "admin_plans", "admin_ai_usage",
     "admin_health", "admin_worker_status",
@@ -122,20 +183,43 @@ OPERATOR_COMMANDS = frozenset({
 OPERATOR_HELP = (
     "Operator-only: /admin_status /migration_status /workers /grant_plan /revoke_plan\n"
     "AI governance: /ai_mode /ai_disable /ai_provider /ai_certification /ai_drift /ai_experiments /ai_kill\n"
-    "LIVE/demo governance: /live_readiness /live_certify /live_dry_run /live_confirm /live_disable /recovery "
-    "/demo_status /demo_kill /demo_resume /demo_order /demo_cancel"
+    "User-scoped LIVE and demo controls are documented under /help live."
 )
 
 PUBLIC_COMMANDS = frozenset(entry.command for entries in HELP_CATALOG.values() for entry in entries)
 ALL_DOCUMENTED_COMMANDS = PUBLIC_COMMANDS | OPERATOR_COMMANDS
 
+
+class CommandClass(StrEnum):
+    PUBLIC = "PUBLIC"
+    PREMIUM_PUBLIC = "PREMIUM_PUBLIC"
+    ADMIN = "ADMIN"
+    OPERATOR = "OPERATOR"
+    INTERNAL = "INTERNAL"
+    DEPRECATED_ALIAS = "DEPRECATED_ALIAS"
+
+
+PREMIUM_PUBLIC_COMMANDS = frozenset({
+    "orderbook", "funding", "open_interest", "copy_analytics", "ai_decision",
+    "ai_explain", "ai_dashboard", "ai_research_compare",
+})
+COMMAND_CLASSIFICATION = {
+    **{command: (CommandClass.PREMIUM_PUBLIC if command in PREMIUM_PUBLIC_COMMANDS else CommandClass.PUBLIC)
+       for command in PUBLIC_COMMANDS},
+    **{command: CommandClass.OPERATOR for command in OPERATOR_COMMANDS},
+    "strategy_compare": CommandClass.DEPRECATED_ALIAS,
+    "ai_explain": CommandClass.DEPRECATED_ALIAS,
+}
+
 MAIN_MENU_COMMANDS = (
-    ("help", "Browse intelligence commands"), ("analyze", "Analyze a market"),
+    ("start", "Open Liquidity Vision"), ("help", "Browse intelligence commands"),
+    ("analyze", "Analyze a market"),
     ("scanner", "Rank opportunities"), ("watchlist", "Your tracked markets"),
-    ("trade", "Trade replay and journal"), ("copy", "PAPER copy overview"),
-    ("positions", "PAPER positions"), ("signal_rankings", "Ranked signals"),
-    ("research", "Research hub"), ("profile", "Profile and plan"),
-    ("premium", "Plans and capabilities"),
+    ("trade", "Trade replay"), ("journal", "Trade journal"),
+    ("copy", "PAPER copy overview"), ("positions", "PAPER positions"),
+    ("rankings", "Ranked signals"), ("research", "Research hub"),
+    ("settings", "Personal settings"), ("alerts", "Alert preferences"),
+    ("premium", "Plans and capabilities"), ("profile", "Profile and plan"),
 )
 
 
@@ -148,7 +232,8 @@ def category_text(category: str, language: str = "en") -> str | None:
     lines = [f"<b>{category.title()} · {i18n.t('help.title', language=language)}</b>",
              i18n.t(f"help.{category}", language=language), ""]
     for entry in entries:
-        lines.append(f"/<b>{entry.command}</b> — {entry.summary}")
-        if entry.usage:
-            lines.append(f"  {i18n.t('common.example', language=language)}: <code>{entry.usage}</code>")
+        command = i18n.market_token(f"/{entry.command}", language=language)
+        usage = i18n.market_token(entry.usage or "/" + entry.command, language=language)
+        lines.append(f"<b>{command}</b> — {entry.summary}")
+        lines.append(f"  {i18n.t('common.usage', language=language)}: <code>{usage}</code>")
     return "\n".join(lines)

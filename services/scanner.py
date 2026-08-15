@@ -52,7 +52,7 @@ class Scanner:
                     max(suitability, key=lambda key: float(suitability[key]))
                     if suitability else result.get("setup_type") or "MARKET_STRUCTURE"
                 ))
-                quality = intelligence.get("signal_quality_v3") or {}
+                quality = intelligence.get("signal_quality_v4") or intelligence.get("signal_quality_v3") or {}
                 readiness_v2 = intelligence.get("entry_readiness") or {}
                 supports = quality.get("supporting_evidence") or []
                 conflicts = quality.get("contradicting_evidence") or []
@@ -61,7 +61,22 @@ class Scanner:
                         return fallback
                     item = items[0]
                     return str(item.get("reason") if isinstance(item, dict) else item)[:100]
-                scanner_score = float((result.get("expected_value") or {}).get("rank_score") or self._execution_score(result))
+                quality_raw = quality.get("overall_quality")
+                quality_score = float(quality_raw) if quality_raw is not None else None
+                readiness_raw = readiness_v2.get("score")
+                readiness_score = float(readiness_raw) if readiness_raw is not None else float(result["execution_readiness"])
+                strategy_fit = float(primary.get("suitability") or suitability.get(strategy) or 0)
+                ev_rank = float((result.get("expected_value") or {}).get("rank_score") or self._execution_score(result))
+                priority_score = self._priority_score(
+                    quality=quality_score, readiness=readiness_score,
+                    strategy_fit=strategy_fit,
+                    data_confidence=quality.get("data_confidence"), ev_rank=ev_rank,
+                    contradictions=conflicts,
+                    readiness_state=str(readiness_v2.get("state") or result.get("execution_status") or "UNKNOWN"),
+                )
+                tied = fusion.get("tied_strategies") or []
+                primary_strategy = (" / ".join(str(item) for item in tied[:2]) if tied
+                                    else str(primary.get("strategy") or strategy))
                 return {
                     "symbol": symbol,
                     "analysis": result,
@@ -74,26 +89,33 @@ class Scanner:
                     "risk": risks[0] if risks else "No major blocker",
                     "rr": result["rr"],
                     "raw_ranking_score": result["ranking_score"],
-                    "ranking_score": scanner_score,
-                    "scanner_score": scanner_score,
+                    "ranking_score": priority_score if priority_score is not None else -1.0,
+                    "scanner_score": priority_score,
+                    "priority_score": priority_score,
+                    "priority_version": "scanner-priority-v3",
+                    "ev_rank_score": ev_rank,
                     "expected_r": float((result.get("expected_value") or {}).get("expected_r") or 0),
                     "ev_band": str((result.get("expected_value") or {}).get("band") or "UNKNOWN"),
                     "edge": result["directional_edge"],
                     "category": result["opportunity_category"],
                     "entry_quality": result["entry_quality"],
-                    "readiness": float(readiness_v2.get("score") or result["execution_readiness"]),
+                    "readiness": readiness_score,
                     "readiness_state": str(readiness_v2.get("state") or result.get("execution_status") or "UNKNOWN"),
                     "preferred_entry_low": result["preferred_entry_low"],
                     "preferred_entry_high": result["preferred_entry_high"],
                     "decision_action": (result.get("unified_decision") or {}).get("action", result.get("decision_action")),
                     "conviction": result.get("conviction") or {},
-                    "strategy": strategy,
-                    "primary_strategy": strategy,
+                    "strategy": primary_strategy,
+                    "primary_strategy": primary_strategy,
                     "secondary_strategy": str(secondary.get("strategy") or "NONE"),
                     "strategy_gap": float(fusion.get("suitability_gap") or 0),
-                    "strategy_fit": float(primary.get("suitability") or suitability.get(strategy) or 0),
+                    "strategy_fit": strategy_fit,
                     "fusion_state": str(fusion.get("fusion_state") or "UNAVAILABLE"),
-                    "quality": float(quality.get("overall_quality") or result.get("decision_quality_score") or 0),
+                    "quality": quality_score,
+                    "quality_state": str(quality.get("evaluation_state") or "NOT_EVALUATED"),
+                    "setup_quality": quality.get("setup_quality"),
+                    "data_confidence": quality.get("data_confidence"),
+                    "data_confidence_state": readiness_v2.get("data_confidence_state") or "UNKNOWN",
                     "quality_dimensions": quality.get("quality_dimensions") or {},
                     "market_regime": intelligence.get("market_regime_v2") or {},
                     "momentum_reacceleration": intelligence.get("momentum_reacceleration") or {},
@@ -118,6 +140,30 @@ class Scanner:
             score -= (25 - entry) * 0.7
         if readiness < 35:
             score -= (35 - readiness) * 0.5
+        return round(max(0.0, min(100.0, score)), 1)
+
+    @staticmethod
+    def _priority_score(*, quality: float | None, readiness: float,
+                        strategy_fit: float, data_confidence: object, ev_rank: float,
+                        contradictions: list, readiness_state: str) -> float | None:
+        """Absolute evidence priority; it is neither probability nor a relative percentile."""
+        if quality is None:
+            return None
+        data = float(data_confidence) if data_confidence is not None else 0.0
+        values = [max(0.0, min(100.0, value)) for value in
+                  (quality, readiness, strategy_fit, data, ev_rank)]
+        score = values[0] * .45 + values[1] * .23 + values[2] * .14 + values[3] * .12 + values[4] * .06
+        high_families = {str(item.get("family") or "") for item in contradictions
+                         if isinstance(item, dict) and item.get("severity") in {"HIGH", "CRITICAL"}}
+        if "STRUCTURE" in high_families:
+            score = min(score, 64.0)
+        if any(isinstance(item, dict) and item.get("severity") == "CRITICAL" for item in contradictions):
+            score = min(score, 35.0)
+        if readiness_state in {"INVALID", "INSUFFICIENT_DATA"}:
+            score = min(score, 30.0)
+        exceptional = min(values[:4]) >= 90 and not high_families
+        if not exceptional:
+            score = min(score, 94.0)
         return round(max(0.0, min(100.0, score)), 1)
 
     async def scan(self, force: bool = False) -> list[dict]:

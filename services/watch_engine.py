@@ -56,12 +56,14 @@ class WatchEngine:
     @staticmethod
     def _snapshot(analysis: dict) -> dict:
         intelligence = analysis.get("market_intelligence") or {}
-        quality = intelligence.get("signal_quality_v3") or {}
+        quality = intelligence.get("signal_quality_v4") or intelligence.get("signal_quality_v3") or {}
         readiness = intelligence.get("entry_readiness") or {}
         fusion = intelligence.get("strategy_fusion_v2") or {}
         primary = fusion.get("primary") or {}
+        tied = fusion.get("tied_strategies") or []
         regime = intelligence.get("market_regime_v2") or {}
         microstructure = intelligence.get("microstructure") or {}
+        derivatives = intelligence.get("funding_open_interest") or {}
         return {
             "price": float(analysis.get("price") or 0),
             "direction": analysis.get("direction"),
@@ -69,13 +71,23 @@ class WatchEngine:
             "execution_status": analysis.get("execution_status"),
             "recommendation": analysis.get("recommendation"),
             "direction_score": float(analysis.get("direction_score") or 0),
-            "readiness": float(readiness.get("score") or analysis.get("execution_readiness") or 0),
+            "readiness": (float(readiness["score"]) if readiness.get("score") is not None else None),
             "readiness_state": readiness.get("state") or analysis.get("execution_status"),
-            "quality": float(quality.get("overall_quality") or analysis.get("decision_quality_score") or 0),
-            "strategy": primary.get("strategy") or analysis.get("setup_type") or "UNCLASSIFIED",
+            "quality": (float(quality["overall_quality"]) if quality.get("overall_quality") is not None else None),
+            "quality_state": (quality.get("evaluation_state") or
+                              ("LEGACY_SNAPSHOT" if intelligence else "NOT_EVALUATED")),
+            "setup_quality": quality.get("setup_quality"),
+            "data_confidence": quality.get("data_confidence"),
+            "strategy": (" / ".join(str(item) for item in tied[:2]) if tied else
+                         primary.get("strategy") or analysis.get("setup_type") or "UNCLASSIFIED"),
             "strategy_fit": float(primary.get("suitability") or 0),
             "regime": regime.get("phase") or (intelligence.get("market_story") or {}).get("state"),
-            "microstructure_quality": float(microstructure.get("microstructure_quality") or 0),
+            "microstructure_quality": (float(microstructure["microstructure_quality"])
+                                       if microstructure.get("microstructure_quality") is not None else None),
+            "microstructure_labels": sorted(microstructure.get("behavior_labels") or []),
+            "funding_percentile": (float(derivatives["funding_percentile"])
+                                   if derivatives.get("funding_percentile") is not None else None),
+            "oi_acceleration": derivatives.get("oi_acceleration"),
             "bos": analysis.get("bos"),
             "choch": analysis.get("choch"),
             "preferred_entry_low": analysis.get("preferred_entry_low"),
@@ -95,9 +107,11 @@ class WatchEngine:
             changes.append(f"Status: {previous.get('execution_status', '—')} → {current.get('execution_status', '—')}")
         if previous.get("direction") != current.get("direction"):
             changes.append(f"Direction: {previous.get('direction', '—')} → {current.get('direction', '—')}")
-        if abs(current["direction_score"] - float(previous.get("direction_score") or 0)) >= self.score_delta:
+        if (current.get("direction_score") is not None and previous.get("direction_score") is not None
+                and abs(float(current["direction_score"]) - float(previous["direction_score"])) >= self.score_delta):
             changes.append(f"Direction score: {float(previous.get('direction_score') or 0):.1f} → {current['direction_score']:.1f}")
-        if abs(current["readiness"] - float(previous.get("readiness") or 0)) >= self.readiness_delta:
+        if (current.get("readiness") is not None and previous.get("readiness") is not None
+                and abs(float(current["readiness"]) - float(previous["readiness"])) >= self.readiness_delta):
             changes.append(f"Readiness: {float(previous.get('readiness') or 0):.1f} → {current['readiness']:.1f}")
         if previous.get("bos") != current.get("bos") and "No BOS" not in str(current.get("bos")):
             changes.append(f"BOS: {current.get('bos')}")
@@ -114,6 +128,8 @@ class WatchEngine:
         def changed(field: str, alert_type: str, label: str, *, threshold: float | None = None) -> None:
             before, after = previous.get(field), current.get(field)
             if threshold is not None:
+                if before is None or after is None:
+                    return
                 if abs(float(after or 0) - float(before or 0)) < threshold:
                     return
             elif before == after:
@@ -129,6 +145,33 @@ class WatchEngine:
         changed("strategy", "STRATEGY_CHANGE", "Primary strategy")
         changed("regime", "REGIME_CHANGE", "Market regime")
         changed("microstructure_quality", "MICROSTRUCTURE_CHANGE", "Microstructure quality", threshold=self.score_delta)
+        previous_labels = set(previous.get("microstructure_labels") or [])
+        for label in sorted(set(current.get("microstructure_labels") or []) - previous_labels):
+            if label in {"MICROSTRUCTURE_NEUTRAL", "INSUFFICIENT_HISTORY"}:
+                continue
+            alert_type = ("WALL_REMOVED" if "REMOVED" in label else
+                          "WALL_REPLENISHED" if "REPLENISH" in label else
+                          "LIQUIDITY_SWEEP" if "SWEEP" in label else
+                          "ORDER_BOOK_WALL_APPEARS" if "WALL" in label else
+                          "MICROSTRUCTURE_CHANGE")
+            candidates.append({"type": alert_type, "identity": f"microstructure:{label}",
+                               "text": f"Microstructure event: {label}",
+                               "before": None, "after": label})
+        percentile = current.get("funding_percentile")
+        previous_percentile = previous.get("funding_percentile")
+        current_extreme = ("HIGH" if percentile is not None and float(percentile) >= 90 else
+                           "LOW" if percentile is not None and float(percentile) <= 10 else None)
+        previous_extreme = ("HIGH" if previous_percentile is not None and float(previous_percentile) >= 90 else
+                            "LOW" if previous_percentile is not None and float(previous_percentile) <= 10 else None)
+        if current_extreme and current_extreme != previous_extreme:
+            candidates.append({"type": "FUNDING_EXTREME", "identity": f"funding:{current_extreme}",
+                               "text": f"Funding percentile entered {current_extreme} extreme",
+                               "before": previous_percentile, "after": percentile})
+        if (current.get("oi_acceleration") == "ACCELERATING"
+                and previous.get("oi_acceleration") != "ACCELERATING"):
+            candidates.append({"type": "OI_ACCELERATION", "identity": "oi:accelerating",
+                               "text": "Open interest is accelerating",
+                               "before": previous.get("oi_acceleration"), "after": "ACCELERATING"})
         if previous.get("bos") != current.get("bos") and "No BOS" not in str(current.get("bos")):
             candidates.append({"type": "STRUCTURE_BREAK", "identity": f"bos:{current.get('bos')}",
                                "text": f"BOS: {current.get('bos')}"})
@@ -238,13 +281,15 @@ class WatchEngine:
                     self._add_event(row["telegram_id"], symbol, timeframe, "MATERIAL_CHANGE", {"changes": changes, "snapshot": current})
                 if eligible and self.bot and bool(row.get("notifications_enabled", 1)):
                     language = self.i18n.language(row["telegram_id"])
+                    quality_text = (f"{current['quality']:.1f}" if current.get("quality") is not None else "—")
+                    readiness_text = (f"{current['readiness']:.1f}" if current.get("readiness") is not None else "—")
                     lines = [
                         f"🔔 <b>{self.i18n.market_token(symbol, language=language)} · "
                         f"{self.i18n.market_token(timeframe.upper(), language=language)} WATCH UPDATE</b>", "",
                         *[f"• {candidate['text']}" for candidate, _ in eligible], "",
                         f"Bias: {current.get('market_bias')}",
                         f"Recommendation: {current.get('recommendation')}",
-                        f"Quality / Readiness: {current['quality']:.1f} / {current['readiness']:.1f}",
+                        f"Quality / Readiness: {quality_text} / {readiness_text}",
                         f"Strategy: {current['strategy']} · Regime: {current['regime']}",
                         f"Price: <code>{current['price']}</code>",
                     ]

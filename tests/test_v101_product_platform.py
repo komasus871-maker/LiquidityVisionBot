@@ -65,7 +65,8 @@ def test_help_catalog_covers_every_registered_command():
         for arguments in re.findall(r"Command\(([^)]*)\)", source):
             registered.update(re.findall(r"[\"']([a-z][a-z0-9_]*)[\"']", arguments))
     assert registered <= ALL_DOCUMENTED_COMMANDS, sorted(registered - ALL_DOCUMENTED_COMMANDS)
-    assert {"market", "trading", "copy", "intelligence", "research", "system", "account"} == set(HELP_CATALOG)
+    assert {"market", "trading", "copy", "intelligence", "research", "scanner",
+            "watchlist", "alerts", "premium", "settings", "system", "account", "ai", "live"} == set(HELP_CATALOG)
 
 
 def test_symbol_normalization_is_friendly_but_not_ambiguous():
