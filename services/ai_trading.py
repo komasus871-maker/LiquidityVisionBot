@@ -18,6 +18,7 @@ from typing import Any, Protocol
 import aiohttp
 
 from database.database import connect
+from services.ai_context_compiler import AIContextCompiler
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +354,15 @@ class AIProviderResponse:
     cache_hit: bool = False
     cache_source_decision_id: str | None = None
     material_state_checksum: str | None = None
+    context_compiler_version: str | None = None
+    context_feature_version: str | None = None
+    original_context_chars: int = 0
+    compiled_context_chars: int = 0
+    context_budget_chars: int = 0
+    context_budget_utilization: float = 0.0
+    context_sections_included_json: str = "[]"
+    context_sections_omitted_json: str = "[]"
+    estimated_cost_avoided_usd: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         # Directly injected test providers receive the same normalized contract as HTTP adapters.
@@ -1240,6 +1250,31 @@ def validate_provider_response(response: AIProviderResponse, context: AIContext,
     return validator.validate(response.payload, context)
 
 
+def abstention_diagnostics(decision: ValidatedDecision) -> tuple[list[str], list[str]]:
+    if decision.action is not AIAction.ABSTAIN or not decision.valid:
+        return [], []
+    text = " ".join((*decision.supporting, *decision.conflicting,
+                     decision.explanation, decision.uncertainty_explanation)).lower()
+    mappings = (
+        ("structure", "STRUCTURE_CONFLICT"), ("momentum", "MOMENTUM_CONFLICT"),
+        ("late", "ENTRY_LATE"), ("invalidation", "INVALIDATION_WEAK"),
+        ("target", "TARGET_GEOMETRY_WEAK"), ("microstructure", "MICROSTRUCTURE_CONTRADICTION"),
+        ("regime", "REGIME_DISAGREEMENT"), ("funding", "DERIVATIVES_CONTRADICTION"),
+        ("open interest", "DERIVATIVES_CONTRADICTION"), ("benchmark", "BENCHMARK_CONTRADICTION"),
+        ("cost", "POOR_TRANSACTION_COST_VIABILITY"), ("evidence", "INSUFFICIENT_EVIDENCE"),
+        ("incomplete", "CONTEXT_INCOMPLETE"),
+    )
+    reasons = list(dict.fromkeys(code for needle, code in mappings if needle in text))
+    if decision.uncertainty >= 70:
+        reasons.append("EXCESSIVE_UNCERTAINTY")
+    if decision.confidence < 40:
+        reasons.append("LOW_CONFIDENCE")
+    if not reasons:
+        reasons.append("INSUFFICIENT_EVIDENCE")
+    changes = [value for value in decision.invalidations if value.strip()][:5]
+    return reasons[:8], changes
+
+
 class AIDecisionRepository:
     def register_prompt(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -1258,6 +1293,7 @@ class AIDecisionRepository:
                         "features": context.feature_checksum, "prompt": PROMPT_VERSION,
                         "identity": response.identity_checksum or response.provider})
         decision_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+        abstention_reasons, decision_changes = abstention_diagnostics(decision)
         now = datetime.now(timezone.utc).isoformat()
         columns = (
             "decision_id", "idempotency_key", "correlation_id", "telegram_id", "signal_id", "symbol",
@@ -1277,6 +1313,11 @@ class AIDecisionRepository:
             "raw_envelope_checksum", "provider_invoked", "legacy_classification", "opportunity_quality",
             "regime_tags_json", "evidence_ranking_json", "uncertainty_explanation", "cache_hit",
             "cache_source_decision_id", "material_state_checksum", "provider_attempt_count", "retry_count",
+            "context_compiler_version", "context_feature_version", "original_context_chars",
+            "compiled_context_chars", "context_budget_chars", "context_budget_utilization",
+            "context_sections_included_json", "context_sections_omitted_json",
+            "estimated_cost_avoided_usd",
+            "abstention_reason_codes_json", "what_would_change_decision_json",
             "created_at",
         )
         values = (
@@ -1306,7 +1347,14 @@ class AIDecisionRepository:
             decision.opportunity_quality, _canonical(decision.market_regimes),
             _canonical(decision.evidence_ranking), decision.uncertainty_explanation,
             int(response.cache_hit), response.cache_source_decision_id,
-            response.material_state_checksum, response.provider_attempt_count, response.retry_count, now,
+            response.material_state_checksum, response.provider_attempt_count, response.retry_count,
+            response.context_compiler_version, response.context_feature_version,
+            response.original_context_chars, response.compiled_context_chars,
+            response.context_budget_chars, response.context_budget_utilization,
+            response.context_sections_included_json, response.context_sections_omitted_json,
+            str(response.estimated_cost_avoided_usd),
+            _canonical(abstention_reasons), _canonical(decision_changes),
+            now,
         )
         with connect() as conn:
             cur = conn.execute(
@@ -1365,6 +1413,7 @@ class AITradingService:
         except Exception:
             self.max_daily_cost = Decimal("0")
         self.max_context_chars = _env_int("AI_CONTEXT_MAX_CHARS", 30000, 1000, 1_000_000)
+        self.context_compiler = AIContextCompiler(self.max_context_chars)
         self.validator = AIResponseValidator(max_age_seconds=_env_int("AI_CONTEXT_MAX_AGE_SECONDS", 300, 1, 86400))
         self.capabilities = getattr(self.provider, "capabilities", AIProviderCapabilities(
             supports_json_object=True, supports_json_schema=True, supports_strict_schema=True,
@@ -1510,7 +1559,9 @@ class AITradingService:
         identity = self._identity()
         from services.ai_intelligence import AIObservationIntelligence
         intelligence = AIObservationIntelligence()
-        material_checksum = intelligence.material_state_checksum(context)
+        compiled = self.context_compiler.compile(context)
+        prompt_payload = compiled.payload
+        material_checksum = intelligence.material_state_checksum(context, prompt_payload)
         request_key = checksum({"signal": context.signal_id, "market": context.market_checksum,
                                 "features": context.feature_checksum, "prompt": PROMPT_VERSION,
                                 "identity": identity["identity_checksum"]})
@@ -1530,9 +1581,8 @@ class AITradingService:
             block = "DAILY_REQUEST_LIMIT"
         elif cost >= self.max_daily_cost:
             block = "COST_LIMIT"
-        prompt_payload = context.prompt_payload()
-        prompt_chars = len(_canonical(prompt_payload))
-        if prompt_chars > self.max_context_chars:
+        prompt_chars = compiled.compiled_chars
+        if not compiled.fits_budget:
             block = "CONTEXT_TOO_LARGE"
         block = block or self._activation_block(mode)
         input_raw = os.getenv("AI_INPUT_COST_PER_MILLION_USD", "").strip()
@@ -1570,7 +1620,15 @@ class AITradingService:
                                       downgrade_reason=downgrade_reason,
                                       cost_status="PRICED" if priced else "UNPRICED",
                                       pricing_version=price_version or None,
-                                      material_state_checksum=material_checksum), identity)
+                                      material_state_checksum=material_checksum,
+                                      context_compiler_version=compiled.compiler_version,
+                                      context_feature_version=compiled.feature_version,
+                                      original_context_chars=compiled.original_chars,
+                                      compiled_context_chars=compiled.compiled_chars,
+                                      context_budget_chars=compiled.max_chars,
+                                      context_budget_utilization=compiled.budget_utilization,
+                                      context_sections_included_json=_canonical(compiled.sections_included),
+                                      context_sections_omitted_json=_canonical(compiled.sections_omitted)), identity)
         context_rejection = self.validator.validate_context(context)
         cached_row = (intelligence.reusable_decision(identity["identity_checksum"], material_checksum)
                       if not block and context_rejection is None and
@@ -1589,6 +1647,7 @@ class AITradingService:
                 extraction_code="VALID", extraction_stage="CACHE_REUSE", cost_status="CACHE_REUSE",
                 provider_invoked=False, cache_hit=True,
                 cache_source_decision_id=str(cached_row["decision_id"]),
+                estimated_cost_avoided_usd=estimated_upper_cost,
             )
         elif block:
             decision = self.validator.fallback(block)
@@ -1708,7 +1767,7 @@ class AITradingService:
             "AI observation result signal_id=%s identity=%s provider_invoked=%s attempts=%s retries=%s "
             "request_id=%s completion=%s extraction_path=%s extraction_code=%s validation_stage=%s "
             "validation_code=%s schema_pipeline_valid=%s semantic_valid=%s action=%s quality=%.1f "
-            "latency_ms=%.1f context_timestamp=%s",
+            "latency_ms=%.1f context_timestamp=%s context_chars=%s->%s compiler=%s",
             context.signal_id, identity["identity_checksum"][:16], response.provider_invoked,
             attempt_count, retry_count, response.provider_request_id,
             response.provider_completion_status, response.extraction_path, response.extraction_code,
@@ -1716,6 +1775,7 @@ class AITradingService:
             bool(response.provider_invoked and schema_pipeline_valid(decision.validation_stage)),
             decision.valid,
             decision.action.value, decision.opportunity_quality, latency, context.market_timestamp,
+            compiled.original_chars, compiled.compiled_chars, compiled.compiler_version,
         )
         row, _ = self.repository.save(context=context, response=response, decision=decision,
                                       mode=mode, latency_ms=latency,

@@ -87,8 +87,8 @@ class ContractBingX(BingXSwapAdapter):
 
 
 def test_release_environment_capabilities_and_signature():
-    assert APP_VERSION == "10.0.0"
-    assert RELEASE_NAME == "Autonomous Market Intelligence Platform"
+    assert APP_VERSION == "10.1.0"
+    assert RELEASE_NAME == "Intelligence Product Platform"
     vst = ContractBingX(testnet=True)
     live = ContractBingX(testnet=False)
     assert vst.environment == "prod-vst" and "open-api-vst" in vst.base_url

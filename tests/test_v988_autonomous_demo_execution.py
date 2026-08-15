@@ -61,8 +61,8 @@ def request():
 
 
 def test_release_metadata():
-    assert APP_VERSION == "10.0.0"
-    assert RELEASE_NAME == "Autonomous Market Intelligence Platform"
+    assert APP_VERSION == "10.1.0"
+    assert RELEASE_NAME == "Intelligence Product Platform"
 
 
 @pytest.mark.asyncio

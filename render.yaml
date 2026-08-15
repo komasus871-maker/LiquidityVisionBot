@@ -11,9 +11,11 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: APP_VERSION
-        value: 9.9.18
+        value: 10.1.0
       - key: BOT_MODE
         value: webhook
+      - key: OKX_PUBLIC_MAX_ATTEMPTS
+        value: "2"
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL
@@ -110,6 +112,14 @@ services:
         value: "8"
       - key: MICROSTRUCTURE_SAMPLES_PER_SYMBOL
         value: "5"
+      - key: OPERATIONAL_RETENTION_ENABLED
+        value: "true"
+      - key: PROVIDER_EVENT_RETENTION_DAYS
+        value: "90"
+      - key: FEATURE_USAGE_RETENTION_DAYS
+        value: "90"
+      - key: ALERT_EVENT_RETENTION_DAYS
+        value: "90"
       - key: MICROSTRUCTURE_SAMPLE_SPACING_MS
         value: "400"
       - key: MICROSTRUCTURE_MAX_LEVELS

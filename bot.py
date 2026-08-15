@@ -4,10 +4,12 @@ import asyncio
 import logging
 import os
 import signal
+import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from config import BOT_TOKEN
 from database.database import create_tables, database_backend, persistent_database, ping_database
@@ -24,6 +26,7 @@ from handlers.market import router as market_router
 from handlers.menu import router as menu_router
 from handlers.news import router as news_router
 from handlers.premium import router as premium_router
+from handlers.preferences import router as preferences_router
 from handlers.price import router as price_router
 from handlers.profile import router as profile_router
 from handlers.research import router as research_router
@@ -41,6 +44,8 @@ from services.ai_operations import AIConfigurationValidator
 from services.ai_intelligence import AIObservationIntelligence
 from services.research_worker import ResearchWorker
 from services.microstructure_observer import MicrostructureObserver
+from services.command_catalog import MAIN_MENU_COMMANDS
+from services.operational_retention import OperationalRetentionService
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -67,6 +72,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(journal_router)
     dp.include_router(intelligence_hub_router)
     dp.include_router(premium_router)
+    dp.include_router(preferences_router)
     dp.include_router(menu_router)
     return dp
 
@@ -95,14 +101,24 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 
 
 async def main() -> None:
+    startup_started = time.perf_counter()
     logging.info("Creating database...")
+    phase = time.perf_counter()
     create_tables()
+    logging.info("Startup phase database_schema duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
+    phase = time.perf_counter()
     migration = HistoricalExecutionMigrationService().run(
         batch_size=int(os.getenv("HISTORICAL_MIGRATION_BATCH_SIZE", "500"))
     )
     logging.info("Historical execution migration: %s", migration.as_dict())
+    logging.info("Startup phase historical_migration duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
+    phase = time.perf_counter()
     backfill = TradeMemoryService().backfill(limit=int(os.getenv("MEMORY_BACKFILL_LIMIT", "500")))
     logging.info("AI memory backfill: scanned=%s created=%s", backfill["scanned"], backfill["created"])
+    logging.info("Startup phase memory_backfill duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
+    phase = time.perf_counter()
+    retention = OperationalRetentionService().run()
+    logging.info("Operational retention: %s duration_ms=%.1f", retention, (time.perf_counter() - phase) * 1000)
     db_health = ping_database()
     logging.info("Database ready: backend=%s persistent=%s latency_ms=%s", database_backend(), persistent_database(), db_health.get("latency_ms"))
     ai_config = AIConfigurationValidator().validate()
@@ -120,7 +136,12 @@ async def main() -> None:
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    set_commands = getattr(bot, "set_my_commands", None)
+    if callable(set_commands):
+        await set_commands([BotCommand(command=name, description=description)
+                            for name, description in MAIN_MENU_COMMANDS])
     dp = build_dispatcher()
+    logging.info("Startup initialization complete duration_ms=%.1f", (time.perf_counter() - startup_started) * 1000)
 
     tracker = SignalTracker(interval_seconds=int(os.getenv("SIGNAL_CHECK_INTERVAL", "60")), bot=bot)
     observation_monitor = ObservationMonitor(bot=bot)

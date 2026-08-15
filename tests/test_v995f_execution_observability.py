@@ -39,8 +39,8 @@ def _plan(telegram_id: int = 99550):
 
 
 def test_release_identity():
-    assert APP_VERSION == "10.0.0"
-    assert RELEASE_NAME == "Autonomous Market Intelligence Platform"
+    assert APP_VERSION == "10.1.0"
+    assert RELEASE_NAME == "Intelligence Product Platform"
 
 
 def test_execution_records_auditable_timeline(tmp_path, monkeypatch):

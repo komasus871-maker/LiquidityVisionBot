@@ -369,6 +369,7 @@ class AIProviderCertificationService:
         from services.ai_trading import (AIOutputMode, AIProviderRequest, AIResponseValidator,
             PROMPT_VERSION, RESPONSE_SCHEMA, SCHEMA_CHECKSUM,
             SCHEMA_VERSION, SYSTEM_PROMPT, resolve_output_mode, validate_provider_response)
+        from services.ai_context_compiler import AIContextCompiler
         identity = provider_identity(self.provider)
         validation = AIConfigurationValidator().validate(self.provider)
         certification_id = str(uuid.uuid4())
@@ -425,9 +426,12 @@ class AIProviderCertificationService:
         if initial_status == AICertificationState.RUNNING.value:
             requested, effective, reason = resolve_output_mode(self.provider.capabilities)
             context = self._synthetic_context()
+            compiled = AIContextCompiler(_bounded_int(
+                "AI_CONTEXT_MAX_CHARS", 30000, 1000, 1_000_000)).compile(context)
+            checks["context_compiler"] = compiled.telemetry()
             certification_tokens = _bounded_int("AI_CERTIFICATION_MAX_TOKENS", 1200, 128, 4096)
             request = AIProviderRequest(
-                SYSTEM_PROMPT, PROMPT_VERSION, context.prompt_payload(),
+                SYSTEM_PROMPT, PROMPT_VERSION, compiled.payload,
                 RESPONSE_SCHEMA, certification_tokens, requested,
                 effective, SCHEMA_VERSION, SCHEMA_CHECKSUM)
             try:

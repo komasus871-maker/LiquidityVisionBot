@@ -1,2 +1,2 @@
-APP_VERSION = "10.0.0"
-RELEASE_NAME = "Autonomous Market Intelligence Platform"
+APP_VERSION = "10.1.0"
+RELEASE_NAME = "Intelligence Product Platform"

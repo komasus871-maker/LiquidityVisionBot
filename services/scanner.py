@@ -43,6 +43,18 @@ class Scanner:
                     for x in result["reasons"]
                     if x.startswith(("⚠️", "⛔"))
                 ]
+                intelligence = result.get("market_intelligence") or {}
+                suitability = intelligence.get("strategy_suitability") or {}
+                strategy = (max(suitability, key=lambda key: float(suitability[key]))
+                            if suitability else str(result.get("setup_type") or "MARKET_STRUCTURE"))
+                quality = intelligence.get("signal_quality_v3") or {}
+                supports = quality.get("supporting_evidence") or []
+                conflicts = quality.get("contradicting_evidence") or []
+                def evidence_text(items, fallback):
+                    if not items:
+                        return fallback
+                    item = items[0]
+                    return str(item.get("reason") if isinstance(item, dict) else item)[:100]
                 return {
                     "symbol": symbol,
                     "analysis": result,
@@ -66,6 +78,10 @@ class Scanner:
                     "preferred_entry_high": result["preferred_entry_high"],
                     "decision_action": (result.get("unified_decision") or {}).get("action", result.get("decision_action")),
                     "conviction": result.get("conviction") or {},
+                    "strategy": strategy,
+                    "quality": float(quality.get("overall_quality") or result.get("decision_quality_score") or 0),
+                    "strongest_advantage": evidence_text(supports, "best available evidence is mixed"),
+                    "strongest_contradiction": evidence_text(conflicts, risks[0] if risks else "none material"),
                 }
             except Exception as exc:
                 logging.warning("Scanner failed for %s: %s", symbol, exc)

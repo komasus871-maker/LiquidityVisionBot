@@ -11,6 +11,7 @@ from services.edge_discovery import EdgeDiscoveryEngine
 from services.market_intelligence import concise_market_story
 from services.market_intelligence_repository import MarketIntelligenceRepository
 from services.research_engine import ResearchEngine
+from utils.symbols import normalize_usdt_symbol
 
 
 router = Router()
@@ -18,6 +19,14 @@ engine = ResearchEngine()
 edge_engine = EdgeDiscoveryEngine()
 capabilities = CapabilityService()
 market_repo = MarketIntelligenceRepository()
+
+
+async def _require_capability(message: Message, capability: str) -> bool:
+    if capabilities.has(message.from_user.id, capability):
+        return True
+    await message.answer(
+        f"<b>Preview</b>\n\n{escape(capabilities.preview(capability))}", parse_mode="HTML")
+    return False
 
 
 def _number(value, suffix: str = "", digits: int = 2) -> str:
@@ -44,7 +53,12 @@ def _signal_argument(message: Message) -> int | None:
 
 def _symbol_argument(message: Message) -> str | None:
     parts = (message.text or "").split()
-    return parts[1].upper() if len(parts) > 1 else None
+    if len(parts) <= 1:
+        return None
+    try:
+        return normalize_usdt_symbol(parts[1])
+    except ValueError:
+        return None
 
 
 @router.message(Command("research"))
@@ -66,6 +80,8 @@ async def research_dashboard(message: Message):
 
 @router.message(Command("strategy_lab", "strategy_compare"))
 async def strategy_lab(message: Message):
+    if not await _require_capability(message, "RESEARCH_STRATEGY_LAB"):
+        return
     report = engine.strategy_comparison(message.from_user.id)
     lines = []
     for item in report["strategies"]:
@@ -98,6 +114,20 @@ async def regimes(message: Message):
     )
 
 
+@router.message(Command("strategy_distribution"))
+async def strategy_distribution(message: Message):
+    report = market_repo.strategy_distribution(message.from_user.id)
+    lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: {count} ({count / max(1, report['classified']):.0%})"
+             for name, count in report["distribution"]]
+    margin = report["average_top_margin"]
+    await message.answer(
+        "<b>Strategy Fusion · Assignment Distribution</b>\n\n" +
+        ("\n".join(lines) or "No classified decision snapshots yet.") +
+        f"\n\nSnapshots: <b>{report['classified']}</b> · average lead: "
+        f"<b>{'n/a' if margin is None else f'{margin:.1f}'}</b>\n"
+        "Assignments follow evidence scores; diversity is never forced. Diagnostic only.")
+
+
 @router.message(Command("edge_report"))
 async def edge_report(message: Message):
     report = engine.edge_report(message.from_user.id)
@@ -117,6 +147,8 @@ async def edge_report(message: Message):
 
 @router.message(Command("signal_rankings"))
 async def signal_rankings(message: Message):
+    if not await _require_capability(message, "ADVANCED_RANKING"):
+        return
     rows = engine.rankings(message.from_user.id, limit=10)
     lines = []
     for index, row in enumerate(rows, 1):
@@ -147,6 +179,8 @@ async def signal_rankings(message: Message):
 
 @router.message(Command("scalping_research"))
 async def scalping_research(message: Message):
+    if not await _require_capability(message, "SCALPING_RESEARCH"):
+        return
     report = edge_engine.scalping_lab(message.from_user.id)
     lines = [
         f"<b>{escape(item['timeframe'])} {escape(item['strategy_family'])}</b> · "
@@ -180,6 +214,8 @@ async def capability_status(message: Message):
 
 @router.message(Command("edge_discovery"))
 async def edge_discovery(message: Message):
+    if not await _require_capability(message, "RESEARCH_EDGE_DISCOVERY"):
+        return
     report = edge_engine.edge_dashboard(message.from_user.id)
     overall = report["overall"]
     states = ", ".join(f"{key}: {value}" for key, value in sorted(report["hypothesis_states"].items())) or "none"
@@ -198,6 +234,8 @@ async def edge_discovery(message: Message):
 
 @router.message(Command("feature_edge"))
 async def feature_edge(message: Message):
+    if not await _require_capability(message, "RESEARCH_EDGE_DISCOVERY"):
+        return
     report = edge_engine.feature_contributions(message.from_user.id)
     items = [item for item in report["features"] if item["expectancy_delta_r"] is not None]
     items.sort(key=lambda item: (-abs(item["expectancy_delta_r"]), item["feature"]))
@@ -216,6 +254,8 @@ async def feature_edge(message: Message):
 
 @router.message(Command("hypotheses"))
 async def hypotheses(message: Message):
+    if not await _require_capability(message, "RESEARCH_FORWARD_TESTS"):
+        return
     rows = edge_engine.hypotheses(message.from_user.id, limit=10)
     lines = [
         f"<b>{escape(row['hypothesis_text'][:110])}</b>\n"
@@ -233,6 +273,8 @@ async def hypotheses(message: Message):
 
 @router.message(Command("forward_tests"))
 async def forward_tests(message: Message):
+    if not await _require_capability(message, "RESEARCH_FORWARD_TESTS"):
+        return
     rows = edge_engine.hypotheses(message.from_user.id, limit=20)
     rows = [row for row in rows if row["lifecycle_state"] in {"FORWARD_TESTING", "CONFIRMED", "REJECTED"}]
     lines = [
@@ -285,6 +327,8 @@ async def confidence_research(message: Message):
 
 @router.message(Command("portfolio_edge"))
 async def portfolio_edge(message: Message):
+    if not await _require_capability(message, "PORTFOLIO_EDGE"):
+        return
     report = edge_engine.portfolio_edge(message.from_user.id)
     await message.answer(
         "<b>Portfolio Edge Research</b>\n\n"
@@ -297,6 +341,8 @@ async def portfolio_edge(message: Message):
 
 @router.message(Command("ai_research_compare"))
 async def ai_research_compare(message: Message):
+    if not await _require_capability(message, "AI_ADVANCED_COMMENTARY"):
+        return
     report = edge_engine.ai_comparison(message.from_user.id)
     await message.answer(
         "<b>Deterministic vs GPT vs Research</b>\n\n"
@@ -312,6 +358,8 @@ async def ai_research_compare(message: Message):
 
 @router.message(Command("market_story"))
 async def market_story(message: Message):
+    if not await _require_capability(message, "MARKET_STORY_FULL"):
+        return
     signal_id = _signal_argument(message)
     if signal_id is None:
         await message.answer("Usage: <code>/market_story SIGNAL_ID</code>", parse_mode="HTML")
@@ -333,6 +381,8 @@ async def market_story(message: Message):
 
 @router.message(Command("signal_quality"))
 async def signal_quality(message: Message):
+    if not await _require_capability(message, "SIGNAL_QUALITY_FULL"):
+        return
     signal_id = _signal_argument(message)
     if signal_id is None:
         await message.answer("Usage: <code>/signal_quality SIGNAL_ID</code>", parse_mode="HTML")
@@ -405,6 +455,8 @@ async def liquidity_map(message: Message):
 
 @router.message(Command("orderbook"))
 async def orderbook(message: Message):
+    if not await _require_capability(message, "MICROSTRUCTURE_VIEW"):
+        return
     symbol = _symbol_argument(message)
     if not symbol:
         await message.answer("Usage: <code>/orderbook BTCUSDT</code>", parse_mode="HTML")
@@ -433,23 +485,29 @@ async def orderbook(message: Message):
 async def data_health(message: Message):
     symbol = _symbol_argument(message)
     if not symbol:
-        await message.answer("Usage: <code>/data_health BTCUSDT</code>", parse_mode="HTML")
+        await message.answer("Usage: <code>/data_health SYMBOL</code>\nExample: <code>/data_health BTCUSDT</code>", parse_mode="HTML")
         return
     report = market_repo.data_health(symbol, message.from_user.id)
     fields = ("candles", "benchmark", "funding", "open_interest", "microstructure",
               "liquidity_map", "ordered_path", "execution_costs")
     lines = [f"<b>{escape(name.replace('_', ' ').title())}</b>: "
              f"<code>{escape(str(report[name]))}</code>" for name in fields]
+    remediation = report.get("remediation") or {}
+    hints = [f"• {escape(str(value))}" for value in remediation.values()
+             if value and "Wait for" not in str(value)][:3]
     await message.answer(
         f"<b>Decision Data Health · {escape(symbol)}</b>\n\n" + "\n".join(lines) +
+        ("\n\n<b>Remediation</b>\n" + "\n".join(hints) if hints else "") +
         "\n\nUnavailable inputs remain explicit and cannot be reconstructed with future data.",
         parse_mode="HTML")
 
 
 async def _derivatives_context(message: Message, family: str) -> None:
+    if not await _require_capability(message, "DERIVATIVES_VIEW"):
+        return
     symbol = _symbol_argument(message)
     if not symbol:
-        await message.answer(f"Usage: <code>/{family} BTCUSDT</code>", parse_mode="HTML")
+        await message.answer(f"Usage: <code>/{family} SYMBOL</code>\nExample: <code>/{family} BTCUSDT</code>", parse_mode="HTML")
         return
     report = market_repo.data_health(symbol, message.from_user.id)
     key = "funding_context" if family == "funding" else "open_interest_context"
@@ -529,3 +587,15 @@ async def quality_report(message: Message):
         "<b>Quality Threshold Research</b>\n\n" + "\n".join(lines) +
         f"\n\nResolved samples: <b>{report['resolved_samples']}</b> · <code>{report['status']}</code>\n"
         "No threshold is applied automatically and no profitability claim is made.", parse_mode="HTML")
+
+
+@router.message(Command("quality_cohorts"))
+async def quality_cohorts(message: Message):
+    report = market_repo.quality_exception_cohorts(message.from_user.id)
+    lines = [f"<b>{escape(item['name'].replace('_', ' ').title())}</b>: n={item['samples']} · "
+             f"avg {_number(item['average_r'], 'R')}"
+             for item in report["cohorts"]]
+    await message.answer(
+        "<b>Quality Exception Cohorts</b>\n\n" + "\n".join(lines) +
+        "\n\nCohorts preserve low-quality winners and high-quality losers for calibration. "
+        "Individual anecdotes never change policy automatically.")

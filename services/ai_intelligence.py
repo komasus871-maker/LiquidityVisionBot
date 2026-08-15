@@ -67,7 +67,7 @@ class AIObservationIntelligence:
     """Derived advisory intelligence. This service has no execution dependencies or authority."""
 
     @staticmethod
-    def material_state_checksum(context: Any) -> str:
+    def material_state_checksum(context: Any, compiled_payload: dict[str, Any] | None = None) -> str:
         from services.ai_trading import checksum
 
         market = context.market
@@ -80,6 +80,14 @@ class AIObservationIntelligence:
             "rr": round(_safe_float(market.get("expected_rr")), 3),
             "price_bucket": round(math.log10(price), 4),
         }
+        if compiled_payload is not None:
+            mandatory = dict(compiled_payload.get("tier_1_mandatory") or {})
+            identity = dict(mandatory.get("identity") or {})
+            identity.pop("timestamp", None)
+            mandatory["identity"] = identity
+            return checksum({"compiler_scope": "DECISION_USEFUL_MARKET_STATE",
+                             "tier_1_mandatory": mandatory,
+                             "tier_2_high_value": compiled_payload.get("tier_2_high_value")})
         history = context.history if isinstance(context.history, dict) else {}
         learning = history.get("learned_patterns") if isinstance(history.get("learned_patterns"), dict) else {}
         return checksum({
@@ -577,12 +585,18 @@ class AIObservationIntelligence:
         with connect() as conn:
             row = conn.execute(f"""SELECT COUNT(*) decisions,SUM(CASE WHEN provider_invoked=1 THEN 1 ELSE 0 END) requests,
                 SUM(CASE WHEN cache_hit=1 THEN 1 ELSE 0 END) cache_hits,
+                COALESCE(SUM(estimated_cost_avoided_usd),0) estimated_cost_avoided_usd,
+                COALESCE(AVG(CASE WHEN original_context_chars>0 THEN
+                    CAST(compiled_context_chars AS DOUBLE PRECISION)/original_context_chars END),0) context_size_ratio,
                 SUM(CASE WHEN validation_code='VALID' THEN 1 ELSE 0 END) valid
                 FROM ai_decisions {where}""", tuple(params)).fetchone()
         decisions = int(row["decisions"] or 0)
         cache_hits = int(row["cache_hits"] or 0)
         return {"decisions": decisions, "provider_requests": int(row["requests"] or 0),
                 "cache_hits": cache_hits, "cache_hit_ratio": cache_hits / decisions if decisions else 0,
+                "provider_calls_avoided": cache_hits,
+                "estimated_cost_avoided_usd": str(row["estimated_cost_avoided_usd"] or 0),
+                "context_size_ratio": float(row["context_size_ratio"] or 0),
                 "valid_rate": int(row["valid"] or 0) / decisions if decisions else 0,
                 "counterfactual": self.counterfactual_report(identity_checksum, telegram_id),
                 "regimes": self.regime_report(identity_checksum, telegram_id),

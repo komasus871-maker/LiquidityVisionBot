@@ -1,4 +1,5 @@
 from database.database import connect
+from utils.symbols import normalize_usdt_symbol
 
 
 class UserWatchlist:
@@ -7,7 +8,7 @@ class UserWatchlist:
             cur = conn.execute(
                 """INSERT INTO user_watchlist(telegram_id, symbol, timeframe)
                    VALUES(?,?,?) ON CONFLICT(telegram_id, symbol, timeframe) DO NOTHING""",
-                (telegram_id, symbol.upper(), timeframe),
+                (telegram_id, normalize_usdt_symbol(symbol), timeframe.lower()),
             )
             return cur.rowcount > 0
 
@@ -15,11 +16,11 @@ class UserWatchlist:
         with connect() as conn:
             cur = conn.execute(
                 "DELETE FROM user_watchlist WHERE telegram_id=? AND symbol=? AND timeframe=?",
-                (telegram_id, symbol.upper(), timeframe),
+                (telegram_id, normalize_usdt_symbol(symbol), timeframe.lower()),
             )
             conn.execute(
                 "DELETE FROM watch_states WHERE telegram_id=? AND symbol=? AND timeframe=?",
-                (telegram_id, symbol.upper(), timeframe),
+                (telegram_id, normalize_usdt_symbol(symbol), timeframe.lower()),
             )
             return cur.rowcount > 0
 
@@ -31,6 +32,8 @@ class UserWatchlist:
                    FROM user_watchlist w
                    LEFT JOIN watch_states s
                      ON s.telegram_id=w.telegram_id AND s.symbol=w.symbol AND s.timeframe=w.timeframe
-                   WHERE w.telegram_id=? ORDER BY w.created_at DESC""",
+                   WHERE w.telegram_id=? ORDER BY
+                     CASE WHEN s.snapshot_json IS NULL THEN 1 ELSE 0 END,
+                     s.last_checked_at DESC,w.created_at DESC""",
                 (telegram_id,),
             ).fetchall()

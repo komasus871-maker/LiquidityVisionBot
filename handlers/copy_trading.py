@@ -105,6 +105,31 @@ async def copy_status(message: Message):
     )
 
 
+@router.message(Command("copy_performance"))
+async def copy_performance(message: Message):
+    stats = service.performance_stats(message.from_user.id)
+    n = int(stats["strategy_closed"])
+    expectancy = stats["strategy_expectancy_r"]
+    pf = stats["strategy_profit_factor"]
+    average_win = stats["strategy_average_win_r"]
+    average_loss = stats["strategy_average_loss_r"]
+    average_win_text = "n/a" if average_win is None else f"{average_win:+.2f}R"
+    average_loss_text = "n/a" if average_loss is None else f"{average_loss:+.2f}R"
+    evidence = "INSUFFICIENT_SAMPLE" if n < 30 else "DESCRIPTIVE_SAMPLE"
+    await message.answer(
+        "<b>PAPER Copy · Performance Separation</b>\n\n"
+        f"Candidates / accepted / rejected: <b>{stats['policy_eligible']} / {stats['policy_accepted']} / {stats['policy_rejected']}</b>\n"
+        f"Opened / closed: <b>{stats['execution_opened']} / {stats['execution_closed']}</b>\n"
+        f"Pure strategy W/L/BE: <b>{stats['strategy_wins']}/{stats['strategy_losses']}/{stats['strategy_breakeven']}</b>\n"
+        f"Expectancy / PF: <b>{'n/a' if expectancy is None else f'{expectancy:+.2f}R'} / {'n/a' if pf is None else f'{pf:.2f}'}</b>\n"
+        f"Average win / loss: <b>{average_win_text} / {average_loss_text}</b>\n"
+        f"Gross PnL / fees / net: <b>${stats['actual_gross_pnl']:+,.2f} / ${stats['actual_fees']:,.2f} / ${stats['actual_net_pnl']:+,.2f}</b>\n"
+        f"Average slippage: <b>{stats['actual_average_slippage_pct']:.4f}%</b>\n"
+        f"Evidence state: <code>{evidence}</code>\n\n"
+        "Admission outcomes: <code>/copy_rejections</code> · rejected-signal outcomes: <code>/copy_guardrails</code>\n"
+        "PAPER results are descriptive and do not establish future profitability.")
+
+
 def _control_values(parts: list[str]) -> list[str]:
     return [value.strip() for chunk in parts for value in chunk.split(",") if value.strip()]
 

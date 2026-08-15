@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from database.database import connect
+from services.capabilities import CapabilityService
 
 PREMIUM_STARS = int(os.getenv("PREMIUM_STARS", "199"))
 PREMIUM_DAYS = int(os.getenv("PREMIUM_DAYS", "30"))
@@ -8,36 +9,34 @@ CRYPTO_PAYMENT_TEXT = os.getenv("CRYPTO_PAYMENT_TEXT", "Crypto payments are temp
 
 
 class PremiumService:
-    def grant(self, telegram_id: int, days: int = PREMIUM_DAYS, tier: str = "PREMIUM") -> str:
+    def __init__(self) -> None:
+        self.entitlements = CapabilityService()
+
+    def grant(self, telegram_id: int, days: int = PREMIUM_DAYS, tier: str = "PRO") -> str:
         now = datetime.now(timezone.utc)
-        with connect() as conn:
-            row = conn.execute("SELECT premium_until FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
-            base = now
-            if row and row[0]:
-                try:
-                    existing = datetime.fromisoformat(row[0])
-                    if existing > now:
-                        base = existing
-                except ValueError:
-                    pass
-            until = base + timedelta(days=days)
-            conn.execute("UPDATE users SET premium=1,premium_tier=?,premium_until=? WHERE telegram_id=?", (tier, until.isoformat(), telegram_id))
-        return until.isoformat()
+        current = self.entitlements.plan(telegram_id)
+        remaining = 0
+        if current.get("expires_at"):
+            try:
+                expiry = datetime.fromisoformat(str(current["expires_at"]).replace("Z", "+00:00"))
+                remaining = max(0, (expiry - now).days)
+            except ValueError:
+                remaining = 0
+        assigned = self.entitlements.assign_plan(
+            telegram_id, tier, source="TELEGRAM_STARS",
+            duration_days=max(1, int(days)) + remaining,
+            audit_metadata={"payment_product": "PRO_30_DAY"},
+        )
+        return str(assigned["expires_at"])
 
     def status(self, telegram_id: int) -> dict:
-        now = datetime.now(timezone.utc)
+        plan = self.entitlements.plan(telegram_id)
         with connect() as conn:
-            row = conn.execute("SELECT premium,premium_tier,premium_until,notifications_enabled FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
-        if not row:
-            return {"active": False, "tier": "FREE", "until": None, "notifications": True}
-        active = bool(row[0])
-        until = row[2]
-        if until:
-            try:
-                active = active and datetime.fromisoformat(until) > now
-            except ValueError:
-                active = False
-        return {"active": active, "tier": row[1] or "FREE", "until": until, "notifications": bool(row[3])}
+            row = conn.execute("SELECT notifications_enabled FROM users WHERE telegram_id=?",
+                               (telegram_id,)).fetchone()
+        return {"active": plan["plan"] != "FREE", "tier": plan["plan"],
+                "until": plan["expires_at"], "notifications": bool(row[0]) if row else True,
+                "source": plan["source"], "version": plan["version"]}
 
     def record_payment(self, telegram_id: int, payment) -> bool:
         charge_id = payment.telegram_payment_charge_id

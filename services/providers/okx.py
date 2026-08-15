@@ -1,5 +1,8 @@
 import asyncio
+import logging
+import os
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -13,6 +16,11 @@ class OKXProvider(MarketProvider):
 
     BASE_URL = "https://www.okx.com"
     INSTRUMENT_TTL = 300
+    _request_successes = 0
+    _request_failures = 0
+    _last_success_at: str | None = None
+    _last_failure_at: str | None = None
+    _last_error: str | None = None
 
     def __init__(self) -> None:
         self._instrument_cache: dict[str, dict[str, Any]] = {}
@@ -35,18 +43,68 @@ class OKXProvider(MarketProvider):
         return value
 
     async def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        timeout = aiohttp.ClientTimeout(total=20)
-        headers = {"User-Agent": "LiquidityVision/4.0"}
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(f"{self.BASE_URL}{path}", params=params) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    raise RuntimeError(f"OKX API HTTP {response.status}: {text[:180]}")
-                payload = await response.json()
+        try:
+            attempts = max(1, min(3, int(os.getenv("OKX_PUBLIC_MAX_ATTEMPTS", "2"))))
+        except ValueError:
+            attempts = 2
+        timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
+        headers = {"User-Agent": "LiquidityVisionBot/10.1"}
+        payload: dict[str, Any] | None = None
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            retryable = False
+            try:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                    async with session.get(f"{self.BASE_URL}{path}", params=params) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            retryable = response.status == 429 or response.status >= 500
+                            raise RuntimeError(f"OKX API HTTP {response.status}: {text[:180]}")
+                        payload = await response.json()
+                break
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                last_error, retryable = exc, True
+            except RuntimeError as exc:
+                last_error = exc
+            if not retryable or attempt >= attempts:
+                self._record_request(False, last_error)
+                raise last_error or RuntimeError("OKX public request failed")
+            await asyncio.sleep(.25 * attempt)
+            logging.warning("okx_public_retry path=%s attempt=%s/%s error=%s",
+                            path, attempt, attempts, last_error)
+
+        if payload is None:
+            self._record_request(False, last_error)
+            raise last_error or RuntimeError("OKX public request returned no payload")
 
         if payload.get("code") != "0":
+            self._record_request(False, RuntimeError(str(payload.get("msg") or "OKX API error")))
             raise RuntimeError(payload.get("msg") or "Unknown OKX API error")
+        self._record_request(True)
         return payload
+
+    @classmethod
+    def _record_request(cls, success: bool, error: Exception | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        if success:
+            cls._request_successes += 1
+            cls._last_success_at = now
+            cls._last_error = None
+        else:
+            cls._request_failures += 1
+            cls._last_failure_at = now
+            cls._last_error = str(error)[:300] if error else "UNKNOWN"
+
+    @classmethod
+    def health_snapshot(cls) -> dict[str, Any]:
+        return {"provider": "OKX", "instrument": "USDT_PERPETUAL_SWAP",
+                "source_mixing": False, "safe_get_retries": True,
+                "request_successes": cls._request_successes,
+                "request_failures": cls._request_failures,
+                "last_success_at": cls._last_success_at,
+                "last_failure_at": cls._last_failure_at,
+                "last_error": cls._last_error,
+                "status": "DEGRADED" if cls._last_error else "HEALTHY"}
 
     async def _load_swap_instruments(self, force: bool = False) -> dict[str, dict[str, Any]]:
         now = time.monotonic()

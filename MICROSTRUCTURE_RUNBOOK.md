@@ -51,3 +51,11 @@ FAIL:
 - observer failure propagating into signal analysis or execution.
 
 Disable only this path with `MICROSTRUCTURE_COLLECTION_ENABLED=false`. Existing intelligence snapshots, analysis, PAPER copy and LIVE gates continue independently.
+# Production enablement
+
+The worker is opt-in and fail-closed. The effective Render service environment must contain
+`MICROSTRUCTURE_COLLECTION_ENABLED=true`. `render.yaml` declares this value, but an existing
+Dashboard variable or a service not synchronized from the Blueprint can supersede it. After
+deployment, `/system_health` must show `ENABLED_BY_CONFIGURATION`; otherwise update the service
+environment and redeploy. The observer uses credential-empty, bounded BingX public endpoints and
+has no order authority.

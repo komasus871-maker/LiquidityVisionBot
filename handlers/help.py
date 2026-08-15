@@ -2,51 +2,43 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from services.command_catalog import HELP_CATALOG, OPERATOR_HELP, category_text
+
 router = Router()
+
 
 @router.message(Command("help"))
 async def help_command(message: Message):
-    await message.answer("""📚 <b>LIQUIDITY VISION · COMMAND CENTER</b>
+    parts = (message.text or "").split(maxsplit=1)
+    category = parts[1].strip().lower() if len(parts) > 1 else ""
+    aliases = {"premium": "account", "plans": "account"}
+    category = aliases.get(category, category)
+    if category == "operator":
+        await message.answer(f"<b>Liquidity Vision · Operator Reference</b>\n\n{OPERATOR_HELP}")
+        return
+    if category:
+        detail = category_text(category)
+        if detail is None:
+            await message.answer("Unknown help category. Example: <code>/help market</code>")
+            return
+        await message.answer(detail)
+        return
 
-<b>🔎 Market analysis</b>
-/analyze BTC — полный анализ монеты
-/price BTC — текущая цена
-/scanner — поиск сильных сетапов
-/market — обзор рынка
-/news — новости
-/fear — Fear & Greed / настроение
-
-<b>🧠 Intelligence</b>
-/performance — expectancy, PF, серии и результаты
-/portfolio — позиции, effective risk и концентрация
-/dna — сильные и слабые торговые когорты
-/insights — единый краткий intelligence brief
-/market_story 105 — decision-time market story
-/signal_quality 105 — Signal Quality V3 decomposition
-/liquidity_map BTCUSDT — unresolved/consumed liquidity
-/orderbook BTCUSDT — bounded microstructure aggregate
-/funding BTCUSDT — public funding snapshot
-/open_interest BTCUSDT — public OI snapshot
-/data_health BTCUSDT — feature-family availability
-/contradictions 105 — supports, conflicts and uncertainty
-/quality_report — threshold curves with missed winners
-
-<b>📒 Journal & lifecycle</b>
-/journal — Trade Journal PRO
-/trade 105 — подробности и replay сделки
-/trade 105 close — закрыть активную сделку
-/trade all close или /closeall — закрыть все активные
-/trade stats audit — аудит статистики и дублей
-
-<b>⭐ Personal</b>
-/watchlist — личный watchlist
-/profile — профиль и статистика
-/premium — статус и возможности Premium
-/start — главное меню
-/help — этот список
-
-<b>🛠 Admin</b>
-/admin_status — база, workers и integrity
-/workers — подробная диагностика workers
-
-Примеры: <code>/analyze BTC</code> · <code>/trade 105</code> · <code>/portfolio</code>""", parse_mode="HTML")
+    lines = [
+        "<b>Liquidity Vision Intelligence · Help</b>", "",
+        "Evidence-led market intelligence, research, and PAPER decision support.", "",
+    ]
+    descriptions = {
+        "market": "analysis, story, quality, liquidity and public market data",
+        "trading": "watchlist, journal, replay and PAPER positions",
+        "copy": "PAPER copy policy, queue, fills and diagnostics",
+        "intelligence": "rankings, contradictions and advisory AI observations",
+        "research": "strategy, edge, cohorts and forward validation",
+        "system": "system and data health",
+        "account": "profile, preferences, exchanges and plans",
+    }
+    for name in HELP_CATALOG:
+        lines.append(f"/<b>help {name}</b> — {descriptions[name]}")
+    lines += ["", "Start here: <code>/analyze BTC 1h</code> · <code>/scanner</code>",
+              "PAPER means simulated execution. No analysis or plan guarantees profit."]
+    await message.answer("\n".join(lines))

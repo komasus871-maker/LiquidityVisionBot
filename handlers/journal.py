@@ -58,6 +58,7 @@ def _event_details(raw: str | None) -> dict:
         return {}
 
 
+@router.message(Command("journal"))
 @router.message(F.text == "📒 Journal")
 async def journal_handler(message: Message):
     user_id = message.from_user.id

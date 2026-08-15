@@ -21,11 +21,11 @@ Signals are now converted into deterministic, side-effect-free execution plans b
 
 Each Telegram user can connect an isolated BingX/OKX account. Credentials are encrypted before PostgreSQL storage and authenticated commands resolve them by `telegram_user_id`; user orders never fall back to the bot owner's API key. See `V9_9_0_MULTI_USER_EXCHANGE_ACCOUNTS.md`.
 
-# LiquidityVisionBot v10.0.0
+# LiquidityVisionBot v10.1.0
 
 Telegram trading-intelligence system for market analysis, watchlists, signal lifecycle tracking, trade management, research, and adaptive decision support.
 
-## Autonomous Market Intelligence Platform
+## Intelligence Product Platform
 
 v9.9.18 adds a deterministic, research-only market-story layer built from confirmed candles; a 4H → 1H → 15M hierarchy; family-aware level and liquidity clustering; bounded BingX order-book interaction aggregates; pump/dump exhaustion research; contradiction, confidence and invalidation decomposition; Signal Quality V2; and Signal Ranking V3. New intelligence is captured at decision time and cannot affect deterministic policy, copy admission, risk, sizing, accounting, positions, or exchange execution.
 
@@ -102,7 +102,7 @@ ADMIN_IDS=123456789
 REQUIRE_PERSISTENT_DB=true
 PGSSLMODE=require
 PYTHON_VERSION=3.12.10
-APP_VERSION=9.9.18
+APP_VERSION=10.1.0
 SCHEMA_VERSION=1
 LOG_LEVEL=INFO
 ```

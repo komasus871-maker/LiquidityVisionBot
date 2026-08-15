@@ -20,6 +20,8 @@ from services.user_watchlist import UserWatchlist
 from services.analysis_runtime import run_analysis
 from services.decision_quality import DecisionQualityEngine
 from services.market_context import MarketContextEngine
+from services.capabilities import CapabilityService
+from utils.symbols import normalize_usdt_symbol
 
 router = Router()
 
@@ -34,6 +36,7 @@ resolver = SymbolResolver(market)
 user_watchlist = UserWatchlist()
 decision_quality = DecisionQualityEngine()
 market_context = MarketContextEngine()
+capabilities = CapabilityService()
 
 # Immutable in-process snapshots keep Explain/Similar consistent with the exact
 # analysis the user received. Refresh is the only action that recalculates.
@@ -318,19 +321,53 @@ async def watch_callback(callback: CallbackQuery):
         await callback.answer("Уже находится в Watchlist", show_alert=True)
 
 
+@router.message(Command("watchlist"))
 @router.message(F.text == "⭐ Watchlist")
 async def watchlist_view(message: Message):
+    parts = (message.text or "").split()
+    if len(parts) > 1:
+        action = parts[1].lower()
+        if action not in {"add", "remove"} or len(parts) < 3:
+            await message.answer("Usage: <code>/watchlist add|remove SYMBOL [SYMBOL...]</code>\nExample: <code>/watchlist add BTC SOL</code>")
+            return
+        timeframe = "1h"
+        symbols = parts[2:]
+        if symbols and symbols[-1].lower() in {"15m", "1h", "4h", "1d"}:
+            timeframe = symbols.pop().lower()
+        if not symbols:
+            await message.answer("Provide at least one symbol. Example: <code>/watchlist add BTC SOL</code>")
+            return
+        current = user_watchlist.list(message.from_user.id)
+        limit = capabilities.limits(message.from_user.id)["watchlist_items"]
+        changed, errors = [], []
+        for raw in symbols:
+            try:
+                symbol = normalize_usdt_symbol(raw)
+                if action == "add" and len(current) + len(changed) >= limit:
+                    errors.append(f"Plan limit reached ({limit})")
+                    break
+                result = (user_watchlist.add(message.from_user.id, symbol, timeframe)
+                          if action == "add" else user_watchlist.remove(message.from_user.id, symbol, timeframe))
+                if result:
+                    changed.append(symbol)
+            except ValueError as exc:
+                errors.append(str(exc))
+        summary = f"Watchlist {action}: <b>{', '.join(changed) or 'no changes'}</b>"
+        if errors:
+            summary += "\n" + "\n".join(f"• {error}" for error in errors[:3])
+        await message.answer(summary)
+        return
     rows = user_watchlist.list(message.from_user.id)
     if not rows:
         await message.answer(
-            "⭐ <b>Watchlist пуст</b>\n\n"
-            "Откройте анализ монеты и нажмите кнопку <b>⭐ Watch</b>.",
+            "⭐ <b>Your watchlist is empty</b>\n\n"
+            "Use <code>/watchlist add BTC SOL</code> or the Watch button after analysis.",
             parse_mode="HTML",
         )
         return
 
     import json
-    lines = ["⭐ <b>Your Watchlist</b>", ""]
+    lines = ["⭐ <b>Smart Watchlist</b>", "Ranked by most recent intelligence cycle.", ""]
     for index, row in enumerate(rows, 1):
         snapshot = {}
         try:
@@ -340,14 +377,14 @@ async def watchlist_view(message: Message):
         status = snapshot.get("execution_status") or "INITIALIZING"
         direction = float(snapshot.get("direction_score") or 0)
         readiness = float(snapshot.get("readiness") or 0)
-        checked = row.get("last_checked_at") or row.get("updated_at") or "ещё не проверено"
+        checked = row.get("last_checked_at") or row.get("updated_at") or "waiting for first cycle"
         error = row.get("last_error")
         lines.append(f"{index}. <b>{row['symbol']}</b> · {row['timeframe'].upper()}")
         lines.append(f"   {status} · Dir {direction:.1f} · Ready {readiness:.1f}")
-        lines.append(f"   Проверено: <code>{checked}</code>")
+        lines.append(f"   Checked: <code>{checked}</code>")
         if error:
             lines.append(f"   ⚠️ {str(error)[:160]}")
-    lines.append("\nИспользуйте /analyze ТИКЕР ТФ для быстрого обновления.")
+    lines.append("\nEdit: <code>/watchlist add BTC</code> · <code>/watchlist remove BTC</code>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 

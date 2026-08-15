@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -64,6 +65,28 @@ def _contains_forbidden(value: Any) -> set[str]:
 
 
 class MarketIntelligenceRepository:
+    def strategy_distribution(self, telegram_id: int, limit: int = 500) -> dict[str, Any]:
+        safe = max(1, min(int(limit), 2000))
+        with connect() as conn:
+            rows = conn.execute(f"""SELECT strategy_suitability_json FROM market_intelligence_snapshots
+                WHERE (owner_telegram_id=? OR owner_telegram_id IS NULL)
+                ORDER BY id DESC LIMIT {safe}""", (telegram_id,)).fetchall()
+        counts: dict[str, int] = {}
+        margins: list[float] = []
+        for row in rows:
+            scores = _loads(row["strategy_suitability_json"], {})
+            ranked = sorted(((str(key), float(value)) for key, value in scores.items()),
+                            key=lambda item: (-item[1], item[0]))
+            if not ranked:
+                continue
+            counts[ranked[0][0]] = counts.get(ranked[0][0], 0) + 1
+            if len(ranked) > 1:
+                margins.append(ranked[0][1] - ranked[1][1])
+        return {"snapshots": len(rows), "classified": sum(counts.values()),
+                "distribution": sorted(counts.items(), key=lambda item: (-item[1], item[0])),
+                "average_top_margin": sum(margins) / len(margins) if margins else None,
+                "forced_diversity": False, "execution_authority": False}
+
     """Persistence and read APIs for immutable, advisory market-intelligence rows."""
 
     @staticmethod
@@ -260,27 +283,47 @@ class MarketIntelligenceRepository:
         snapshot = (market or {}).get("full_snapshot") or {}
         derivatives = ((micro or {}).get("aggregate") or {}).get("funding_open_interest") or {}
 
-        def state(available: bool, *, stale: bool = False, insufficient: bool = False) -> str:
+        micro_enabled = os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower() in {
+            "1", "true", "yes", "on"}
+
+        def state(available: bool, *, stale: bool = False, insufficient: bool = False,
+                  missing: str = "UNAVAILABLE") -> str:
             if stale:
                 return "STALE"
             if available and insufficient:
                 return "INSUFFICIENT_HISTORY"
-            return "AVAILABLE" if available else "UNAVAILABLE"
+            return "AVAILABLE" if available else missing
 
         funding_available = derivatives.get("funding_rate") is not None
         oi_available = derivatives.get("open_interest") is not None
         return {
-            "version": "data-availability-v1", "symbol": symbol,
-            "candles": state(bool(market)),
-            "benchmark": state((snapshot.get("relative_strength") or {}).get("status") == "AVAILABLE"),
-            "funding": state(funding_available, stale=bool(micro and micro.get("stale"))),
+            "version": "data-availability-v2", "symbol": symbol,
+            "candles": state(bool(market), missing="DECISION_SNAPSHOT_MISSING"),
+            "benchmark": state((snapshot.get("relative_strength") or {}).get("status") == "AVAILABLE",
+                               missing="SYNCHRONIZED_FRAME_MISSING"),
+            "funding": state(funding_available, stale=bool(micro and micro.get("stale")),
+                             missing=("ENDPOINT_UNAVAILABLE" if micro else
+                                      "WAITING_FOR_FIRST_SAMPLE" if micro_enabled else
+                                      "DISABLED_BY_CONFIGURATION")),
             "open_interest": state(oi_available, stale=bool(micro and micro.get("stale")),
-                                   insufficient=oi_available and derivatives.get("open_interest_change_pct") is None),
-            "microstructure": state(bool(micro), stale=bool(micro and micro.get("stale"))),
-            "liquidity_map": state(bool(snapshot.get("liquidity_map"))),
+                                   insufficient=oi_available and derivatives.get("open_interest_change_pct") is None,
+                                   missing=("ENDPOINT_UNAVAILABLE" if micro else
+                                            "WAITING_FOR_FIRST_SAMPLE" if micro_enabled else
+                                            "DISABLED_BY_CONFIGURATION")),
+            "microstructure": state(bool(micro), stale=bool(micro and micro.get("stale")),
+                                    missing="WAITING_FOR_FIRST_SAMPLE" if micro_enabled else
+                                    "DISABLED_BY_CONFIGURATION"),
+            "liquidity_map": state(bool(snapshot.get("liquidity_map")),
+                                   missing="DECISION_SNAPSHOT_MISSING"),
             "ordered_path": "INSUFFICIENT_HISTORY",
             "execution_costs": state(bool((snapshot.get("research_policies") or {}).get(
-                "estimated_roundtrip_cost_pct") is not None)),
+                "estimated_roundtrip_cost_pct") is not None), missing="DECISION_SNAPSHOT_MISSING"),
+            "remediation": {
+                "microstructure": ("Set MICROSTRUCTURE_COLLECTION_ENABLED=true and redeploy the Render service."
+                                   if not micro_enabled else "Wait for a successful observer cycle and inspect /system_health."),
+                "benchmark": "Supply a synchronized BTC decision-time frame; never backfill with future candles.",
+                "ordered_path": "Accumulate trustworthy ordered-path observations.",
+            },
             "funding_context": derivatives if funding_available else {},
             "open_interest_context": derivatives if oi_available else {},
             "automatic_policy_change": False,
@@ -324,6 +367,51 @@ class MarketIntelligenceRepository:
                 "threshold_curves": curves, "minimum_sample_gate": 20,
                 "status": "SUFFICIENT" if len(resolved) >= 20 else "INSUFFICIENT_SAMPLES",
                 "automatic_filter_change": False, "profitability_claim": False}
+
+    def quality_exception_cohorts(self, owner_telegram_id: int | None = None) -> dict[str, Any]:
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT m.signal_id,m.overall_quality,
+                m.quality_json,m.reversal_json,s.confidence,o.outcome_json
+                FROM market_intelligence_snapshots m JOIN signals s ON s.id=m.signal_id
+                JOIN research_signal_snapshots r ON r.snapshot_id=m.research_snapshot_id
+                LEFT JOIN research_outcomes o ON o.snapshot_id=m.research_snapshot_id AND o.id=(
+                    SELECT MAX(o2.id) FROM research_outcomes o2 WHERE o2.snapshot_id=m.research_snapshot_id)
+                WHERE r.capture_quality='DECISION_TIME' AND
+                (? IS NULL OR m.owner_telegram_id IS NULL OR m.owner_telegram_id=0 OR m.owner_telegram_id=?)""",
+                (owner_telegram_id, owner_telegram_id)).fetchall()]
+        cohorts = {name: [] for name in (
+            "LOW_QUALITY_WINNER", "HIGH_QUALITY_LOSER", "MISSED_EXPLOSIVE_CONTINUATION",
+            "SUCCESSFUL_EXHAUSTION_REVERSAL", "FAILED_EXHAUSTION_REVERSAL",
+            "LATE_ENTRY_WINNER", "HIGH_CONFIDENCE_LOSER")}
+        for row in rows:
+            outcome = _loads(row.get("outcome_json"), {})
+            pure = outcome.get("pure_market") if isinstance(outcome.get("pure_market"), dict) else {}
+            if not pure.get("eligible") or pure.get("signal_r") is None:
+                continue
+            r_value, quality = float(pure["signal_r"]), float(row.get("overall_quality") or 0)
+            confidence = float(row.get("confidence") or 0)
+            contradictions = " ".join(str(item).lower() for item in
+                                      _loads(row.get("quality_json"), {}).get("contradicting_evidence") or [])
+            reversals = _loads(row.get("reversal_json"), {})
+            exhaustion = any("CONFIRMED" in str(item.get("state") or "")
+                             for item in reversals.values() if isinstance(item, dict))
+            matches = {
+                "LOW_QUALITY_WINNER": quality < 50 and r_value > 0,
+                "HIGH_QUALITY_LOSER": quality >= 70 and r_value < 0,
+                "MISSED_EXPLOSIVE_CONTINUATION": quality < 60 and r_value >= 3,
+                "SUCCESSFUL_EXHAUSTION_REVERSAL": exhaustion and r_value > 0,
+                "FAILED_EXHAUSTION_REVERSAL": exhaustion and r_value <= 0,
+                "LATE_ENTRY_WINNER": "late" in contradictions and r_value > 0,
+                "HIGH_CONFIDENCE_LOSER": confidence >= 80 and r_value < 0,
+            }
+            for name, matched in matches.items():
+                if matched:
+                    cohorts[name].append((int(row["signal_id"]), r_value))
+        return {"cohorts": [{"name": name, "samples": len(values),
+                              "average_r": sum(value for _, value in values) / len(values) if values else None,
+                              "example_signal_ids": [signal_id for signal_id, _ in values[:5]]}
+                             for name, values in cohorts.items()],
+                "automatic_policy_change": False, "profitability_claim": False}
 
     def policy_report(self, policy: str, owner_telegram_id: int | None = None) -> dict[str, Any]:
         normalized = str(policy).upper()

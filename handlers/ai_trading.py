@@ -231,6 +231,8 @@ async def ai_dashboard(message: Message) -> None:
         f"Identity: <code>{identity['identity_checksum'][:16]}</code>\n"
         f"Decisions / provider calls: <code>{report['decisions']} / {report['provider_requests']}</code>\n"
         f"Valid / cache hit ratio: <code>{report['valid_rate']:.1%} / {report['cache_hit_ratio']:.1%}</code>\n"
+        f"Calls / estimated cost avoided: <code>{report['provider_calls_avoided']} / ${escape(report['estimated_cost_avoided_usd'])}</code>\n"
+        f"Average compiled/original context ratio: <code>{report['context_size_ratio']:.1%}</code>\n"
         f"Resolved counterfactuals: <code>{counter['sample_size']}</code>\n"
         f"GPT expectancy / precision / recall: <code>{_metric(counter['gpt_expectancy_r'])} / "
         f"{_metric(counter['precision'], percent=True)} / {_metric(counter['recall'], percent=True)}</code>\n"
@@ -258,6 +260,53 @@ async def ai_history(message: Message) -> None:
             f"<code>{escape(str(row.get('validation_stage') or 'UNKNOWN'))} / "
             f"{escape(str(row.get('validation_code') or 'UNKNOWN'))}</code> · {escape(str(outcome))}")
     await message.answer("🧾 <b>AI observation history</b>\n\n" + ("\n".join(lines) if lines else "No observations found."))
+
+
+@router.message(Command("ai_abstentions"))
+async def ai_abstentions(message: Message) -> None:
+    with connect() as conn:
+        rows = [dict(row) for row in conn.execute("""SELECT signal_id,symbol,timeframe,validation_code,
+            abstention_reason_codes_json,what_would_change_decision_json,opportunity_quality,created_at
+            FROM ai_decisions WHERE telegram_id=? AND recommended_action='ABSTAIN'
+            ORDER BY id DESC LIMIT 12""", (message.from_user.id,)).fetchall()]
+    lines = []
+    for row in rows:
+        genuine = row.get("validation_code") == "VALID"
+        kind = "PROVIDER_ABSTAIN" if genuine else "SAFE_FALLBACK"
+        reasons = ", ".join(map(str, _values(row.get("abstention_reason_codes_json")))) or str(row["validation_code"])
+        changes = ", ".join(map(str, _values(row.get("what_would_change_decision_json"))))
+        line = (f"• <b>#{row['signal_id']} {escape(str(row['symbol']))} {escape(str(row['timeframe']))}</b> "
+                f"· <code>{kind}</code> · Q {float(row.get('opportunity_quality') or 0):.0f}\n"
+                f"  {escape(reasons)}")
+        if changes:
+            line += f"\n  Observable change: {escape(changes[:220])}"
+        lines.append(line)
+    await message.answer("<b>AI Abstentions</b>\n\n" + ("\n\n".join(lines) if lines else
+                         "No abstentions recorded."), parse_mode="HTML")
+
+
+@router.message(Command("ai_failures"))
+async def ai_failures(message: Message) -> None:
+    with connect() as conn:
+        rows = [dict(row) for row in conn.execute("""SELECT signal_id,symbol,timeframe,
+            validation_stage,validation_code,provider_invoked,created_at FROM ai_decisions
+            WHERE telegram_id=? AND validation_code<>'VALID' ORDER BY id DESC LIMIT 15""",
+            (message.from_user.id,)).fetchall()]
+    lines = []
+    for row in rows:
+        code = str(row.get("validation_code") or "UNKNOWN")
+        if code == "CIRCUIT_OPEN":
+            kind = "CIRCUIT_REJECTION"
+        elif code == "CONTEXT_TOO_LARGE" or str(row.get("validation_stage")) in {"DOMAIN_VALIDATION", "MARKET_TRUTH_VALIDATION"}:
+            kind = "CONTEXT_REJECTED"
+        elif row.get("provider_invoked"):
+            kind = "PROVIDER_OR_VALIDATION_FAILURE"
+        else:
+            kind = "PRE_REQUEST_REJECTION"
+        lines.append(f"• <b>#{row['signal_id']} {escape(str(row['symbol']))} {escape(str(row['timeframe']))}</b> "
+                     f"· <code>{kind}</code>\n  {escape(str(row.get('validation_stage') or 'UNKNOWN'))} / {escape(code)}")
+    await message.answer("<b>AI Failures</b>\n\n" + ("\n\n".join(lines) if lines else
+                         "No failures recorded."), parse_mode="HTML")
 
 
 @router.message(Command("ai_regimes"))

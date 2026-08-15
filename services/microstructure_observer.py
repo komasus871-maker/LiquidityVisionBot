@@ -58,9 +58,15 @@ class MicrostructureObserver:
             interval_seconds if interval_seconds is not None else os.getenv("MICROSTRUCTURE_INTERVAL_SECONDS", "60"),
             default=60, minimum=30, maximum=3600,
         )
-        self.enabled = os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower() in {
+        self.configured_value = os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED")
+        self.enabled = (self.configured_value or "false").strip().lower() in {
             "1", "true", "yes", "on",
         }
+        self.configuration_reason = (
+            "ENABLED_BY_CONFIGURATION" if self.enabled else
+            "DISABLED_BY_CONFIGURATION" if self.configured_value is not None else
+            "DISABLED_DEFAULT_EXPLICIT_OPT_IN_REQUIRED"
+        )
         self.max_symbols = _bounded_int(os.getenv("MICROSTRUCTURE_MAX_SYMBOLS", "8"),
                                         default=8, minimum=1, maximum=20)
         self.samples_per_symbol = _bounded_int(os.getenv("MICROSTRUCTURE_SAMPLES_PER_SYMBOL", "5"),
@@ -106,7 +112,12 @@ class MicrostructureObserver:
 
     async def check_once(self) -> dict[str, Any]:
         if not self.enabled:
-            return {"skipped": True, "reason": "DISABLED", "symbols": 0, "persisted": 0, "errors": 0}
+            details = {"skipped": True, "reason": self.configuration_reason,
+                       "enabled": False, "configured_value": self.configured_value,
+                       "symbols": 0, "persisted": 0, "errors": 0}
+            runtime_finished(self.worker_name, processed=0, errors=0, details=details)
+            return {"skipped": True, "reason": "DISABLED", "symbols": 0,
+                    "persisted": 0, "errors": 0}
         if self._cycle_lock.locked():
             return {"skipped": True, "reason": "LOCAL_BUSY", "symbols": 0, "persisted": 0, "errors": 0}
         async with self._cycle_lock:
@@ -195,8 +206,10 @@ class MicrostructureObserver:
 
     async def run_forever(self) -> None:
         logging.info(
-            "MicrostructureObserver started: enabled=%s interval=%ss max_symbols=%s samples=%s",
-            self.enabled, self.interval_seconds, self.max_symbols, self.samples_per_symbol,
+            "MicrostructureObserver started: enabled=%s reason=%s configured_value=%r interval=%ss "
+            "max_symbols=%s samples=%s",
+            self.enabled, self.configuration_reason, self.configured_value,
+            self.interval_seconds, self.max_symbols, self.samples_per_symbol,
         )
         while not self._stop.is_set():
             try:

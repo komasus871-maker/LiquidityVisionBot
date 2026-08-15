@@ -898,6 +898,58 @@ def create_tables() -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS user_plan_assignments(
+                id {id_col}, telegram_id BIGINT NOT NULL UNIQUE, plan_key TEXT NOT NULL,
+                plan_version TEXT NOT NULL, source TEXT NOT NULL, granted_at TEXT NOT NULL,
+                expires_at TEXT, override INTEGER NOT NULL DEFAULT 1,
+                audit_metadata_json TEXT NOT NULL DEFAULT '{{}}', updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS entitlement_audit_events(
+                id {id_col}, telegram_id BIGINT NOT NULL, actor_telegram_id BIGINT,
+                event_type TEXT NOT NULL, plan_key TEXT, capability TEXT, source TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{{}}', created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS user_preferences(
+                telegram_id BIGINT PRIMARY KEY, preferred_symbols_json TEXT NOT NULL DEFAULT '[]',
+                preferred_timeframes_json TEXT NOT NULL DEFAULT '[]',
+                preferred_strategies_json TEXT NOT NULL DEFAULT '[]',
+                alert_verbosity TEXT NOT NULL DEFAULT 'COMPACT',
+                notification_categories_json TEXT NOT NULL DEFAULT '[]',
+                language TEXT NOT NULL DEFAULT 'en', output_mode TEXT NOT NULL DEFAULT 'COMPACT',
+                risk_presentation TEXT NOT NULL DEFAULT 'R', updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS intelligence_alert_events(
+                id {id_col}, alert_key TEXT NOT NULL UNIQUE, telegram_id BIGINT NOT NULL,
+                symbol TEXT NOT NULL, timeframe TEXT NOT NULL, alert_type TEXT NOT NULL,
+                severity TEXT NOT NULL, entitlement_capability TEXT,
+                details_json TEXT NOT NULL, status TEXT NOT NULL,
+                occurred_at TEXT NOT NULL, delivered_at TEXT, suppressed_reason TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS feature_usage_events(
+                id {id_col}, event_key TEXT NOT NULL UNIQUE, telegram_id BIGINT,
+                capability TEXT NOT NULL, plan_key TEXT NOT NULL, outcome TEXT NOT NULL,
+                provider TEXT, estimated_cost_usd NUMERIC(18,8) NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{{}}', created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS operational_retention_runs(
+                id {id_col}, run_key TEXT NOT NULL UNIQUE, policy_version TEXT NOT NULL,
+                status TEXT NOT NULL, deleted_counts_json TEXT NOT NULL,
+                cutoffs_json TEXT NOT NULL, error_text TEXT, started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS paper_order_events(
                 id {id_col}, order_id BIGINT NOT NULL, idempotency_key TEXT NOT NULL, telegram_id BIGINT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, actor TEXT NOT NULL, reason_code TEXT NOT NULL,
@@ -1054,6 +1106,17 @@ def create_tables() -> None:
             "material_state_checksum": "TEXT",
             "provider_attempt_count": "INTEGER NOT NULL DEFAULT 0",
             "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            "context_compiler_version": "TEXT",
+            "context_feature_version": "TEXT",
+            "original_context_chars": "INTEGER NOT NULL DEFAULT 0",
+            "compiled_context_chars": "INTEGER NOT NULL DEFAULT 0",
+            "context_budget_chars": "INTEGER NOT NULL DEFAULT 0",
+            "context_budget_utilization": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "context_sections_included_json": "TEXT NOT NULL DEFAULT '[]'",
+            "context_sections_omitted_json": "TEXT NOT NULL DEFAULT '[]'",
+            "estimated_cost_avoided_usd": "NUMERIC(18,8) NOT NULL DEFAULT 0",
+            "abstention_reason_codes_json": "TEXT NOT NULL DEFAULT '[]'",
+            "what_would_change_decision_json": "TEXT NOT NULL DEFAULT '[]'",
         }.items():
             _add_column(conn, "ai_decisions", name, definition)
         for name, definition in {
@@ -1203,6 +1266,10 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_microstructure_symbol_time ON microstructure_aggregates(symbol,sampled_at)",
             "CREATE INDEX IF NOT EXISTS idx_microstructure_expiry ON microstructure_aggregates(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_capability_entitlements_user ON capability_entitlements(telegram_id,capability)",
+            "CREATE INDEX IF NOT EXISTS idx_plan_assignments_expiry ON user_plan_assignments(plan_key,expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_entitlement_audit_user_time ON entitlement_audit_events(telegram_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_intelligence_alert_user_time ON intelligence_alert_events(telegram_id,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_feature_usage_user_cap_time ON feature_usage_events(telegram_id,capability,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",
             "CREATE INDEX IF NOT EXISTS idx_watch_states_owner ON watch_states(telegram_id)",

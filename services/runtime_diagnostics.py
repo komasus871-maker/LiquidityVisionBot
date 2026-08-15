@@ -13,6 +13,7 @@ from version import APP_VERSION
 from services.execution_repositories import ExecutionRepository
 from services.live_readiness import configured_mode
 from services.ai_trading import configured_capabilities
+from services.providers.okx import OKXProvider
 _STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -63,9 +64,35 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         except (TypeError, ValueError, json.JSONDecodeError):
             item["details"] = {}
         item.pop("details_json", None)
+        configured_enabled = not (
+            item.get("worker_name") == "microstructure_observer" and
+            os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower()
+            not in {"1", "true", "yes", "on"}
+        )
+        item["enabled"] = configured_enabled
+        item["configuration_reason"] = (
+            "ENABLED_BY_CONFIGURATION" if configured_enabled else "DISABLED_BY_CONFIGURATION")
+        item["health_status"] = (
+            "DISABLED" if not configured_enabled else
+            "FAILED" if item.get("last_error") and int(item.get("error_count") or 0) > 0 else
+            "DEGRADED" if item["stale"] else "HEALTHY"
+        )
         workers.append(item)
         if item["stale"]:
             stale_workers.append(str(item.get("worker_name")))
+
+    if not any(item.get("worker_name") == "microstructure_observer" for item in workers):
+        micro_enabled = os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower() in {
+            "1", "true", "yes", "on"}
+        workers.append({
+            "worker_name": "microstructure_observer", "enabled": micro_enabled,
+            "configuration_reason": ("ENABLED_BY_CONFIGURATION" if micro_enabled else
+                                     "DISABLED_BY_CONFIGURATION"),
+            "health_status": "NOT_STARTED" if micro_enabled else "DISABLED",
+            "stale": bool(micro_enabled), "running": False, "age_seconds": None,
+            "cycle_seconds": None, "processed_count": 0, "error_count": 0,
+            "last_error": None, "details": {},
+        })
 
     with connect() as conn:
         counts = {
@@ -157,6 +184,15 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "max_concurrency": max(1, int(os.getenv("AI_MAX_CONCURRENCY", "2"))),
             "capabilities": asdict(configured_capabilities(os.getenv("AI_PROVIDER_PROTOCOL", "chat_completions").strip().lower())),
             "provider_state": ai_provider_rows,
+        },
+        "market_data": {
+            "primary_provider": OKXProvider.health_snapshot(),
+            "microstructure_enabled": os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
+            "microstructure_configuration": (
+                "ENABLED_BY_CONFIGURATION" if os.getenv("MICROSTRUCTURE_COLLECTION_ENABLED", "false").strip().lower()
+                in {"1", "true", "yes", "on"} else "DISABLED_BY_CONFIGURATION"),
+            "required_render_variable": "MICROSTRUCTURE_COLLECTION_ENABLED=true",
         },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "environment": os.getenv("RENDER_SERVICE_NAME") or os.getenv("ENVIRONMENT", "local"),
