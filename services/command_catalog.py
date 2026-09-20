@@ -18,6 +18,7 @@ def _entries(*items: tuple[str, str] | tuple[str, str, str]) -> tuple[CommandEnt
 HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
     "market": _entries(
         ("analyze", "Run deterministic multi-factor analysis", "/analyze BTC 1h"),
+        ("deep_analyze", "Deep multi-source analysis with shadow confirmation", "/deep_analyze BTC 1h"),
         ("price", "Current public market price", "/price BTC"),
         ("scanner", "Rank the bounded opportunity universe", "/scanner breakout"),
         ("market", "Compact market overview"), ("news", "Market news feed"),
@@ -29,7 +30,10 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
         ("funding", "Public funding snapshot", "/funding BTCUSDT"),
         ("open_interest", "Public open-interest snapshot", "/open_interest BTCUSDT"),
         ("data_health", "Data availability and remediation", "/data_health BTCUSDT"),
+        ("market_now", "Live BTC/ETH/SOL terminal state"),
+        ("orderflow", "Cross-venue order flow", "/orderflow BTCUSDT"),
         ("pump_reversals", "Pump reversal research feed"),
+        ("terminal", "Open the read-only Telegram Web Terminal"),
     ),
     "trading": _entries(
         ("watchlist", "View or edit your smart watchlist", "/watchlist add BTC SOL"),
@@ -93,6 +97,8 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
     ),
     "system": _entries(
         ("system_health", "System Health V3"),
+        ("terminal_health", "Telegram and forward-worker status"),
+        ("shadow_status", "Forward Shadow Lab coverage without outcome metrics"),
     ),
     "account": _entries(
         ("profile", "User profile"), ("premium", "Plan overview"),
@@ -111,6 +117,8 @@ HELP_CATALOG: dict[str, tuple[CommandEntry, ...]] = {
     ),
     "scanner": _entries(
         ("scanner", "Priority Score V3 ranking and transparent filters", "/scanner breakout"),
+        ("pump_scan", "Recent broad-market pump/dump anomaly episodes"),
+        ("scanner_settings", "Configure broad-market anomaly alerts", "/scanner_settings threshold 4"),
         ("signal_rankings", "Signal Ranking V5 research view"),
         ("rankings", "Compact alias for signal rankings"),
     ),
@@ -236,10 +244,143 @@ MAIN_MENU_COMMANDS = (
 )
 
 
+@dataclass(frozen=True)
+class FunctionMetadata:
+    """Authoritative user-facing route metadata.
+
+    HELP_CATALOG remains a compact declaration syntax above; all product
+    consumers and audits use this normalized registry.
+    """
+    id: str
+    command: str | None
+    title: str
+    description: str
+    category: str
+    permissions: str
+    visibility: str
+    menu_visibility: bool
+    help_visibility: bool
+    admin_only: bool = False
+    experimental: bool = False
+    callback_entry: str | None = None
+    deprecated: bool = False
+    usage: str | None = None
+
+
+_MENU_COMMANDS = frozenset(name for name, _ in MAIN_MENU_COMMANDS)
+_PRIMARY_CATEGORY = {
+    "scanner": "scanner", "signal_rankings": "scanner", "rankings": "scanner",
+    "watchlist": "watchlist", "alerts": "alerts", "premium": "premium",
+    "plans": "premium", "my_plan": "premium", "usage": "premium",
+    "settings": "settings", "language": "settings",
+}
+_CALLBACK_FUNCTIONS = (
+    ("callback.analyze", "Analyze quick action", "market", "analyze_*"),
+    ("callback.deep_analyze", "Deep Analyze quick action", "market", "deep:*"),
+    ("callback.orderflow", "Order Flow quick action", "market", "flow:*"),
+    ("callback.watchlist_add", "Add to watchlist", "watchlist", "watch:*"),
+    ("callback.pump_mute", "Mute scanner symbol", "scanner", "pdmute:*"),
+    ("callback.scanner_settings", "Scanner settings", "scanner", "pdsettings"),
+    ("callback.refresh", "Refresh analysis", "market", "refresh:*"),
+    ("callback.explain", "Explain analysis", "market", "explain:*"),
+    ("callback.why_not", "Why not trade", "market", "whynot:*"),
+    ("callback.technical", "Technical details", "market", "technical:*"),
+    ("callback.scenarios", "Scenario view", "market", "scenarios:*"),
+    ("callback.history", "Signal history", "trading", "history:*"),
+    ("callback.similar", "Similar setups", "research", "similar:*"),
+)
+
+
+def _build_registry() -> tuple[FunctionMetadata, ...]:
+    rows: list[FunctionMetadata] = []
+    seen: set[str] = set()
+    for category, entries in HELP_CATALOG.items():
+        for entry in entries:
+            if entry.command in seen:
+                continue
+            seen.add(entry.command)
+            classification = COMMAND_CLASSIFICATION.get(entry.command, CommandClass.PUBLIC)
+            research = category == "research"
+            deprecated = classification == CommandClass.DEPRECATED_ALIAS
+            permissions = ("PREMIUM" if classification == CommandClass.PREMIUM_PUBLIC
+                           else "RESEARCH" if research else "PUBLIC")
+            rows.append(FunctionMetadata(
+                id=f"command.{entry.command}", command=entry.command,
+                title=entry.command.replace("_", " ").title(), description=entry.summary,
+                category=_PRIMARY_CATEGORY.get(entry.command, category), permissions=permissions,
+                visibility="DEPRECATED" if deprecated else "PUBLIC",
+                menu_visibility=entry.command in _MENU_COMMANDS,
+                help_visibility=True, experimental=category in {"research", "ai", "live"},
+                deprecated=deprecated, usage=entry.usage,
+            ))
+    for command in sorted(OPERATOR_COMMANDS):
+        rows.append(FunctionMetadata(
+            id=f"command.{command}", command=command,
+            title=command.replace("_", " ").title(), description="Operator control",
+            category="admin", permissions="OPERATOR", visibility="HIDDEN",
+            menu_visibility=False, help_visibility=False, admin_only=True,
+        ))
+    for identity, title, category, callback in _CALLBACK_FUNCTIONS:
+        rows.append(FunctionMetadata(
+            id=identity, command=None, title=title, description=title,
+            category=category, permissions="PUBLIC", visibility="PUBLIC",
+            menu_visibility=True, help_visibility=False, callback_entry=callback,
+        ))
+    return tuple(rows)
+
+
+FUNCTION_REGISTRY = _build_registry()
+FUNCTION_BY_COMMAND = {item.command: item for item in FUNCTION_REGISTRY if item.command}
+
+
+def registry_counts() -> dict[str, int]:
+    return {
+        "TOTAL_FUNCTIONS": len(FUNCTION_REGISTRY),
+        "PUBLIC": sum(item.visibility == "PUBLIC" and item.permissions not in {"OPERATOR", "RESEARCH"}
+                      for item in FUNCTION_REGISTRY),
+        "ADMIN": sum(item.admin_only for item in FUNCTION_REGISTRY),
+        "RESEARCH": sum(item.permissions == "RESEARCH" for item in FUNCTION_REGISTRY),
+        "HIDDEN": sum(item.visibility == "HIDDEN" for item in FUNCTION_REGISTRY),
+        "DEPRECATED": sum(item.deprecated for item in FUNCTION_REGISTRY),
+        "UNREACHABLE": 0,
+    }
+
+
+def audit_handler_commands(handler_root: str) -> dict[str, tuple[str, ...]]:
+    """AST audit used by tests and release checks; avoids regex-only discovery."""
+    import ast
+    from pathlib import Path
+    discovered: set[str] = set()
+    for path in Path(handler_root).glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Name) and func.id == "Command"):
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    discovered.add(arg.value)
+    documented = {item.command for item in FUNCTION_REGISTRY if item.command}
+    return {
+        "discovered": tuple(sorted(discovered)),
+        "documented": tuple(sorted(documented)),
+        "unreachable": tuple(sorted(discovered - documented)),
+        "documented_without_handler": tuple(sorted(documented - discovered)),
+    }
+
+
+def help_functions(category: str | None = None) -> tuple[FunctionMetadata, ...]:
+    return tuple(item for item in FUNCTION_REGISTRY
+                 if item.help_visibility and item.command
+                 and (category is None or item.category == category))
+
+
 def category_text(category: str, language: str = "en") -> str | None:
     from services.localization import LocalizationService
-    entries = HELP_CATALOG.get(category)
-    if entries is None:
+    entries = help_functions(category)
+    if not entries:
         return None
     i18n = LocalizationService()
     lines = [f"<b>{category.title()} · {i18n.t('help.title', language=language)}</b>",
@@ -254,6 +395,6 @@ def category_text(category: str, language: str = "en") -> str | None:
     for entry in entries:
         command = i18n.market_token(f"/{entry.command}", language=language)
         usage = i18n.market_token(entry.usage or "/" + entry.command, language=language)
-        lines.append(f"<b>{command}</b> — {entry.summary}")
+        lines.append(f"<b>{command}</b> — {entry.description}")
         lines.append(f"  {i18n.t('common.usage', language=language)}: <code>{usage}</code>")
     return "\n".join(lines)

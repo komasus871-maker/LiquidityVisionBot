@@ -6,26 +6,19 @@ def main_keyboard():
     kb = ReplyKeyboardBuilder()
 
     buttons = [
-
-        "📊 Analyze",
-
-        "🔍 Analyze Coin",
-
-        "🔥 Scanner",
-
-        "📈 Market",
-
-        "😨 Fear",
-
-        "📰 News",
-
-        "📒 Journal",
-
-        "⭐ Watchlist",
-
-        "👤 Profile",
-
-        "👑 Premium"
+        "📊 Markets",
+        "🔍 Analyze",
+        "⚡ Scanner",
+        "🎯 Signals",
+        "🌊 Order Flow",
+        "📈 Paper",
+        "🧪 Shadow Lab",
+        "💼 Portfolio",
+        "🛡 Risk",
+        "🔔 Alerts",
+        "⚙ Settings",
+        "🩺 System",
+        "🚀 Open Terminal",
 
     ]
 

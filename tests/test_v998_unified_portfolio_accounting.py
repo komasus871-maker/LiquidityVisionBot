@@ -7,6 +7,7 @@ from database.database import DBRow
 from services.execution_models import CopyExecutionPlan, ExecutionPlanStatus, RiskProfile
 from services.execution_portfolio import ExecutionPortfolioEngine
 from services.execution_validator import ExecutionValidator
+from tests.authority_contract_fixture import approved_signal
 from services.paper_execution_lifecycle import PaperExecutionLifecycle
 from services.copy_trading import CopyTradingService
 
@@ -105,8 +106,8 @@ def test_validator_unresolved_prevents_admission(tmp_path, monkeypatch):
     setup_db(tmp_path, monkeypatch)
     from services.execution_models import PortfolioState
     decision = ExecutionValidator().validate(
-        signal={"status":"ACTIVE", "side":"LONG", "entry":100, "stop":90,
-                "tp1":110, "tp2":120, "tp3":130},
+        signal=approved_signal({"status":"ACTIVE", "side":"LONG", "entry":100, "stop":90,
+                "tp1":110, "tp2":120, "tp3":130}),
         profile=RiskProfile(), balance=10_000,
         portfolio=PortfolioState(portfolio_state_resolved=False,
                                  unified_unresolved_risk_positions=1),

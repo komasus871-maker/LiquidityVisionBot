@@ -23,6 +23,8 @@ from services.market_context import MarketContextEngine
 from services.capabilities import CapabilityService
 from services.localization import LocalizationService
 from services.public_errors import public_error_message
+from services.forward_runtime_state import ForwardRuntimeStateRepository
+from services.trade_confirmation import TradeConfirmationEngine, current_market_inputs, render_quality_card
 from utils.symbols import normalize_usdt_symbol
 
 router = Router()
@@ -40,6 +42,8 @@ decision_quality = DecisionQualityEngine()
 market_context = MarketContextEngine()
 capabilities = CapabilityService()
 i18n = LocalizationService()
+confirmation_engine = TradeConfirmationEngine()
+forward_state = ForwardRuntimeStateRepository()
 
 # Immutable in-process snapshots keep Explain/Similar consistent with the exact
 # analysis the user received. Refresh is the only action that recalculates.
@@ -87,7 +91,7 @@ async def _run_analysis(symbol: str, timeframe: str = "1h"):
     analysis = probability_engine.enrich(
         analysis, symbol=symbol, timeframe=timeframe, setup_key=setup_key,
     )
-    return decision_quality.enrich(analysis)
+    return decision_quality.enrich(analysis, source="MANUAL_ANALYZE")
 
 
 async def _send_analysis(message: Message, symbol: str, timeframe: str, user_id: int, chat_id: int):
@@ -109,6 +113,7 @@ async def _send_analysis(message: Message, symbol: str, timeframe: str, user_id:
 
 
 @router.message(F.text == "📊 Analyze")
+@router.message(F.text == "🔍 Analyze")
 async def analyze_menu(message: Message):
     await message.answer(
         "📊 Выберите монету или нажмите «🔍 Analyze Coin» для любого тикера:",
@@ -322,6 +327,62 @@ async def watch_callback(callback: CallbackQuery):
         await callback.answer("Добавлено в Watchlist ⭐", show_alert=True)
     else:
         await callback.answer("Уже находится в Watchlist", show_alert=True)
+
+
+async def _send_deep_analysis(message: Message, symbol: str, timeframe: str, user_id: int) -> None:
+    analysis = await _snapshot_or_run(user_id, symbol, timeframe)
+    canonical = normalize_usdt_symbol(symbol)
+    market_inputs = current_market_inputs(forward_state.latest_states((canonical,)))
+    confirmation = confirmation_engine.evaluate(analysis, market_inputs)
+    direction = str(analysis.get("direction") or "NEUTRAL")
+    action = str((analysis.get("unified_decision") or {}).get("action")
+                 or analysis.get("decision_action") or analysis.get("recommendation") or "NO_TRADE")
+    contradictions = analysis.get("contradictions") or analysis.get("risks") or []
+    if isinstance(contradictions, dict):
+        contradictions = list(contradictions.values())
+    lines = [
+        f"🔬 <b>DEEP ANALYZE · {canonical} · {timeframe.upper()}</b>",
+        "<i>TRADE SIGNAL assessment remains under DecisionQuality authority</i>", "",
+        f"Directional thesis: <b>{direction}</b>",
+        f"DecisionQuality action: <b>{action}</b>",
+    ]
+    if contradictions:
+        lines += ["", "<b>Contradictory evidence</b>"]
+        for item in contradictions[:5]:
+            if isinstance(item, dict):
+                item = item.get("reason") or item.get("description") or item.get("code") or str(item)
+            lines.append(f"• {item}")
+    if action.upper() in {"NO_TRADE", "REJECT", "WAIT", "ABSTAIN"}:
+        lines += ["", "<b>NO_TRADE</b> — the authoritative base decision did not approve an entry."]
+    lines += ["", render_quality_card(confirmation)]
+    await message.answer("\n".join(lines)[:4090], parse_mode="HTML")
+
+
+@router.message(Command("deep_analyze"))
+async def deep_analyze(message: Message) -> None:
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: <code>/deep_analyze BTC [15m|1h|4h|1d]</code>")
+        return
+    timeframe = parts[2].lower() if len(parts) > 2 else "1h"
+    if timeframe not in {"15m", "1h", "4h", "1d"}:
+        await message.answer("Supported timeframes: 15m, 1h, 4h, 1d")
+        return
+    try:
+        resolved = await resolver.resolve(parts[1], interval=timeframe)
+        await _send_deep_analysis(message, resolved.base, timeframe, message.from_user.id)
+    except Exception as exc:
+        await message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
+
+
+@router.callback_query(F.data.startswith("deep:"))
+async def deep_analyze_callback(callback: CallbackQuery) -> None:
+    _, symbol, timeframe = callback.data.split(":", 2)
+    await callback.answer("Building deep analysis…")
+    try:
+        await _send_deep_analysis(callback.message, symbol, timeframe, callback.from_user.id)
+    except Exception as exc:
+        await callback.message.answer(f"❌ {public_error_message(exc, context='ANALYSIS')}")
 
 
 @router.message(Command("watchlist"))

@@ -18,6 +18,7 @@ class OperationalRetentionService:
         "ai_provider_request_events": "PROVIDER_EVENT_RETENTION_DAYS",
         "feature_usage_events": "FEATURE_USAGE_RETENTION_DAYS",
         "intelligence_alert_events": "ALERT_EVENT_RETENTION_DAYS",
+        "market_anomaly_events": "ALERT_EVENT_RETENTION_DAYS",
         "microstructure_aggregates": "MICROSTRUCTURE_RETENTION_DAYS",
         "market_source_snapshots": "DERIVATIVES_RETENTION_DAYS",
     }

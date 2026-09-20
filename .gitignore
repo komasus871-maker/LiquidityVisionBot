@@ -16,6 +16,7 @@ venv/
 *.sqlite3
 data/*
 !data/.gitkeep
+research_artifacts/
 
 # IDE / OS
 .vscode/

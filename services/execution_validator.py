@@ -10,6 +10,7 @@ from services.execution_models import ExecutionDecision, PortfolioState, Positio
 from services.position_sizer import PositionSizer
 from services.copy_training import CopyTrainingPolicy
 from services.copy_controls import normalize_copy_symbol, normalize_setup, normalize_timeframe
+from services.decision_quality import DecisionQualityEngine
 
 
 class ExecutionValidator:
@@ -33,6 +34,13 @@ class ExecutionValidator:
     ) -> ExecutionDecision:
         state = portfolio or PortfolioState(open_positions=open_positions, current_heat_r=current_heat_r)
         policy = training_policy or CopyTrainingPolicy()
+        authorized, admission_code = DecisionQualityEngine.authorization(signal)
+        if not authorized:
+            return ExecutionDecision(
+                False,
+                admission_code,
+                "Signal lacks an approved authoritative trade decision",
+            )
         if policy.blocked:
             return ExecutionDecision(False, policy.code, policy.reason, training_sample_size=policy.sample_size)
         if str(signal.get("status")) not in {"ACTIVE", "TP1", "TP2"}:

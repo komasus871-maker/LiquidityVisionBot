@@ -1,4 +1,5 @@
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.types import Message
 from services.scanner import Scanner
 
@@ -6,6 +7,7 @@ router = Router(); scanner = Scanner()
 
 
 @router.message(F.text == "📈 Market")
+@router.message(Command("market"))
 async def market_handler(message: Message):
     wait = await message.answer("📈 Формирую обзор рынка...")
     data = await scanner.market_overview()

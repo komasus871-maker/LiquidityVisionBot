@@ -294,13 +294,13 @@ class LiveExecutionQueueRepository:
         allowed = {
             "CLAIMED": {"SUBMITTING", "REJECTED", "RECOVERY_REQUIRED"},
             "SUBMITTING": {"ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED", "REJECTED", "UNKNOWN",
-                           "RECOVERY_REQUIRED"},
+                           "CANCELED", "RECOVERY_REQUIRED"},
             "ACKNOWLEDGED": {"PARTIALLY_FILLED", "FILLED", "CANCEL_PENDING", "RECOVERY_REQUIRED"},
             "PARTIALLY_FILLED": {"FILLED", "CANCEL_PENDING", "RECOVERY_REQUIRED"},
             "CANCEL_PENDING": {"CANCELED", "UNKNOWN"},
             "UNKNOWN": {"RECOVERY_REQUIRED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED"},
             "RECOVERY_REQUIRED": {"RETRY_WAIT", "ACKNOWLEDGED", "PARTIALLY_FILLED",
-                                  "FILLED", "REJECTED"},
+                                  "FILLED", "CANCELED", "REJECTED"},
         }
         if target not in allowed.get(expected, set()):
             raise ValueError("LIVE_QUEUE_TRANSITION_INVALID")
@@ -445,7 +445,8 @@ class LiveRecoveryService:
                 raise PermissionError("RECOVERY_RECONCILIATION_MISMATCH")
             with connect() as conn:
                 unresolved = conn.execute("""SELECT COUNT(*) n FROM live_executions
-                    WHERE account_id=? AND state IN ('UNKNOWN','RECOVERY_REQUIRED')""", (account_id,)).fetchone()
+                    WHERE account_id=? AND state IN ('SUBMITTING','SUBMITTED','UNKNOWN',
+                        'RECONCILING','RECOVERY_REQUIRED')""", (account_id,)).fetchone()
             if int(unresolved["n"] or 0):
                 raise PermissionError("RECOVERY_UNKNOWN_EXECUTIONS")
         except Exception as exc:
@@ -566,6 +567,7 @@ class LiveCopyDispatcher:
         target = {LiveExecutionState.ACKNOWLEDGED: "ACKNOWLEDGED",
                   LiveExecutionState.PARTIALLY_FILLED: "PARTIALLY_FILLED",
                   LiveExecutionState.FILLED: "FILLED",
+                  LiveExecutionState.CANCELLED: "CANCELED",
                   LiveExecutionState.UNKNOWN: "UNKNOWN"}.get(result.state, "REJECTED")
         self.queue.transition(int(row["id"]), "SUBMITTING", target,
                               execution_id=result.execution_id,
@@ -738,6 +740,8 @@ class LiveCopyWorker:
             LiveExecutionState.ACKNOWLEDGED: "ACKNOWLEDGED",
             LiveExecutionState.PARTIALLY_FILLED: "PARTIALLY_FILLED",
             LiveExecutionState.FILLED: "FILLED",
+            LiveExecutionState.CANCELLED: "CANCELED",
+            LiveExecutionState.REJECTED: "REJECTED",
         }.get(result.state)
         if target:
             self.queue.transition(int(row["id"]), "RECOVERY_REQUIRED", target,

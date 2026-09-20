@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -39,6 +39,7 @@ async def performance_handler(message: Message):
 
 
 @router.message(Command("portfolio"))
+@router.message(F.text == "💼 Portfolio")
 async def portfolio_handler(message: Message):
     r = engine.portfolio(message.from_user.id)
     if not r["active"]:

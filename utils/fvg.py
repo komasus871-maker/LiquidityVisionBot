@@ -1,3 +1,6 @@
+import numpy as np
+
+
 class FVG:
 
     def __init__(self, df):
@@ -5,60 +8,40 @@ class FVG:
         self.df = df
 
     def bullish(self):
-
-        candles = self.df.reset_index(drop=True)
-
-        gaps = []
-
-        for i in range(2, len(candles)):
-
-            c1 = candles.iloc[i - 2]
-            c2 = candles.iloc[i - 1]
-            c3 = candles.iloc[i]
-
-            if c1["high"] < c3["low"]:
-
-                gaps.append({
-
-                    "type": "bullish",
-
-                    "low": float(c1["high"]),
-
-                    "high": float(c3["low"]),
-
-                    "index": i
-
-                })
-
-        return gaps
+        # This is the exact three-candle predicate used by the original loop.
+        # NumPy removes tens of thousands of per-row Pandas ``iloc`` calls from
+        # expanding-prefix research replays without changing gap identity,
+        # ordering, bounds, or the causal information available at a prefix.
+        highs = self.df["high"].to_numpy()
+        lows = self.df["low"].to_numpy()
+        if len(highs) < 3:
+            return []
+        indices = np.flatnonzero(highs[:-2] < lows[2:]) + 2
+        return [
+            {
+                "type": "bullish",
+                "low": float(highs[index - 2]),
+                "high": float(lows[index]),
+                "index": int(index),
+            }
+            for index in indices
+        ]
 
     def bearish(self):
-
-        candles = self.df.reset_index(drop=True)
-
-        gaps = []
-
-        for i in range(2, len(candles)):
-
-            c1 = candles.iloc[i - 2]
-            c2 = candles.iloc[i - 1]
-            c3 = candles.iloc[i]
-
-            if c1["low"] > c3["high"]:
-
-                gaps.append({
-
-                    "type": "bearish",
-
-                    "low": float(c3["high"]),
-
-                    "high": float(c1["low"]),
-
-                    "index": i
-
-                })
-
-        return gaps
+        lows = self.df["low"].to_numpy()
+        highs = self.df["high"].to_numpy()
+        if len(lows) < 3:
+            return []
+        indices = np.flatnonzero(lows[:-2] > highs[2:]) + 2
+        return [
+            {
+                "type": "bearish",
+                "low": float(highs[index]),
+                "high": float(lows[index - 2]),
+                "index": int(index),
+            }
+            for index in indices
+        ]
 
     def active(self):
 

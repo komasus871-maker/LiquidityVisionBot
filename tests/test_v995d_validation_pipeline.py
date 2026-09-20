@@ -15,6 +15,7 @@ from services.execution_validation_pipeline import (
     PlanIdentityValidator,
 )
 from version import APP_VERSION, RELEASE_NAME
+from tests.authority_contract_fixture import approved_signal
 
 
 def _db(tmp_path, monkeypatch) -> None:
@@ -24,7 +25,7 @@ def _db(tmp_path, monkeypatch) -> None:
 
 
 def _plan():
-    signal = {
+    signal = approved_signal({
         "id": 9954,
         "symbol": "BTCUSDT",
         "timeframe": "1h",
@@ -39,7 +40,7 @@ def _plan():
         "confidence": 80.0,
         "preferred_entry_low": 99.0,
         "preferred_entry_high": 101.0,
-    }
+    })
     return CopyExecutionPlanner().build(
         telegram_id=54,
         signal=signal,

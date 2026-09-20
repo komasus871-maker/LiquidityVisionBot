@@ -2,7 +2,9 @@ services:
   - type: web
     name: liquidityvisionbot-1
     runtime: python
-    plan: free
+    plan: 0.5c-512mb
+    numInstances: 1
+    maxShutdownDelaySeconds: 60
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     healthCheckPath: /health
@@ -24,6 +26,14 @@ services:
         sync: false
       - key: BOT_MODE
         value: webhook
+      - key: ENVIRONMENT
+        value: production
+      - key: EXECUTION_MODE
+        value: PAPER
+      - key: FORWARD_WORKER_EXPECTED
+        value: "true"
+      - key: FORWARD_HEARTBEAT_STALE_SECONDS
+        value: "180"
       - key: OKX_PUBLIC_MAX_ATTEMPTS
         value: "2"
       - key: BOT_TOKEN
@@ -115,7 +125,15 @@ services:
       - key: SCALPING_LATENCY_PENALTY_PCT
         value: "0.01"
       - key: MICROSTRUCTURE_COLLECTION_ENABLED
+        value: "false"
+      - key: PUMP_SCANNER_ENABLED
         value: "true"
+      - key: PUMP_SCANNER_INTERVAL_SECONDS
+        value: "60"
+      - key: PUMP_SCANNER_UNIVERSE_LIMIT
+        value: "40"
+      - key: PUMP_SCANNER_CONCURRENCY
+        value: "5"
       - key: MICROSTRUCTURE_SYMBOLS
         value: BTCUSDT
       - key: MICROSTRUCTURE_INTERVAL_SECONDS
@@ -141,6 +159,8 @@ services:
       - key: MICROSTRUCTURE_MAX_LEVELS
         value: "50"
       - key: LIVE_EXECUTION_ENABLED
+        value: "false"
+      - key: LIVE_DISPATCHER_ENABLED
         value: "false"
       - key: LIVE_EXCHANGE_BINGX_ENABLED
         value: "false"
@@ -288,3 +308,62 @@ services:
         value: "199"
       - key: PREMIUM_DAYS
         value: "30"
+
+  - type: worker
+    name: liquidityvision-forward-worker
+    runtime: python
+    plan: 0.5c-512mb
+    numInstances: 1
+    maxShutdownDelaySeconds: 120
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m tools.run_forward_microstructure_collector
+    autoDeploy: true
+    disk:
+      name: forward-evidence
+      mountPath: /var/data
+      sizeGB: 100
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: REQUIRE_PERSISTENT_DB
+        value: "true"
+      - key: PGSSLMODE
+        value: require
+      - key: FORWARD_COLLECTION_ENABLED
+        value: "true"
+      - key: FORWARD_VENUES
+        value: BINANCE,OKX,BINGX
+      - key: FORWARD_SYMBOLS
+        value: BTCUSDT,ETHUSDT,SOLUSDT
+      - key: FORWARD_STORAGE_ROOT
+        value: /var/data/forward_microstructure
+      - key: FORWARD_METADATA_DB
+        value: /var/data/forward_microstructure/forward-metadata.sqlite3
+      - key: FORWARD_RAW_PARTITION_ROOT
+        value: /var/data/forward_microstructure/raw
+      - key: FORWARD_FEATURE_INTERVAL_MS
+        value: "1000"
+      - key: FORWARD_MIN_FREE_BYTES
+        value: "10737418240"
+      - key: FORWARD_LEASE_SECONDS
+        value: "120"
+      - key: FORWARD_PREVIOUS_EVIDENCE_END_UTC
+        value: "2026-09-20T11:30:50.504000Z"
+      - key: LIVE_EXECUTION_ENABLED
+        value: "false"
+      - key: LIVE_DISPATCHER_ENABLED
+        value: "false"
+      - key: ALLOW_USER_LIVE_CONNECTIONS
+        value: "false"
+      - key: BINGX_PRODUCTION_ADAPTER_ALLOWED
+        value: "false"
+      - key: COPY_EXECUTION_ENABLED
+        value: "false"
+      - key: EXECUTION_MODE
+        value: SHADOW
+      - key: LOG_LEVEL
+        value: INFO

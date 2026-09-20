@@ -173,6 +173,7 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "live_queue_planned": _scalar(conn, "SELECT COUNT(*) FROM live_execution_queue WHERE state IN ('PLANNED','RETRY_WAIT')"),
             "live_queue_claimed": _scalar(conn, "SELECT COUNT(*) FROM live_execution_queue WHERE state IN ('CLAIMED','SUBMITTING')"),
             "live_queue_recovery": _scalar(conn, "SELECT COUNT(*) FROM live_execution_queue WHERE state IN ('UNKNOWN','RECOVERY_REQUIRED')"),
+            "live_execution_recovery": _scalar(conn, "SELECT COUNT(*) FROM live_executions WHERE state IN ('SUBMITTING','SUBMITTED','UNKNOWN','RECONCILING','RECOVERY_REQUIRED')"),
             "live_daily_pnl_failures": _scalar(conn, "SELECT COUNT(*) FROM live_daily_pnl_snapshots WHERE state='FAILED'"),
             "live_active_kill_switches": _scalar(conn, "SELECT COUNT(*) FROM live_kill_switches WHERE active=1"),
             "bingx_certification_passed": _scalar(conn, "SELECT COUNT(*) FROM bingx_certification_audits WHERE status='VST_ECONOMIC_PASSED'"),
@@ -227,6 +228,21 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
     elif stale_workers:
         status = "warning"
 
+    try:
+        from services.forward_runtime_state import ForwardRuntimeStateRepository
+        forward_health = ForwardRuntimeStateRepository().health()
+    except Exception as exc:
+        forward_health = {"state": "UNAVAILABLE", "last_error": str(exc)[:200],
+                          "execution_authority": False}
+    forward_expected = os.getenv("FORWARD_WORKER_EXPECTED", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if forward_expected:
+        forward_heartbeat = _parse_time((forward_health or {}).get("heartbeat_at"))
+        forward_age = int((now - forward_heartbeat).total_seconds()) if forward_heartbeat else None
+        if forward_age is None or forward_age > max(30, int(os.getenv("FORWARD_HEARTBEAT_STALE_SECONDS", "180"))):
+            status = "warning" if status == "ok" else status
+
     return {
         "status": status,
         "service": "Liquidity Vision Intelligence",
@@ -259,6 +275,12 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
                 source.lower(): MarketIntelligenceRepository().pipeline_diagnostics("BTCUSDT", source)
                 for source in ("DEPTH", "FUNDING", "OPEN_INTEREST")
             },
+        },
+        "forward_lab": {
+            "expected": forward_expected,
+            "health": forward_health,
+            "candidate_outcomes_exposed": False,
+            "execution_authority": False,
         },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "live": {

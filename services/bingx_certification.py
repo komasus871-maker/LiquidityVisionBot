@@ -157,7 +157,9 @@ class BingXCertificationService:
             account_id=account_id, exchange="bingx", mode=ExecutionMode.LIVE,
             request=entry_request, readiness_passed=True, authority_source="VST_CERTIFICATION",
         )
-        if entry.state is not LiveExecutionState.ACKNOWLEDGED:
+        if entry.state not in {LiveExecutionState.ACKNOWLEDGED,
+                               LiveExecutionState.PARTIALLY_FILLED,
+                               LiveExecutionState.FILLED}:
             return self._economic_report(telegram_id, account_id, base, "VST_ENTRY_NOT_ACKNOWLEDGED", 1)
         entry_execution = coordinator.repository.get(entry.execution_id)
         entry_fills = []
@@ -170,8 +172,10 @@ class BingXCertificationService:
             return self._economic_report(telegram_id, account_id, base, "VST_ENTRY_FILL_UNVERIFIED", 1)
         filled_qty, _, _ = coordinator.repository.ingest_fills(entry_execution, entry_fills)
         target = LiveExecutionState.FILLED if filled_qty >= Decimal(str(entry_execution["quantity"])) else LiveExecutionState.PARTIALLY_FILLED
-        coordinator.repository.transition(entry.execution_id, LiveExecutionState.ACKNOWLEDGED, target,
-                                          exchange_order_id=entry.exchange_order_id)
+        current_entry_state = LiveExecutionState(coordinator.repository.get(entry.execution_id)["state"])
+        if current_entry_state is not target:
+            coordinator.repository.transition(entry.execution_id, current_entry_state, target,
+                                              exchange_order_id=entry.exchange_order_id)
         close_side = "SELL"
         close_key = f"{economic_key}:close"
         close_request = ExchangeOrderRequest(
@@ -184,7 +188,9 @@ class BingXCertificationService:
             account_id=account_id, exchange="bingx", mode=ExecutionMode.LIVE,
             request=close_request, readiness_passed=True, authority_source="VST_CERTIFICATION",
         )
-        if close.state is not LiveExecutionState.ACKNOWLEDGED:
+        if close.state not in {LiveExecutionState.ACKNOWLEDGED,
+                               LiveExecutionState.PARTIALLY_FILLED,
+                               LiveExecutionState.FILLED}:
             return self._economic_report(telegram_id, account_id, base, "VST_CLOSE_NOT_ACKNOWLEDGED", 2)
         close_execution = coordinator.repository.get(close.execution_id)
         close_fills = []
@@ -197,8 +203,10 @@ class BingXCertificationService:
             return self._economic_report(telegram_id, account_id, base, "VST_CLOSE_FILL_UNVERIFIED", 2)
         close_qty, _, _ = coordinator.repository.ingest_fills(close_execution, close_fills)
         close_target = LiveExecutionState.FILLED if close_qty >= filled_qty else LiveExecutionState.PARTIALLY_FILLED
-        coordinator.repository.transition(close.execution_id, LiveExecutionState.ACKNOWLEDGED, close_target,
-                                          exchange_order_id=close.exchange_order_id)
+        current_close_state = LiveExecutionState(coordinator.repository.get(close.execution_id)["state"])
+        if current_close_state is not close_target:
+            coordinator.repository.transition(close.execution_id, current_close_state, close_target,
+                                              exchange_order_id=close.exchange_order_id)
         positions = [item for item in await self.adapter.positions()
                      if item.symbol.replace("-", "").upper() == symbol.replace("-", "").upper() and item.quantity > 0]
         blocker = None if not positions and close_target is LiveExecutionState.FILLED else "VST_ZERO_EXPOSURE_UNVERIFIED"

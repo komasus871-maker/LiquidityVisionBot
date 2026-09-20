@@ -2,11 +2,12 @@ from database.database import create_tables
 from services.copy_execution_journal import CopyExecutionJournal, JournalStatus
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.execution_models import RiskProfile
+from tests.authority_contract_fixture import approved_signal
 
 
 def signal():
-    return {"id": 994, "symbol": "BTCUSDT", "timeframe": "1h", "side": "LONG", "status": "ACTIVE", "entry": 100,
-            "current_price": 100, "stop": 98, "tp1": 104, "tp2": 106, "tp3": 108, "confidence": 80, "preferred_entry_low": 99, "preferred_entry_high": 101}
+    return approved_signal({"id": 994, "symbol": "BTCUSDT", "timeframe": "1h", "side": "LONG", "status": "ACTIVE", "entry": 100,
+            "current_price": 100, "stop": 98, "tp1": 104, "tp2": 106, "tp3": 108, "confidence": 80, "preferred_entry_low": 99, "preferred_entry_high": 101})
 
 
 def test_journal_status_contract():

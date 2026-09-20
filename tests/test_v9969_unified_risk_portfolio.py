@@ -6,6 +6,7 @@ from services.copy_trading import CopyTradingService
 from services.execution_models import CopyExecutionPlan, ExecutionPlanStatus, RiskProfile
 from services.execution_repositories import ExecutionRepository
 from services.execution_validator import ExecutionValidator
+from tests.authority_contract_fixture import APPROVED_FEATURES_JSON, approved_signal
 from services.paper_execution_lifecycle import PaperExecutionLifecycle
 
 
@@ -26,12 +27,12 @@ def plan(user_id: int, signal_id: int, key: str) -> CopyExecutionPlan:
 
 
 def signal() -> dict:
-    return {
+    return approved_signal({
         "id": 9999, "symbol": "ETHUSDT", "timeframe": "1h", "side": "LONG",
         "status": "ACTIVE", "entry": 100.0, "current_price": 100.0, "stop": 98.0,
         "tp1": 104.0, "tp2": 106.0, "tp3": 108.0, "confidence": 80.0,
         "preferred_entry_low": 99.0, "preferred_entry_high": 101.0,
-    }
+    })
 
 
 def test_unified_only_position_contributes_confirmed_heat(tmp_path, monkeypatch):
@@ -73,8 +74,8 @@ def test_legacy_unified_duplicate_does_not_double_count_heat(tmp_path, monkeypat
                    bull_score,bear_score,recommendation,setup_key,features_json,reasons_json,
                    created_at,updated_at
                ) VALUES(301,'BTCUSDT','1h','LONG','ACTIVE',100,90,110,120,130,2,80,
-                        70,30,'BUY','setup','{}','[]',?,?)""",
-            (now, now),
+                        70,30,'BUY','setup',?,'[]',?,?)""",
+            (APPROVED_FEATURES_JSON, now, now),
         )
         conn.execute(
             """INSERT INTO paper_positions(

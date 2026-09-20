@@ -27,8 +27,9 @@ class MarketService:
     def run(self, context: AnalysisContext) -> dict[str, Any]:
         df = context.dataframe
         close = float(df["close"].iloc[-1])
-        ema50 = float(ema(df, 50).iloc[-1])
-        ema200 = float(ema(df, 200).iloc[-1])
+        cached = (getattr(df, "attrs", {}) or {}).get("_lv_research_causal_cache") == "causal-prefix-features-v1"
+        ema50 = float(df["__lv_ema50"].iloc[-1]) if cached else float(ema(df, 50).iloc[-1])
+        ema200 = float(df["__lv_ema200"].iloc[-1]) if cached else float(ema(df, 200).iloc[-1])
         result = {
             "price": close,
             "ema50": ema50,
@@ -44,10 +45,11 @@ class StructureService:
 
     def run(self, context: AnalysisContext) -> dict[str, Any]:
         df = context.dataframe
+        cached = (getattr(df, "attrs", {}) or {}).get("_lv_research_causal_cache") == "causal-prefix-features-v1"
         structure = Structure(df)
         result = {
-            "structure": structure.market_structure(),
-            "bos": structure.bos(),
+            "structure": df["__lv_structure"].iloc[-1] if cached else structure.market_structure(),
+            "bos": df["__lv_bos"].iloc[-1] if cached else structure.bos(),
             "choch": CHOCH(df).analyze(),
         }
         context.publish("structure", result)
@@ -59,14 +61,15 @@ class LiquidityService:
 
     def run(self, context: AnalysisContext) -> dict[str, Any]:
         df = context.dataframe
+        cached = (getattr(df, "attrs", {}) or {}).get("_lv_research_causal_cache") == "causal-prefix-features-v1"
         result = {
             "liquidity": Liquidity(df).analyze(),
-            "sweep": Sweep(df).analyze(),
+            "sweep": df["__lv_sweep"].iloc[-1] if cached else Sweep(df).analyze(),
             "order_block": OrderBlocks(df).analyze(),
             "breaker": BreakerBlock(df).analyze(),
             "mitigation": MitigationBlock(df).analyze(),
-            "fvg": FVG(df).analyze(),
-            "premium": PremiumDiscount(df).analyze(),
+            "fvg": df["__lv_fvg"].iloc[-1] if cached else FVG(df).analyze(),
+            "premium": df["__lv_premium"].iloc[-1] if cached else PremiumDiscount(df).analyze(),
         }
         context.publish("liquidity", result)
         return result
@@ -76,7 +79,9 @@ class VolumeService:
     name = "volume"
 
     def run(self, context: AnalysisContext) -> dict[str, Any]:
-        result = {"volume": VolumeProfile(context.dataframe).analyze()}
+        frame = context.dataframe
+        cached = (getattr(frame, "attrs", {}) or {}).get("_lv_research_causal_cache") == "causal-prefix-features-v1"
+        result = {"volume": frame["__lv_volume"].iloc[-1] if cached else VolumeProfile(frame).analyze()}
         context.publish("volume", result)
         return result
 
@@ -86,15 +91,20 @@ class MomentumService:
 
     def run(self, context: AnalysisContext) -> dict[str, Any]:
         df = context.dataframe
-        macd_line, signal = macd(df)
-        macd_now = float(macd_line.iloc[-1])
-        signal_now = float(signal.iloc[-1])
+        cached = (getattr(df, "attrs", {}) or {}).get("_lv_research_causal_cache") == "causal-prefix-features-v1"
+        if cached:
+            macd_now = float(df["__lv_macd_line"].iloc[-1])
+            signal_now = float(df["__lv_macd_signal"].iloc[-1])
+        else:
+            macd_line, signal = macd(df)
+            macd_now = float(macd_line.iloc[-1])
+            signal_now = float(signal.iloc[-1])
         result = {
-            "rsi": float(rsi(df).iloc[-1]),
+            "rsi": float(df["__lv_rsi"].iloc[-1]) if cached else float(rsi(df).iloc[-1]),
             "macd": "🟢 Bullish" if macd_now > signal_now else "🔴 Bearish",
             "macd_bullish": macd_now > signal_now,
-            "displacement": Displacement(df).analyze(),
-            "atr": ATR(df).analyze(),
+            "displacement": df["__lv_displacement"].iloc[-1] if cached else Displacement(df).analyze(),
+            "atr": df["__lv_atr"].iloc[-1] if cached else ATR(df).analyze(),
         }
         context.publish("momentum", result)
         return result
@@ -107,7 +117,10 @@ class RegimeService:
         self.engine = engine or MarketRegimeEngine()
 
     def run(self, context: AnalysisContext) -> dict[str, Any]:
-        result = {"market_regime": self.engine.analyze(context.dataframe)}
+        frame = context.dataframe
+        cached = (getattr(frame, "attrs", {}) or {}).get("_lv_research_causal_cache") == "causal-prefix-features-v1"
+        result = {"market_regime": (frame["__lv_market_regime"].iloc[-1]
+                                    if cached else self.engine.analyze(frame))}
         context.publish("regime", result)
         return result
 

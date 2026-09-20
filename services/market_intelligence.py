@@ -13,6 +13,8 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 import pandas as pd
 
+from utils.timeframe import TIMEFRAME_SECONDS
+
 
 INTELLIGENCE_VERSION = "market-intelligence-v5"
 STORY_VERSION = "market-story-v2"
@@ -20,12 +22,6 @@ LEVEL_VERSION = "level-intelligence-v1"
 MICROSTRUCTURE_VERSION = "microstructure-v3"
 QUALITY_VERSION = "signal-quality-v4"
 RANK_VERSION = "signal-ranking-v5"
-
-TIMEFRAME_SECONDS = {
-    "1m": 60, "3m": 180, "5m": 300, "15m": 900,
-    "1h": 3600, "4h": 14400, "1d": 86400,
-}
-
 
 def _number(value: Any, default: float = 0.0) -> float:
     try:

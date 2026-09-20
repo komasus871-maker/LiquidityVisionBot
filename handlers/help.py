@@ -4,7 +4,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from services.command_catalog import HELP_CATALOG, OPERATOR_HELP, category_text
+from services.command_catalog import FUNCTION_REGISTRY, OPERATOR_HELP, category_text, help_functions
 from services.localization import LocalizationService
 from services.operator_authorization import OperatorAuthorizationService, OperatorCapability
 
@@ -31,16 +31,16 @@ async def help_command(message: Message):
             return
         matches = []
         seen = set()
-        for name, entries in HELP_CATALOG.items():
-            for entry in entries:
+        for entry in help_functions():
+                name = entry.category
                 if entry.command in seen:
                     continue
-                haystack = f"{entry.command} {entry.summary} {entry.usage or ''}".lower()
+                haystack = f"{entry.command} {entry.description} {entry.usage or ''}".lower()
                 if query in haystack:
                     seen.add(entry.command)
                     matches.append((name, entry))
         lines = [f"<b>Command search · {escape(query)}</b>", ""]
-        lines.extend(f"/<b>{entry.command}</b> · {escape(name)} — {escape(entry.summary)}"
+        lines.extend(f"/<b>{entry.command}</b> · {escape(name)} — {escape(entry.description)}"
                      for name, entry in matches[:20])
         await message.answer("\n".join(lines + ([] if matches else ["No matching public command."])))
         return
@@ -80,7 +80,8 @@ async def help_command(message: Message):
         "ai": "advisory AI observations, identity, cost and history",
         "live": "per-user exchange readiness, risk, reconciliation and explicit LIVE state",
     }
-    for name in HELP_CATALOG:
+    category_order = tuple(dict.fromkeys(item.category for item in FUNCTION_REGISTRY if item.help_visibility))
+    for name in category_order:
         purpose = i18n.t(f"help.{name}", language=language)
         lines.append(f"/<b>help {name}</b> — {purpose if purpose != i18n.t('common.unavailable', language=language) else descriptions[name]}")
     lines += ["", "Start here: <code>/analyze BTC 1h</code> · <code>/scanner</code>",

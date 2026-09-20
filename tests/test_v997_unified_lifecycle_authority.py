@@ -4,6 +4,7 @@ from database.database import connect, create_tables
 from services.copy_trading import CopyTradingService
 from services.execution_repositories import ExecutionRepository
 from services.portfolio_reconciliation import PortfolioReconciliationService
+from tests.authority_contract_fixture import APPROVED_FEATURES_JSON
 
 
 NOW = "2026-07-24T00:00:00+00:00"
@@ -27,8 +28,8 @@ def seed_user_and_signal(user_id: int, signal_id: int, status: str = "ACTIVE") -
                    rr,confidence,bull_score,bear_score,recommendation,setup_key,
                    features_json,reasons_json,created_at,updated_at
                ) VALUES(?, 'BTCUSDT','1h','LONG',?,100,100,90,110,120,130,
-                        2,80,70,30,'BUY','setup','{}','[]',?,?)""",
-            (signal_id, status, NOW, NOW),
+                        2,80,70,30,'BUY','setup',?,'[]',?,?)""",
+            (signal_id, status, APPROVED_FEATURES_JSON, NOW, NOW),
         )
     return signal_row(signal_id)
 

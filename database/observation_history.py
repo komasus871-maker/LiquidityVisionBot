@@ -13,7 +13,10 @@ class ObservationHistory:
         features = {k: analysis.get(k) for k in (
             "trend", "structure", "bos", "choch", "liquidity", "sweep", "order_block", "breaker",
             "mitigation", "fvg", "premium", "volume", "displacement", "rsi", "macd", "ema50", "ema200",
-            "reasons", "triggers", "alternative_conditions"
+            "reasons", "triggers", "alternative_conditions", "data_quality",
+            "decision_authority", "decision_version", "decision_source", "decision_outcome",
+            "decision_gate_passed", "decision_veto_reasons", "decision_path", "decision_timestamp",
+            "decision_data_quality", "promotion_admission"
         )}
         with connect() as conn:
             row = conn.execute(
@@ -22,7 +25,7 @@ class ObservationHistory:
                    ORDER BY id DESC LIMIT 1""",
                 (owner_telegram_id, symbol.upper(), timeframe),
             ).fetchone()
-            values = (notification_chat_id, analysis.get("direction","LONG"), analysis.get("market_bias",""),
+            values = (notification_chat_id, analysis.get("direction","NEUTRAL"), analysis.get("market_bias",""),
                       analysis.get("execution_status",""), analysis.get("recommendation",""),
                       float(analysis.get("direction_score",0)), float(analysis.get("entry_quality",0)),
                       float(analysis.get("risk_quality",0)), float(analysis.get("execution_readiness",0)),
@@ -38,7 +41,7 @@ class ObservationHistory:
                     (*values, row[0]),
                 )
                 return int(row[0])
-            params = (owner_telegram_id, notification_chat_id, symbol.upper(), timeframe, analysis.get("direction","LONG"),
+            params = (owner_telegram_id, notification_chat_id, symbol.upper(), timeframe, analysis.get("direction","NEUTRAL"),
                  analysis.get("market_bias",""), analysis.get("execution_status",""), analysis.get("recommendation",""),
                  float(analysis.get("direction_score",0)), float(analysis.get("entry_quality",0)),
                  float(analysis.get("risk_quality",0)), float(analysis.get("execution_readiness",0)),

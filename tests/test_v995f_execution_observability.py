@@ -7,6 +7,7 @@ from services.copy_execution_planner import CopyExecutionPlanner
 from services.execution_inspection import ExecutionInspectionService
 from services.execution_models import RiskProfile
 from version import APP_VERSION, RELEASE_NAME
+from tests.authority_contract_fixture import approved_signal
 
 
 def _setup(tmp_path, monkeypatch):
@@ -16,7 +17,7 @@ def _setup(tmp_path, monkeypatch):
 
 
 def _plan(telegram_id: int = 99550):
-    signal = {
+    signal = approved_signal({
         "id": 995501,
         "symbol": "BTCUSDT",
         "timeframe": "1H",
@@ -29,7 +30,7 @@ def _plan(telegram_id: int = 99550):
         "tp2": 106.0,
         "tp3": 108.0,
         "confidence": 90.0,
-    }
+    })
     return CopyExecutionPlanner().build(
         telegram_id=telegram_id,
         signal=signal,

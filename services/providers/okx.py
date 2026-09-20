@@ -8,6 +8,8 @@ from typing import Any
 import aiohttp
 import pandas as pd
 
+from utils.timeframe import normalize_market_timeframe
+
 from .base import MarketProvider
 
 
@@ -206,7 +208,8 @@ class OKXProvider(MarketProvider):
             "1d": "1D",
             "1w": "1W",
         }
-        bar = interval_map.get(interval.lower())
+        canonical_interval = normalize_market_timeframe(interval)
+        bar = interval_map.get(canonical_interval or "")
         if bar is None:
             raise ValueError(f"Unsupported OKX timeframe: {interval}")
 
@@ -238,9 +241,9 @@ class OKXProvider(MarketProvider):
         if not rows:
             raise RuntimeError(f"OKX returned no candles for {inst_id}")
 
-        # OKX returns newest first. Deduplicate pages and restore chronological order.
-        unique_by_ts = {row[0]: row for row in rows}
-        candles = sorted(unique_by_ts.values(), key=lambda row: int(row[0]))[-requested:]
+        # OKX returns newest first. Preserve raw rows: the shared integrity
+        # boundary owns explicit duplicate/conflict and order handling.
+        candles = rows[:requested]
 
         df = pd.DataFrame(
             candles,
@@ -265,4 +268,73 @@ class OKXProvider(MarketProvider):
         df.attrs["instrument_id"] = inst_id
         df.attrs["instrument_type"] = "SWAP"
         df.attrs["tick_size"] = instrument.get("tickSz")
+        df.attrs["market_data_closed_semantics"] = "INCLUDES_FORMING"
+        return df
+
+    async def get_historical_klines(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        limit: int = 9000,
+        *,
+        older_than: str | datetime | pd.Timestamp | None = None,
+    ) -> pd.DataFrame:
+        """Materialize a bounded public-OKX history without runtime cache semantics.
+
+        This research helper keeps the normal provider parsing and public SWAP
+        instrument resolution, but permits more than the runtime 1,000-candle
+        request cap by following OKX's oldest-first pagination cursor. The
+        optional ``older_than`` cursor is research-only: it starts the walk
+        strictly before a supplied UTC boundary so an immutable prior dataset
+        can be extended without refetching its existing range. Callers must
+        still pass the returned frame through DataIntegrityEngine before using
+        it for analysis.
+        """
+        instrument = await self.resolve_instrument(symbol)
+        inst_id = instrument["instId"]
+        interval_map = {
+            "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+            "1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H",
+            "1d": "1D", "1w": "1W",
+        }
+        canonical_interval = normalize_market_timeframe(interval)
+        bar = interval_map.get(canonical_interval or "")
+        if bar is None:
+            raise ValueError(f"Unsupported OKX timeframe: {interval}")
+        requested = max(50, min(int(limit), 12000))
+        rows: list[list[str]] = []
+        cutoff: pd.Timestamp | None = None
+        if older_than is not None:
+            cutoff = pd.Timestamp(older_than)
+            cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+        after: str | None = str(int(cutoff.timestamp() * 1000)) if cutoff is not None else None
+        while len(rows) < requested:
+            batch_limit = min(300, requested - len(rows))
+            params: dict[str, Any] = {"instId": inst_id, "bar": bar, "limit": str(batch_limit)}
+            if after is not None:
+                params["after"] = after
+            payload = await self._request("/api/v5/market/history-candles", params)
+            batch = payload.get("data", [])
+            if not batch:
+                break
+            rows.extend(batch)
+            oldest_ts = str(batch[-1][0])
+            if oldest_ts == after or len(batch) < batch_limit:
+                break
+            after = oldest_ts
+        if not rows:
+            raise RuntimeError(f"OKX returned no historical candles for {inst_id}")
+        df = pd.DataFrame(
+            rows[:requested],
+            columns=["time", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"],
+        )
+        df["time"] = pd.to_datetime(df["time"].astype("int64"), unit="ms", utc=True)
+        for column in ("open", "high", "low", "close", "volume"):
+            df[column] = pd.to_numeric(df[column], errors="raise")
+        df.attrs.update({
+            "exchange": "OKX", "instrument_id": inst_id, "instrument_type": "SWAP",
+            "tick_size": instrument.get("tickSz"), "market_data_closed_semantics": "INCLUDES_FORMING",
+            "historical_pagination": True, "historical_requested_limit": requested,
+            "historical_older_than": cutoff.isoformat() if cutoff is not None else None,
+        })
         return df

@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.types import Message
 
 from services.news import NewsEngine
@@ -77,6 +78,7 @@ def _format_news(items: list[dict]) -> str:
 
 
 @router.message(F.text == "📰 News")
+@router.message(Command("news"))
 async def news_handler(message: Message):
     waiting = await message.answer("📰 Загружаю и оцениваю последние новости…")
     try:

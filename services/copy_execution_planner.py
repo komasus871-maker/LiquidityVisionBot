@@ -55,7 +55,15 @@ class CopyExecutionPlanner:
             side=side,
         )
 
-        if require_auto_copy and not profile.auto_copy:
+        decision = self.validator.validate(
+            signal=signal,
+            profile=profile,
+            balance=max(0.0, float(balance)),
+            portfolio=portfolio,
+            training_policy=training_policy,
+            market_price=market_price,
+        )
+        if decision.allowed and require_auto_copy and not profile.auto_copy:
             return CopyExecutionPlan(
                 plan_id=idempotency_key,
                 idempotency_key=idempotency_key,
@@ -77,14 +85,6 @@ class CopyExecutionPlanner:
                 profile_snapshot=profile_snapshot,
             )
 
-        decision = self.validator.validate(
-            signal=signal,
-            profile=profile,
-            balance=max(0.0, float(balance)),
-            portfolio=portfolio,
-            training_policy=training_policy,
-            market_price=market_price,
-        )
         size = decision.size
         approved = decision.allowed and size is not None
         return CopyExecutionPlan(

@@ -25,6 +25,7 @@ from services.copy_trading import CopyTradingService
 from services.execution_models import RiskProfile
 from services.execution_repositories import ExecutionRepository
 from services.execution_validator import ExecutionValidator
+from tests.authority_contract_fixture import APPROVED_FEATURES_JSON, approved_signal
 
 
 def setup_db(tmp_path, monkeypatch):
@@ -42,8 +43,8 @@ def seed_signal(signal_id: int, status: str = "ACTIVE", symbol: str = "BTCUSDT")
                    bull_score,bear_score,recommendation,setup_key,features_json,reasons_json,
                    created_at,updated_at
                ) VALUES(?,?, '1h','LONG',?,100,90,110,120,130,2,80,70,30,
-                        'BUY','setup','{}','[]',?,?)""",
-            (signal_id, symbol, status, now, now),
+                        'BUY','setup',?,'[]',?,?)""",
+            (signal_id, symbol, status, APPROVED_FEATURES_JSON, now, now),
         )
 
 
@@ -91,7 +92,7 @@ def seed_unified(
 
 
 def signal(symbol: str = "BTCUSDT") -> dict:
-    return {
+    return approved_signal({
         "id": 9900,
         "symbol": symbol,
         "timeframe": "1h",
@@ -106,7 +107,7 @@ def signal(symbol: str = "BTCUSDT") -> dict:
         "preferred_entry_low": 99.0,
         "preferred_entry_high": 101.0,
         "confidence": 80.0,
-    }
+    })
 
 
 def test_unified_only_symbol_blocks_duplicate_without_affecting_heat(tmp_path, monkeypatch):

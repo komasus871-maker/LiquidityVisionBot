@@ -98,6 +98,11 @@ The bot keeps the original plan immutable after activation, records signal event
 ## Production components
 
 - Telegram webhook or local polling runtime
+- Independent Render forward-data worker with a lease-protected persistent disk
+- Shared PostgreSQL current-market state and forward-worker heartbeat
+- Resource-bounded broad-market anomaly scanner and persistent episodes
+- Authenticated read-only Telegram Mini App terminal
+- Shadow-only trade confirmation and Deep Analyze
 - Binance/OKX-compatible market analysis services
 - Watch Engine, Observation Monitor, and Signal Tracker
 - Persistent signal lifecycle and trade replay
@@ -144,6 +149,19 @@ Render start command:
 ```bash
 python bot.py
 ```
+
+The forward worker starts separately with:
+
+```bash
+python -m tools.run_forward_microstructure_collector
+```
+
+The complete two-service Blueprint, migration boundary, persistent-disk sizing,
+verification, and rollback procedure are documented in
+[`docs/deployment/RENDER_DEPLOYMENT.md`](docs/deployment/RENDER_DEPLOYMENT.md).
+The authoritative command/callback inventory and product authority boundaries
+are documented in
+[`docs/product/FUNCTIONALITY_REGISTRY.md`](docs/product/FUNCTIONALITY_REGISTRY.md).
 
 Health endpoint:
 

@@ -10,6 +10,8 @@ from services.analyzer import Analyzer
 from services.market import Market
 from services.watchlist import WATCHLIST
 from services.decision_quality import DecisionQualityEngine
+from services.probability_engine import ProbabilityEngine
+from services.signal_recorder import SignalRecorder
 
 
 class Scanner:
@@ -25,6 +27,7 @@ class Scanner:
         self.concurrency = max(1, int(os.getenv("SCANNER_CONCURRENCY", "4")))
         self.cache_ttl = max(5, int(os.getenv("SCANNER_CACHE_TTL", "30")))
         self.decision_quality = DecisionQualityEngine()
+        self.probability = ProbabilityEngine()
 
     @classmethod
     def _lock(cls) -> asyncio.Lock:
@@ -37,7 +40,12 @@ class Scanner:
             try:
                 df = await asyncio.wait_for(self.market.get_klines(symbol), timeout=30)
                 result = await asyncio.wait_for(run_analysis(self.analyzer, df, symbol=symbol, timeframe="1h", source="scanner"), timeout=30)
-                result = self.decision_quality.enrich(result)
+                result["symbol"] = symbol
+                result["timeframe"] = "1h"
+                result = self.probability.enrich(
+                    result, symbol=symbol, timeframe="1h", setup_key=SignalRecorder._setup_key(result)
+                )
+                result = self.decision_quality.enrich(result, source="SCANNER")
                 risks = [
                     x.replace("⚠️ ", "").replace("⛔ ", "")
                     for x in result["reasons"]

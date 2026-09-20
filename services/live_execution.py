@@ -11,10 +11,13 @@ from enum import StrEnum
 from database.database import connect
 from services.execution_models import ExecutionMode
 from services.exchanges.base import (
-    ExchangeAdapter, ExchangeError, ExchangeTimeoutError, ExchangeUnsupportedCapabilityError,
+    ExchangeAdapter, ExchangeAuthenticationError, ExchangeConfigurationError, ExchangeError,
+    ExchangeOrderRejectedError, ExchangeRateLimitError, ExchangeTimestampError,
+    ExchangeTimeoutError, ExchangeUnsupportedCapabilityError,
 )
 from services.exchanges.models import (
-    ExchangeCapability, ExchangeFill, ExchangeOrder, ExchangeOrderRequest, SymbolRules,
+    ExchangeCapability, ExchangeFill, ExchangeOrder, ExchangeOrderRequest, ExchangePosition,
+    SymbolRules,
 )
 from services.live_safety import (LiveAuditRepository, LiveKillSwitchRepository,
                                   LiveRiskRepository, intent_checksum)
@@ -35,6 +38,7 @@ class LiveExecutionState(StrEnum):
     RETRY_WAIT = "RETRY_WAIT"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
+    RECONCILING = "RECONCILING"
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 
 
@@ -43,22 +47,49 @@ ALLOWED_LIVE_TRANSITIONS = {
     LiveExecutionState.VALIDATED: {LiveExecutionState.QUEUED, LiveExecutionState.REJECTED},
     LiveExecutionState.QUEUED: {LiveExecutionState.SUBMITTING, LiveExecutionState.CANCELLED},
     LiveExecutionState.SUBMITTING: {LiveExecutionState.SUBMITTED, LiveExecutionState.ACKNOWLEDGED,
+                                    LiveExecutionState.RECONCILING,
                                     LiveExecutionState.UNKNOWN, LiveExecutionState.RETRY_WAIT,
                                     LiveExecutionState.REJECTED, LiveExecutionState.FAILED,
                                     LiveExecutionState.RECOVERY_REQUIRED},
-    LiveExecutionState.SUBMITTED: {LiveExecutionState.ACKNOWLEDGED, LiveExecutionState.UNKNOWN},
+    LiveExecutionState.SUBMITTED: {LiveExecutionState.ACKNOWLEDGED,
+                                   LiveExecutionState.RECONCILING, LiveExecutionState.UNKNOWN},
     LiveExecutionState.ACKNOWLEDGED: {LiveExecutionState.PARTIALLY_FILLED, LiveExecutionState.FILLED,
-                                      LiveExecutionState.CANCEL_PENDING, LiveExecutionState.UNKNOWN},
+                                      LiveExecutionState.CANCEL_PENDING, LiveExecutionState.RECONCILING,
+                                      LiveExecutionState.CANCELLED, LiveExecutionState.REJECTED,
+                                      LiveExecutionState.UNKNOWN, LiveExecutionState.RECOVERY_REQUIRED},
     LiveExecutionState.PARTIALLY_FILLED: {LiveExecutionState.PARTIALLY_FILLED, LiveExecutionState.FILLED,
-                                          LiveExecutionState.CANCEL_PENDING, LiveExecutionState.UNKNOWN},
+                                          LiveExecutionState.CANCEL_PENDING, LiveExecutionState.RECONCILING,
+                                          LiveExecutionState.CANCELLED, LiveExecutionState.REJECTED,
+                                          LiveExecutionState.UNKNOWN, LiveExecutionState.RECOVERY_REQUIRED},
     LiveExecutionState.CANCEL_PENDING: {LiveExecutionState.CANCELLED, LiveExecutionState.UNKNOWN},
     LiveExecutionState.RETRY_WAIT: {LiveExecutionState.SUBMITTING, LiveExecutionState.FAILED},
     LiveExecutionState.UNKNOWN: {LiveExecutionState.ACKNOWLEDGED, LiveExecutionState.PARTIALLY_FILLED,
-                                  LiveExecutionState.FILLED, LiveExecutionState.RECOVERY_REQUIRED},
+                                  LiveExecutionState.FILLED, LiveExecutionState.RECONCILING,
+                                  LiveExecutionState.RECOVERY_REQUIRED},
     LiveExecutionState.RECOVERY_REQUIRED: {LiveExecutionState.ACKNOWLEDGED,
                                             LiveExecutionState.PARTIALLY_FILLED,
-                                            LiveExecutionState.FILLED},
+                                            LiveExecutionState.FILLED,
+                                            LiveExecutionState.RECONCILING},
+    LiveExecutionState.RECONCILING: {LiveExecutionState.ACKNOWLEDGED,
+                                     LiveExecutionState.PARTIALLY_FILLED,
+                                     LiveExecutionState.FILLED,
+                                     LiveExecutionState.CANCELLED,
+                                     LiveExecutionState.REJECTED,
+                                     LiveExecutionState.UNKNOWN,
+                                     LiveExecutionState.RECOVERY_REQUIRED},
 }
+
+
+OPEN_EXCHANGE_STATUSES = frozenset({
+    "NEW", "OPEN", "PENDING", "ACCEPTED", "WORKING", "ACTIVE",
+})
+PARTIAL_EXCHANGE_STATUSES = frozenset({
+    "PARTIALLY_FILLED", "PARTIAL_FILLED", "PARTIALLYFILLED", "PARTIAL",
+})
+FILLED_EXCHANGE_STATUSES = frozenset({"FILLED", "FULLY_FILLED", "CLOSED"})
+CANCELLED_EXCHANGE_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED"})
+REJECTED_EXCHANGE_STATUSES = frozenset({"REJECTED", "FAILED"})
+ORDER_SUMMARY_FILL_PREFIX = "__order_summary__:"
 
 
 def stable_client_order_id(execution_key: str, *, prefix: str = "lv") -> str:
@@ -221,15 +252,55 @@ class LiveExecutionRepository:
 
     def ingest_fills(self, execution: dict, fills: list[ExchangeFill]) -> tuple[Decimal, Decimal, Decimal]:
         now = datetime.now(timezone.utc).isoformat()
+        inserted_count = 0
         with connect() as conn:
+            # An order summary is valid exchange evidence when detailed fills are temporarily
+            # unavailable. Replace that aggregate row as soon as provider fill IDs arrive so
+            # replaying reconciliation cannot double-count the same economic execution.
+            detailed_order_ids = {
+                str(fill.order_id) for fill in fills
+                if not str(fill.fill_id).startswith(ORDER_SUMMARY_FILL_PREFIX)
+            }
+            incomplete_detailed_orders: set[str] = set()
+            for order_id in detailed_order_ids:
+                summary_row = conn.execute("""SELECT COALESCE(SUM(quantity),0) quantity
+                    FROM live_execution_fills WHERE execution_id=? AND exchange_order_id=?
+                      AND exchange_fill_id LIKE ?""",
+                    (execution["id"], order_id, f"{ORDER_SUMMARY_FILL_PREFIX}%")).fetchone()
+                summary_quantity = Decimal(str(summary_row["quantity"] or 0))
+                detailed_quantity = sum(
+                    (fill.quantity for fill in fills
+                     if str(fill.order_id) == order_id
+                     and not str(fill.fill_id).startswith(ORDER_SUMMARY_FILL_PREFIX)),
+                    Decimal("0"),
+                )
+                if summary_quantity and detailed_quantity < summary_quantity:
+                    incomplete_detailed_orders.add(order_id)
+                else:
+                    conn.execute("""DELETE FROM live_execution_fills
+                        WHERE execution_id=? AND exchange_order_id=?
+                          AND exchange_fill_id LIKE ?""",
+                        (execution["id"], order_id, f"{ORDER_SUMMARY_FILL_PREFIX}%"))
             for fill in fills:
-                conn.execute("""
+                is_summary = str(fill.fill_id).startswith(ORDER_SUMMARY_FILL_PREFIX)
+                if not is_summary and str(fill.order_id) in incomplete_detailed_orders:
+                    continue
+                if is_summary:
+                    detailed = conn.execute("""SELECT 1 FROM live_execution_fills
+                        WHERE execution_id=? AND exchange_order_id=?
+                          AND exchange_fill_id NOT LIKE ? LIMIT 1""",
+                        (execution["id"], fill.order_id,
+                         f"{ORDER_SUMMARY_FILL_PREFIX}%")).fetchone()
+                    if detailed:
+                        continue
+                cur = conn.execute("""
                     INSERT INTO live_execution_fills(execution_id,account_id,exchange_fill_id,exchange_order_id,
                         quantity,price,commission,commission_asset,filled_at,created_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,exchange_fill_id) DO NOTHING
                 """, (execution["id"], execution["account_id"], fill.fill_id, fill.order_id,
                       float(fill.quantity), float(fill.price), float(fill.commission), fill.commission_asset,
                       str(fill.filled_at_ms) if fill.filled_at_ms else None, now))
+                inserted_count += cur.rowcount
             rows = conn.execute("SELECT quantity,price,commission FROM live_execution_fills WHERE execution_id=?",
                                 (execution["id"],)).fetchall()
             qty = sum((Decimal(str(r["quantity"])) for r in rows), Decimal("0"))
@@ -270,14 +341,22 @@ class LiveExecutionRepository:
                 execution["account_id"], execution["telegram_id"], execution["exchange"],
                 execution["symbol"], position_side, float(ledger_quantity),
                 "OPEN" if ledger_quantity > 0 else "CLOSED", "EXECUTION_LEDGER", now, now))
-        if fills:
+        if inserted_count:
             LiveAuditRepository().record(
                 event_type="FILL_INGESTED", outcome="COMPLETE",
                 telegram_id=int(execution["telegram_id"]), account_id=int(execution["account_id"]),
                 exchange=str(execution["exchange"]), metadata={"execution_id": execution["id"],
-                "fill_count": len(fills), "aggregate_quantity": str(qty),
+                "fill_count": inserted_count, "aggregate_quantity": str(qty),
                 "average_fill_price": str(average), "commission": str(commission)})
         return qty, average, commission
+
+    def set_recovery_reason(self, execution_id: int, state: LiveExecutionState,
+                            reason: str | None) -> bool:
+        with connect() as conn:
+            cur = conn.execute("""UPDATE live_executions SET recovery_reason=?,
+                version=version+1,updated_at=? WHERE id=? AND state=?""", (
+                reason, datetime.now(timezone.utc).isoformat(), execution_id, state.value))
+        return cur.rowcount == 1
 
 
 class LiveExecutionCoordinator:
@@ -444,23 +523,40 @@ class LiveExecutionCoordinator:
                                        LiveExecutionState.UNKNOWN, recovery_reason="SUBMISSION_TIMEOUT")
             return SubmissionResult(execution["id"], LiveExecutionState.UNKNOWN, request.client_order_id)
         except ExchangeError as exc:
-            retryable = exc.retryable and attempt < self.max_attempts and not exc.ambiguous_submission
-            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=2 ** attempt)).isoformat() if retryable else None
-            target = LiveExecutionState.RETRY_WAIT if retryable else LiveExecutionState.FAILED
+            if isinstance(exc, ExchangeOrderRejectedError):
+                target = LiveExecutionState.REJECTED
+                retry_at = None
+            elif isinstance(exc, (ExchangeRateLimitError, ExchangeTimestampError)):
+                retryable = attempt < self.max_attempts
+                retry_at = ((datetime.now(timezone.utc) + timedelta(seconds=2 ** attempt)).isoformat()
+                            if retryable else None)
+                target = LiveExecutionState.RETRY_WAIT if retryable else LiveExecutionState.FAILED
+            elif isinstance(exc, (ExchangeAuthenticationError, ExchangeConfigurationError)):
+                target = LiveExecutionState.FAILED
+                retry_at = None
+            else:
+                # Once the economic adapter boundary has been entered, an unclassified
+                # transport/response failure cannot prove the exchange rejected the order.
+                target = LiveExecutionState.UNKNOWN
+                retry_at = None
             self.repository.finish_attempt(execution["id"], attempt, status=target.value, error=exc, retry_at=retry_at)
             self.repository.transition(execution["id"], LiveExecutionState.SUBMITTING, target,
+                                       recovery_reason=("AMBIGUOUS_SUBMISSION" if target is LiveExecutionState.UNKNOWN
+                                                        else None),
                                        next_retry_at=retry_at)
             return SubmissionResult(execution["id"], target, request.client_order_id)
-        self.repository.finish_attempt(execution["id"], attempt, status="ACKNOWLEDGED", order=order)
+        self.repository.finish_attempt(execution["id"], attempt, status="SUBMITTED", order=order)
         self.repository.transition(execution["id"], LiveExecutionState.SUBMITTING,
-                                   LiveExecutionState.ACKNOWLEDGED, exchange_order_id=order.order_id)
+                                   LiveExecutionState.SUBMITTED, exchange_order_id=order.order_id)
         LiveAuditRepository().record(
-            event_type="EXCHANGE_ACKNOWLEDGMENT", outcome="ACKNOWLEDGED", telegram_id=telegram_id,
+            event_type="EXCHANGE_ACKNOWLEDGMENT", outcome="RESPONSE_RECEIVED", telegram_id=telegram_id,
             account_id=account_id, exchange=exchange,
             metadata={"execution_id": execution["id"], "attempt": attempt,
-                      "client_order_id": request.client_order_id, "exchange_order_id": order.order_id})
-        return SubmissionResult(execution["id"], LiveExecutionState.ACKNOWLEDGED,
-                                request.client_order_id, order.order_id)
+                      "client_order_id": request.client_order_id, "exchange_order_id": order.order_id,
+                      "exchange_status": order.status})
+        result = await self.recover(execution["id"], supplied_order=order)
+        self.repository.finish_attempt(execution["id"], attempt, status=result.state.value, order=order)
+        return result
 
     @staticmethod
     def _require_approved_execution_plan(*, plan_id: str | None, telegram_id: int,
@@ -546,7 +642,8 @@ class LiveExecutionCoordinator:
             """, (account_id,)).fetchone()
             unresolved = conn.execute("""
                 SELECT COUNT(*) AS n FROM live_executions
-                WHERE account_id=? AND state IN ('UNKNOWN','RECOVERY_REQUIRED')
+                WHERE account_id=? AND state IN ('SUBMITTING','SUBMITTED','UNKNOWN',
+                    'RECONCILING','RECOVERY_REQUIRED')
             """, (account_id,)).fetchone()
             credentials = conn.execute("""SELECT 1 FROM user_exchange_credentials
                 WHERE telegram_id=? AND exchange='bingx' AND status='connected'""",
@@ -587,32 +684,193 @@ class LiveExecutionCoordinator:
             raise PermissionError("BINGX_VST_CERTIFICATION_EXPIRED")
         return dict(account)
 
-    async def recover(self, execution_id: int) -> SubmissionResult:
+    @staticmethod
+    def _canonical(value: str) -> str:
+        return "".join(char for char in str(value).upper() if char.isalnum())
+
+    @staticmethod
+    def _summary_fill(order: ExchangeOrder) -> ExchangeFill | None:
+        if order.executed_quantity <= 0 or order.average_price is None or order.average_price <= 0:
+            return None
+        return ExchangeFill(
+            fill_id=f"{ORDER_SUMMARY_FILL_PREFIX}{order.order_id}",
+            order_id=order.order_id,
+            client_order_id=order.client_order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.executed_quantity,
+            price=order.average_price,
+            commission=abs(order.commission),
+        )
+
+    @classmethod
+    def _matching_fills(cls, execution: dict, fills: list[ExchangeFill],
+                        order_id: str | None) -> list[ExchangeFill]:
+        client_id = str(execution.get("client_order_id") or "")
+        symbol = cls._canonical(str(execution.get("symbol") or ""))
+        return [fill for fill in fills
+                if cls._canonical(fill.symbol) == symbol
+                and ((order_id and str(fill.order_id) == str(order_id))
+                     or (fill.client_order_id and str(fill.client_order_id) == client_id))]
+
+    async def _lookup_order(self, execution: dict,
+                            open_orders: list[ExchangeOrder] | None) -> tuple[ExchangeOrder | None,
+                                                                              list[str]]:
+        errors: list[str] = []
+        capabilities = self.adapter.capabilities()
+        order_id = str(execution.get("exchange_order_id") or "")
+        if order_id and capabilities.supports(ExchangeCapability.QUERY_ORDER):
+            try:
+                order = await self.adapter.query_order(symbol=execution["symbol"], order_id=order_id)
+                if order is not None:
+                    return order, errors
+            except ExchangeError as exc:
+                errors.append(exc.code)
+        if capabilities.supports(ExchangeCapability.QUERY_BY_CLIENT_ID):
+            try:
+                order = await self.adapter.query_order_by_client_id(
+                    symbol=execution["symbol"], client_order_id=execution["client_order_id"])
+                if order is not None:
+                    return order, errors
+            except ExchangeError as exc:
+                errors.append(exc.code)
+        if open_orders is None and capabilities.supports(ExchangeCapability.OPEN_ORDERS):
+            try:
+                open_orders = await self.adapter.open_orders(execution["symbol"])
+            except ExchangeError as exc:
+                errors.append(exc.code)
+                open_orders = []
+        for order in open_orders or []:
+            if ((order_id and str(order.order_id) == order_id)
+                    or (order.client_order_id
+                        and str(order.client_order_id) == str(execution["client_order_id"]))):
+                return order, errors
+        return None, errors
+
+    async def recover(self, execution_id: int, *, supplied_order: ExchangeOrder | None = None,
+                      open_orders: list[ExchangeOrder] | None = None,
+                      exchange_positions: list[ExchangePosition] | None = None) -> SubmissionResult:
         execution = self.repository.get(execution_id)
         if not execution:
             raise KeyError(execution_id)
         state = LiveExecutionState(execution["state"])
-        if state is LiveExecutionState.SUBMITTING:
-            self.repository.transition(execution_id, state, LiveExecutionState.UNKNOWN,
-                                       recovery_reason="PROCESS_INTERRUPTED_DURING_SUBMISSION")
-            execution = self.repository.get(execution_id)
-            state = LiveExecutionState(execution["state"])
-        if state not in {LiveExecutionState.UNKNOWN, LiveExecutionState.RECOVERY_REQUIRED}:
+        if state is LiveExecutionState.FILLED and execution.get("exchange_order_id"):
+            if self.adapter.capabilities().supports(ExchangeCapability.FILLS):
+                try:
+                    detailed = await self.adapter.fills(
+                        symbol=execution["symbol"], order_id=str(execution["exchange_order_id"]))
+                except ExchangeError:
+                    detailed = []
+                matching = self._matching_fills(
+                    execution, detailed, str(execution["exchange_order_id"]))
+                if matching:
+                    self.repository.ingest_fills(execution, matching)
+            return SubmissionResult(execution_id, state, execution["client_order_id"],
+                                    execution.get("exchange_order_id"))
+        recoverable = {
+            LiveExecutionState.SUBMITTING, LiveExecutionState.SUBMITTED,
+            LiveExecutionState.ACKNOWLEDGED, LiveExecutionState.PARTIALLY_FILLED,
+            LiveExecutionState.UNKNOWN, LiveExecutionState.RECONCILING,
+            LiveExecutionState.RECOVERY_REQUIRED,
+        }
+        if state not in recoverable:
             return SubmissionResult(execution_id, state, execution["client_order_id"], execution.get("exchange_order_id"))
-        order = await self.adapter.query_order_by_client_id(
-            symbol=execution["symbol"], client_order_id=execution["client_order_id"])
+        stable_observed_states = {
+            LiveExecutionState.ACKNOWLEDGED, LiveExecutionState.PARTIALLY_FILLED,
+        }
+        if state is not LiveExecutionState.RECONCILING and state not in stable_observed_states:
+            reason = ("PROCESS_INTERRUPTED_DURING_SUBMISSION"
+                      if state in {LiveExecutionState.SUBMITTING, LiveExecutionState.SUBMITTED}
+                      else "EXCHANGE_TRUTH_LOOKUP")
+            if not self.repository.transition(execution_id, state, LiveExecutionState.RECONCILING,
+                                              recovery_reason=reason,
+                                              exchange_order_id=(supplied_order.order_id
+                                                                 if supplied_order else None)):
+                current = self.repository.get(execution_id)
+                return SubmissionResult(execution_id, LiveExecutionState(current["state"]),
+                                        current["client_order_id"], current.get("exchange_order_id"))
+            execution = self.repository.get(execution_id)
+            transition_source = LiveExecutionState.RECONCILING
+        else:
+            transition_source = state
+
+        order = supplied_order
+        lookup_errors: list[str] = []
         if order is None:
-            if state is LiveExecutionState.UNKNOWN:
-                self.repository.transition(execution_id, state, LiveExecutionState.RECOVERY_REQUIRED,
-                                           recovery_reason="EXCHANGE_TRUTH_UNAVAILABLE")
-            return SubmissionResult(execution_id, LiveExecutionState.RECOVERY_REQUIRED, execution["client_order_id"])
-        fills = await self.adapter.fills(symbol=execution["symbol"], order_id=order.order_id)
+            order, lookup_errors = await self._lookup_order(execution, open_orders)
+        order_id = order.order_id if order is not None else str(execution.get("exchange_order_id") or "") or None
+
+        fills: list[ExchangeFill] = []
+        if self.adapter.capabilities().supports(ExchangeCapability.FILLS):
+            try:
+                all_fills = await self.adapter.fills(symbol=execution["symbol"], order_id=order_id)
+                fills = self._matching_fills(execution, all_fills, order_id)
+            except ExchangeError as exc:
+                lookup_errors.append(exc.code)
+        if not fills and order is not None:
+            summary = self._summary_fill(order)
+            if summary is not None:
+                fills = [summary]
         qty, _, _ = self.repository.ingest_fills(execution, fills)
         requested = Decimal(str(execution["quantity"]))
-        target = LiveExecutionState.FILLED if qty >= requested else (
-            LiveExecutionState.PARTIALLY_FILLED if qty > 0 else LiveExecutionState.ACKNOWLEDGED)
-        self.repository.transition(execution_id, state, target, exchange_order_id=order.order_id)
-        return SubmissionResult(execution_id, target, execution["client_order_id"], order.order_id)
+        status = str(order.status or "").upper().replace("-", "_") if order else ""
+        if order is not None and status in REJECTED_EXCHANGE_STATUSES and qty > 0:
+            target = LiveExecutionState.UNKNOWN
+            reason = "CONTRADICTORY_REJECTED_ORDER_WITH_FILLS"
+        elif order is not None and status in REJECTED_EXCHANGE_STATUSES:
+            target = LiveExecutionState.REJECTED
+            reason = "EXCHANGE_REJECTED"
+        elif order is not None and status in CANCELLED_EXCHANGE_STATUSES:
+            target = LiveExecutionState.CANCELLED
+            reason = "EXCHANGE_CANCELLED"
+        elif order is not None and status in FILLED_EXCHANGE_STATUSES and qty > 0:
+            target = LiveExecutionState.FILLED
+            reason = None
+        elif qty >= requested:
+            target = LiveExecutionState.FILLED
+            reason = None
+        elif qty > 0:
+            target = LiveExecutionState.PARTIALLY_FILLED
+            reason = None
+        elif order is not None and status in FILLED_EXCHANGE_STATUSES:
+            target = LiveExecutionState.UNKNOWN
+            reason = "FILLED_WITHOUT_EXECUTION_EVIDENCE"
+        elif order is not None and status in PARTIAL_EXCHANGE_STATUSES:
+            target = LiveExecutionState.UNKNOWN
+            reason = "PARTIAL_WITHOUT_EXECUTION_EVIDENCE"
+        elif order is not None and status in OPEN_EXCHANGE_STATUSES:
+            target = LiveExecutionState.ACKNOWLEDGED
+            reason = None
+        elif order is not None:
+            target = LiveExecutionState.UNKNOWN
+            reason = "UNRECOGNIZED_EXCHANGE_ORDER_STATUS"
+        else:
+            if exchange_positions is None and self.adapter.capabilities().supports(ExchangeCapability.POSITIONS):
+                try:
+                    exchange_positions = await self.adapter.positions()
+                except ExchangeError as exc:
+                    lookup_errors.append(exc.code)
+            target = (LiveExecutionState.UNKNOWN if lookup_errors
+                      else LiveExecutionState.RECOVERY_REQUIRED)
+            reason = ("RECONCILIATION_PROVIDER_UNAVAILABLE" if lookup_errors
+                      else "EXCHANGE_TRUTH_NOT_FOUND")
+        if target is not transition_source:
+            self.repository.transition(execution_id, transition_source, target,
+                                       exchange_order_id=order_id, recovery_reason=reason)
+        elif reason != execution.get("recovery_reason"):
+            self.repository.set_recovery_reason(execution_id, transition_source, reason)
+        current = self.repository.get(execution_id)
+        final_state = LiveExecutionState(current["state"])
+        LiveAuditRepository().record(
+            event_type="EXECUTION_RECONCILIATION", outcome=final_state.value,
+            telegram_id=int(execution["telegram_id"]), account_id=int(execution["account_id"]),
+            exchange=str(execution["exchange"]), metadata={
+                "execution_id": execution_id, "exchange_order_id": order_id,
+                "exchange_status": status or None, "fill_count": len(fills),
+                "executed_quantity": str(qty), "lookup_errors": sorted(set(lookup_errors)),
+                "positions_observed": len(exchange_positions or []),
+            })
+        return SubmissionResult(execution_id, final_state, execution["client_order_id"], order_id)
 
     async def cancel(self, execution_id: int) -> SubmissionResult:
         execution = self.repository.get(execution_id)

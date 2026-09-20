@@ -1,15 +1,16 @@
 from services.execution_models import RiskProfile
 from services.execution_validator import ExecutionValidator
 from services.position_sizer import PositionSizer
+from tests.authority_contract_fixture import approved_signal
 
 
 def _signal(**updates):
-    signal = {
+    signal = approved_signal({
         "id": 1, "symbol": "BTC", "timeframe": "1h", "side": "LONG", "status": "ACTIVE",
         "entry": 100.0, "current_price": 100.0, "stop": 98.0, "tp1": 104.0, "tp2": 106.0,
         "tp3": 108.0, "preferred_entry_low": 99.0, "preferred_entry_high": 101.0,
         "activated_at": "2026-07-23T00:00:00+00:00",
-    }
+    })
     signal.update(updates)
     return signal
 

@@ -4,17 +4,19 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.authority_contract_fixture import APPROVED_FEATURES_JSON, approved_signal
+
 
 def signal(signal_id=1701, **overrides):
     now = datetime.now(timezone.utc).isoformat()
-    value = {
+    value = approved_signal({
         "id": signal_id, "symbol": "BTCUSDT", "timeframe": "5m", "side": "LONG",
         "status": "ACTIVE", "created_at": now, "updated_at": now, "activated_at": now,
         "entry": 100.0, "current_price": 100.0, "stop": 95.0,
         "tp1": 110.0, "tp2": 115.0, "tp3": 120.0, "rr": 2.0,
         "confidence": 75.0, "dynamic_confidence": 75.0, "setup_key": "breakout",
-        "features_json": "{}",
-    }
+        "features_json": APPROVED_FEATURES_JSON,
+    })
     value.update(overrides)
     return value
 
@@ -196,7 +198,7 @@ def test_sync_all_always_includes_old_signals_with_open_positions(copy_db, monke
             entry,stop,tp1,tp2,tp3,rr,confidence,bull_score,bear_score,recommendation,
             setup_key,features_json,reasons_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             10, "BTCUSDT", "5m", "LONG", "ACTIVE", old["created_at"], old["updated_at"],
-            100, 95, 110, 115, 120, 2, 75, 75, 25, "READY", "breakout", "{}", "[]",
+            100, 95, 110, 115, 120, 2, 75, 75, 25, "READY", "breakout", APPROVED_FEATURES_JSON, "[]",
         ))
     assert service.sync_signal(old)["opened"] == 1
     service.update_profile(72, enabled=0)

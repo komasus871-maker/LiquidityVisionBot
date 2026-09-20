@@ -8,10 +8,11 @@ from services.execution_models import (
     RiskProfile,
 )
 from version import APP_VERSION, RELEASE_NAME
+from tests.authority_contract_fixture import approved_signal
 
 
 def _signal() -> dict:
-    return {
+    return approved_signal({
         "id": 993,
         "symbol": "BTCUSDT",
         "timeframe": "1h",
@@ -26,7 +27,7 @@ def _signal() -> dict:
         "preferred_entry_low": 99.0,
         "preferred_entry_high": 101.0,
         "confidence": 80.0,
-    }
+    })
 
 
 def test_release_identity() -> None:

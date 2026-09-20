@@ -15,6 +15,10 @@ from aiogram.types import Update
 
 from database.database import database_backend, persistent_database
 from services.runtime_diagnostics import collect_runtime_diagnostics
+from services.forward_runtime_state import ForwardRuntimeStateRepository
+from services.pump_dump_scanner import ScannerRepository, resource_budget
+from services.telegram_webapp import terminal_html, validate_init_data
+from database.database import connect
 
 _STARTED_AT = datetime.now(timezone.utc)
 
@@ -67,6 +71,60 @@ class WebhookServer:
         self.maintenance_callback = maintenance_callback
         self._maintenance_lock = asyncio.Lock()
         self.maintenance_token = os.getenv("MONITOR_CRON_SECRET", "").strip()
+
+    def _webapp_identity(self, request: web.Request):
+        value = request.headers.get("X-Telegram-Init-Data", "") or request.query.get("initData", "")
+        return validate_init_data(value, self.bot.token)
+
+    @staticmethod
+    def _json(payload: dict[str, Any], status: int = 200) -> web.Response:
+        import json
+        return web.Response(text=json.dumps(payload, default=str, ensure_ascii=False),
+                            status=status, content_type="application/json")
+
+    async def terminal_handler(self, _: web.Request) -> web.Response:
+        return web.Response(text=terminal_html(), content_type="text/html")
+
+    async def terminal_api_handler(self, request: web.Request) -> web.Response:
+        try:
+            identity = self._webapp_identity(request)
+        except ValueError as exc:
+            return self._json({"status": "forbidden", "detail": str(exc)}, 403)
+        page = request.match_info["page"]
+        state = ForwardRuntimeStateRepository()
+        rows = state.latest_states(("BTCUSDT", "ETHUSDT", "SOLUSDT"))
+        if page == "overview":
+            items = [{"symbol": row["symbol"], "venue": row["venue"],
+                      "market_state": row["market_state"], "data_quality": row["data_quality"],
+                      "observed_at": row["observed_at"]} for row in rows[:12]]
+        elif page in {"order-flow", "derivatives"}:
+            items = []
+            for row in rows[:12]:
+                snap = row["snapshot"]
+                details = (snap.get("derivatives") or {}) if page == "derivatives" else {
+                    "book": snap.get("book") or {}, "trade_flow": snap.get("trade_flow") or {},
+                    "liquidations": snap.get("liquidations") or {},
+                }
+                items.append({"symbol": row["symbol"], "venue": row["venue"], **details,
+                              "observed_at": row["observed_at"]})
+        elif page == "scanner":
+            items = ScannerRepository.recent(50, telegram_id=identity.telegram_id)
+        elif page == "paper":
+            with connect() as connection:
+                records = connection.execute("""SELECT symbol,status,side,quantity,entry_price,
+                    last_price,realized_pnl,opened_at FROM paper_positions
+                    WHERE telegram_id=? ORDER BY opened_at DESC LIMIT 50""",
+                    (identity.telegram_id,)).fetchall()
+            items = [dict(record) for record in records]
+        elif page in {"shadow", "system"}:
+            health = state.health() or {"state": "NOT_STARTED", "execution_authority": False}
+            items = [{key: value for key, value in health.items()
+                      if key not in {"candidate_ids_json"}}]
+        else:
+            return self._json({"status": "not_found"}, 404)
+        return self._json({"status": "ok", "page": page, "classification": "MARKET_INTELLIGENCE",
+                           "economic_authority": False, "bounded": True, "resource_budget": resource_budget(),
+                           "items": items})
 
     def _remember_update(self, update_id: int) -> bool:
         """Return False when Telegram retries an update we already accepted."""
@@ -188,6 +246,8 @@ class WebhookServer:
         app.router.add_get("/", self.root_handler)
         app.router.add_get("/health", self.health_handler)
         app.router.add_get("/healthz", self.health_handler)
+        app.router.add_get("/terminal", self.terminal_handler)
+        app.router.add_get("/api/terminal/{page}", self.terminal_api_handler)
         app.router.add_post(self.path, self.webhook_handler)
         app.router.add_post("/internal/monitor", self.maintenance_handler)
         app.router.add_get("/internal/monitor", self.maintenance_handler)

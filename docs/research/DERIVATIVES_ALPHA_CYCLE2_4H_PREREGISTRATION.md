@@ -1,0 +1,11 @@
+# Derivatives Alpha Cycle 2 — 4h Preregistration
+
+Frozen after the primary 1h Development cycle rejected all twelve variants and before any 4h outcome was computed. Identity: `derivatives-alpha-cycle2-4h-v1`.
+
+This is the single additional derivatives cycle permitted by the master protocol. It is justified by Development-only diagnostic labels: the D1 continuation states and D2 deleveraging states were generally negative at 1–6 bars but had positive mean signed returns at 24 hours; the primary 1h stop/target replay remained decisively negative. The hypothesis is horizon mismatch and intrahour noise, not a threshold rescue. The consistently adverse D3 crowding-reversal family is excluded. No new data, symbol, or split boundary is introduced.
+
+The exact materialization remains `8886c1cd8d5e0b97`, provider venue remains Binance, and the hourly observations are causally aggregated to UTC-aligned 4h bars. Decisions occur only after all four component hours close. OI is the last available stock, funding is the last known settlement, basis components are the final closes, and OHLCV uses standard first/max/min/last/sum aggregation. Funding cost still uses every original settlement event during a trade.
+
+There are exactly nine cycle-2 variants: `C2_4H_D1_LEVERAGED_TREND_LONG`, `C2_4H_D1_LEVERAGED_TREND_SHORT`, and `C2_4H_D2_DELEVERAGING_REVERSAL`, each with frozen `BROAD`, `BASE`, and `STRICT` percentile definitions identical to the primary cycle. No D3 replacement is allowed. Entry is next 4h open, risk is 1.5 ATR(14) with the 0.35% floor, target is 1.5R, and maximum holding is six 4h bars. Costs and canonical conservative replay semantics are unchanged.
+
+Cycle-2 Development promotion requires: 80 fills; 40 clusters; BASE expectancy at least +0.05R and PF at least 1.15; HIGH and STRESS positive with PF above 1; at least three nonnegative folds and none below -0.10R; drawdown at most 20R; at least two positive symbols; bootstrap lower 95% bound above -0.03R; causal/DQE/replay/venue checks; and a populated three-variant neighborhood. At most one candidate may be frozen. Validation gates remain 50 fills/30 clusters, +0.03R, PF 1.10, positive HIGH/STRESS, drawdown 15R, and bootstrap lower bound above -0.05R. Blind remains sealed unless those gates pass.

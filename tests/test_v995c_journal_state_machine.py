@@ -12,10 +12,11 @@ from services.copy_execution_journal import (
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.execution_models import RiskProfile
 from version import APP_VERSION, RELEASE_NAME
+from tests.authority_contract_fixture import approved_signal
 
 
 def _signal(status: str = "ACTIVE") -> dict:
-    return {
+    return approved_signal({
         "id": 9953,
         "symbol": "BTCUSDT",
         "timeframe": "1h",
@@ -30,7 +31,7 @@ def _signal(status: str = "ACTIVE") -> dict:
         "confidence": 80.0,
         "preferred_entry_low": 99.0,
         "preferred_entry_high": 101.0,
-    }
+    })
 
 
 def _journal_and_plan(tmp_path, monkeypatch):

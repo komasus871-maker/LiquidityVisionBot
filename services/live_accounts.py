@@ -293,7 +293,8 @@ class LiveAccountRepository:
         with connect() as conn:
             rows = conn.execute("""
                 SELECT id,client_order_id,symbol,state,recovery_reason,updated_at FROM live_executions
-                WHERE telegram_id=? AND exchange=? AND state IN ('UNKNOWN','RECOVERY_REQUIRED','RETRY_WAIT')
+                WHERE telegram_id=? AND exchange=? AND state IN ('SUBMITTING','SUBMITTED','UNKNOWN',
+                    'RECONCILING','RECOVERY_REQUIRED','RETRY_WAIT')
                 ORDER BY updated_at DESC
             """, (int(telegram_id), exchange)).fetchall()
         return tuple(dict(row) for row in rows)

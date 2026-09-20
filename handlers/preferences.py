@@ -1,4 +1,4 @@
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -74,6 +74,7 @@ async def settings(message: Message):
 
 
 @router.message(Command("alerts"))
+@router.message(F.text == "🔔 Alerts")
 async def alerts(message: Message):
     user_id = message.from_user.id
     add_user(user_id, message.from_user.username, message.from_user.first_name)

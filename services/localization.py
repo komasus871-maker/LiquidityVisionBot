@@ -117,6 +117,8 @@ EN = {
     "menu.start": "Open Liquidity Vision", "menu.journal": "Trade journal",
     "menu.rankings": "Ranked signals", "menu.settings": "Personal settings",
     "menu.alerts": "Alert preferences",
+    "menu.market_now": "Live market terminal", "menu.orderflow": "Order-flow intelligence",
+    "menu.shadow_status": "Forward Shadow Lab status",
 }
 
 

@@ -486,16 +486,81 @@ class Analyzer:
             return "⚪ No clear directional edge. Preserve capital and wait for the market to resolve."
         return f"👁 Market context leans {direction}, but this is an observation—not a trade."
 
-    def analyze(self, df, *, symbol=None, timeframe=None, source="analyzer", use_cache=True):
+    @staticmethod
+    def _invalid_market_data_result(*, quality: dict[str, Any], symbol: str | None, timeframe: str | None,
+                                    source: str, context: Any) -> dict[str, Any]:
+        """Return the legacy-shaped, explicitly non-executable data envelope.
+
+        Invalid candles never enter feature/strategy calculation.  Keeping this
+        shape lets ProbabilityEngine and DecisionQualityEngine record an
+        observation and enforce the existing Phase 1B NO_TRADE authority gate.
+        """
+        code = str(quality.get("code") or "MARKET_DATA_INVALID")
+        reason = str(quality.get("reason") or "Market candle contract failed")
+        data = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "analysis_source": source,
+            "data_quality": quality,
+            "market_data_provenance": {key: quality.get(key) for key in (
+                "provider", "symbol", "timeframe", "requested_limit", "first_candle_at",
+                "last_candle_at", "reference_at", "closed_candle_semantics", "fallback_used",
+            )},
+            "direction": "NO_TRADE",
+            "primary_scenario": "NO_TRADE",
+            "alternative_scenario": "NO_TRADE",
+            "direction_score": 0.0,
+            "setup_score": 0.0,
+            "score": 0.0,
+            "confidence": 0.0,
+            "probability": None,
+            "execution_readiness": 0.0,
+            "execution_status": "⛔ MARKET DATA INVALID",
+            "recommendation": "NO TRADE / MARKET DATA",
+            "opportunity_category": "MARKET_DATA_INVALID",
+            "plan_valid": False,
+            "market_regime": {"code": "UNKNOWN", "direction": "NEUTRAL"},
+            "reasons": [f"⛔ Market data {code}: {reason}"],
+            "triggers": ["Wait for valid, fresh, closed candle data"],
+            "score_components": [],
+            "premium": {},
+            "entry": 0.0,
+            "stop": 0.0,
+            "tp1": 0.0,
+            "tp2": 0.0,
+            "tp3": 0.0,
+            "rr": 0.0,
+        }
+        context.decision.update(data)
+        data["analysis_context"] = context.snapshot()
+        data["trade_dna_foundation"] = dict(context.trade_dna)
+        data["final_verdict"] = "⛔ No trade: the market candle contract is not satisfied."
+        context.output.update(data)
+        return data
+
+    def analyze(self, df, *, symbol=None, timeframe=None, source="analyzer", use_cache=True,
+                research_envelope=True, prevalidated_research=False):
         """Analyze through the v7.6 shared pipeline while preserving legacy output."""
-        pipeline_result = unified_pipeline.execute(
-            df,
-            symbol=symbol,
-            timeframe=timeframe,
-            source=source,
-            use_cache=use_cache,
+        pipeline_result = (
+            unified_pipeline.execute_prevalidated_research(
+                df, symbol=symbol, timeframe=timeframe, source=source,
+            )
+            if prevalidated_research
+            else unified_pipeline.execute(
+                df,
+                symbol=symbol,
+                timeframe=timeframe,
+                source=source,
+                use_cache=use_cache,
+            )
         )
         context = pipeline_result.context
+        market_data_quality = dict(context.diagnostics.get("market_data_quality") or {})
+        if market_data_quality and not market_data_quality.get("valid", False):
+            return self._invalid_market_data_result(
+                quality=market_data_quality, symbol=symbol, timeframe=timeframe,
+                source=source, context=context,
+            )
         raw = dict(context.raw)
         close = float(raw["price"])
         raw["volume_ratio"] = self._volume_ratio(raw["volume"])
@@ -660,47 +725,48 @@ class Analyzer:
             data.setdefault("reasons", []).append(f"⛔ Invalid trade geometry: {exc}")
         # Attach research metadata only after legacy decision fields are final.
         # Nothing in planner/risk/sizing/execution consumes this envelope.
-        try:
-            microstructure_aggregate = None
-            try:
-                from services.market_intelligence_repository import MarketIntelligenceRepository
-                microstructure_row = MarketIntelligenceRepository().latest_microstructure(symbol)
-                if microstructure_row and not microstructure_row.get("stale"):
-                    microstructure_aggregate = dict(microstructure_row.get("aggregate") or {})
-                    microstructure_aggregate.update({
-                        "sampled_at": microstructure_row.get("sampled_at"),
-                        "expires_at": microstructure_row.get("expires_at"),
-                        "exchange": microstructure_row.get("exchange"),
-                        "environment": microstructure_row.get("environment"),
-                    })
-            except Exception:
-                logging.exception(
-                    "market_intelligence_microstructure_lookup_failed symbol=%s timeframe=%s",
-                    symbol,
-                    timeframe,
-                )
-            data["market_intelligence"] = MarketIntelligenceEngine().analyze_timeframe(
-                df,
-                timeframe=str(timeframe or "unknown"),
-                side=str(data.get("direction") or "NEUTRAL"),
-                plan=data,
-                microstructure_aggregate=microstructure_aggregate,
-            )
-        except Exception:
-            logging.exception(
-                "market_intelligence_analysis_failed symbol=%s timeframe=%s",
-                symbol,
-                timeframe,
-            )
+        if not research_envelope:
             data["market_intelligence"] = {
                 "version": "market-intelligence-v3",
                 "mode": "SHADOW_RESEARCH_ONLY",
-                "status": "DEGRADED",
-                "reason_codes": ["ANALYSIS_FAILURE"],
+                "status": "RESEARCH_ENVELOPE_OMITTED",
+                "reason_codes": ["PHASE3_SIDE_EFFECT_FREE_REPLAY"],
                 "economic_authority": False,
                 "execution_authority": False,
             }
+        else:
+            try:
+                microstructure_aggregate = None
+                try:
+                    from services.market_intelligence_repository import MarketIntelligenceRepository
+                    microstructure_row = MarketIntelligenceRepository().latest_microstructure(symbol)
+                    if microstructure_row and not microstructure_row.get("stale"):
+                        microstructure_aggregate = dict(microstructure_row.get("aggregate") or {})
+                        microstructure_aggregate.update({
+                            "sampled_at": microstructure_row.get("sampled_at"),
+                            "expires_at": microstructure_row.get("expires_at"),
+                            "exchange": microstructure_row.get("exchange"),
+                            "environment": microstructure_row.get("environment"),
+                        })
+                except Exception:
+                    logging.exception("market_intelligence_microstructure_lookup_failed symbol=%s timeframe=%s", symbol, timeframe)
+                data["market_intelligence"] = MarketIntelligenceEngine().analyze_timeframe(
+                    context.dataframe, timeframe=str(timeframe or "unknown"),
+                    side=str(data.get("direction") or "NEUTRAL"), plan=data,
+                    microstructure_aggregate=microstructure_aggregate)
+            except Exception:
+                logging.exception("market_intelligence_analysis_failed symbol=%s timeframe=%s", symbol, timeframe)
+                data["market_intelligence"] = {
+                    "version": "market-intelligence-v3", "mode": "SHADOW_RESEARCH_ONLY",
+                    "status": "DEGRADED", "reason_codes": ["ANALYSIS_FAILURE"],
+                    "economic_authority": False, "execution_authority": False,
+                }
         context.decision.update(data)
+        data["data_quality"] = market_data_quality or {"status": "VALID", "code": "OK", "valid": True}
+        data["market_data_provenance"] = {key: data["data_quality"].get(key) for key in (
+            "provider", "symbol", "timeframe", "requested_limit", "first_candle_at",
+            "last_candle_at", "reference_at", "closed_candle_semantics", "fallback_used",
+        )}
         data["analysis_context"] = context.snapshot()
         data["trade_dna_foundation"] = dict(context.trade_dna)
         data["final_verdict"] = self._verdict(data)

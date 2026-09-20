@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 
 class OrderBlocks:
@@ -8,70 +9,54 @@ class OrderBlocks:
         self.df = df
 
     def bullish(self):
-
-        candles = self.df.tail(40).reset_index(drop=True)
-
-        for i in range(len(candles) - 3, 2, -1):
-
-            candle = candles.iloc[i]
-
-            previous = candles.iloc[i - 1]
-
-            next_candle = candles.iloc[i + 1]
-
-            bearish = candle["close"] < candle["open"]
-
-            impulse = (
-                next_candle["close"] >
-                candle["high"]
-            )
-
-            if bearish and impulse:
-
-                return {
-
-                    "type": "bullish",
-
-                    "high": float(candle["high"]),
-
-                    "low": float(candle["low"]),
-
-                    "index": i
-
-                }
+        candles = self.df.tail(40)
+        if len(candles) < 6:
+            return None
+        opens = candles["open"].to_numpy()
+        highs = candles["high"].to_numpy()
+        lows = candles["low"].to_numpy()
+        closes = candles["close"].to_numpy()
+        indices = np.arange(len(candles))
+        next_closes = np.empty_like(closes)
+        next_closes[:-1] = closes[1:]
+        next_closes[-1] = np.nan
+        matches = (
+            (indices >= 3)
+            & (indices <= len(candles) - 3)
+            & (closes < opens)
+            & (next_closes > highs)
+        )
+        found = np.flatnonzero(matches)
+        if found.size:
+            index = int(found[-1])
+            return {"type": "bullish", "high": float(highs[index]),
+                    "low": float(lows[index]), "index": index}
 
         return None
 
     def bearish(self):
-
-        candles = self.df.tail(40).reset_index(drop=True)
-
-        for i in range(len(candles) - 3, 2, -1):
-
-            candle = candles.iloc[i]
-
-            next_candle = candles.iloc[i + 1]
-
-            bullish = candle["close"] > candle["open"]
-
-            impulse = (
-                next_candle["close"] <
-                candle["low"]
-            )
-
-            if bullish and impulse:
-
-                return {
-
-                    "type": "bearish",
-
-                    "high": float(candle["high"]),
-
-                    "low": float(candle["low"]),
-
-                    "index": i
-
-                }
+        candles = self.df.tail(40)
+        if len(candles) < 6:
+            return None
+        opens = candles["open"].to_numpy()
+        highs = candles["high"].to_numpy()
+        lows = candles["low"].to_numpy()
+        closes = candles["close"].to_numpy()
+        indices = np.arange(len(candles))
+        next_closes = np.empty_like(closes)
+        next_closes[:-1] = closes[1:]
+        next_closes[-1] = np.nan
+        matches = (
+            (indices >= 3)
+            & (indices <= len(candles) - 3)
+            & (closes > opens)
+            & (next_closes < lows)
+        )
+        found = np.flatnonzero(matches)
+        if found.size:
+            index = int(found[-1])
+            return {"type": "bearish", "high": float(highs[index]),
+                    "low": float(lows[index]), "index": index}
 
         return None
 

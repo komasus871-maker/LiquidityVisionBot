@@ -7,6 +7,7 @@ from database.observation_history import ObservationHistory
 from database.candidate_history import CandidateHistory
 from database.database import connect
 from services.data_integrity import DataIntegrityEngine
+from services.decision_quality import DecisionQualityEngine
 from domain.intelligence import TradeDNABuilder
 
 
@@ -60,9 +61,33 @@ class SignalRecorder:
 
     def record(self, *, symbol: str, timeframe: str, analysis: dict[str, Any], owner_telegram_id: int | None = None,
                notification_chat_id: int | None = None, min_confidence: float = 54) -> int | None:
-        if not analysis.get("plan_valid", True):
+        authorized, admission_code = DecisionQualityEngine.authorization(analysis)
+        analysis["promotion_admission"] = {
+            "admitted": authorized,
+            "code": admission_code,
+            "source": analysis.get("decision_source") or "UNSPECIFIED",
+            "outcome": analysis.get("decision_outcome") or "UNAUTHORIZED",
+            "version": analysis.get("decision_version"),
+            "path": analysis.get("decision_path") or [],
+        }
+        setup_key = self._setup_key(analysis)
+        observation_id = self.observations.save_or_update(
+            owner_telegram_id=owner_telegram_id, notification_chat_id=notification_chat_id,
+            symbol=symbol, timeframe=timeframe, analysis=analysis, setup_key=setup_key,
+        )
+        analysis["observation_id"] = observation_id
+        logging.info(
+            "decision_admission source=%s outcome=%s admitted=%s code=%s version=%s path=%s",
+            analysis["promotion_admission"]["source"],
+            analysis["promotion_admission"]["outcome"],
+            authorized,
+            admission_code,
+            analysis["promotion_admission"]["version"],
+            analysis["promotion_admission"]["path"],
+        )
+        if not authorized:
             return None
-        if not analysis.get("decision_gate_passed", True):
+        if not analysis.get("plan_valid", True):
             return None
         integrity = self.integrity.validate_plan(analysis)
         if not integrity.valid:
@@ -81,12 +106,6 @@ class SignalRecorder:
         )
         if not valid_geometry:
             return None
-        setup_key = self._setup_key(analysis)
-        observation_id = self.observations.save_or_update(
-            owner_telegram_id=owner_telegram_id, notification_chat_id=notification_chat_id,
-            symbol=symbol, timeframe=timeframe, analysis=analysis, setup_key=setup_key,
-        )
-        analysis["observation_id"] = observation_id
 
         executable = {"🟢 READY", "🟡 WAIT FOR TRIGGER", "🎯 WAIT FOR PULLBACK", "🔄 REVERSAL WATCH"}
         status_name = analysis.get("execution_status")
@@ -123,10 +142,23 @@ class SignalRecorder:
             return None
         dna = TradeDNABuilder.build(analysis, symbol=symbol, timeframe=timeframe)
         features = dna.to_dict()
+        features.update({
+            "direction": side,
+            "decision_authority": analysis["decision_authority"],
+            "decision_version": analysis["decision_version"],
+            "decision_source": analysis["decision_source"],
+            "decision_outcome": analysis["decision_outcome"],
+            "decision_gate_passed": analysis["decision_gate_passed"],
+            "decision_veto_reasons": analysis.get("decision_veto_reasons") or [],
+            "decision_path": analysis.get("decision_path") or [],
+            "decision_timestamp": analysis.get("decision_timestamp"),
+            "decision_data_quality": analysis.get("decision_data_quality"),
+            "promotion_admission": analysis["promotion_admission"],
+        })
         analysis["trade_dna"] = features
         payload = {
             "owner_telegram_id": owner_telegram_id, "notification_chat_id": notification_chat_id,
-            "symbol": symbol.upper(), "timeframe": timeframe, "side": analysis.get("direction", "LONG"),
+            "symbol": symbol.upper(), "timeframe": timeframe, "side": side,
             "entry": analysis["entry"], "preferred_entry_low": analysis.get("preferred_entry_low"),
             "preferred_entry_high": analysis.get("preferred_entry_high"), "stop": analysis["stop"],
             "tp1": analysis["tp1"], "tp2": analysis["tp2"], "tp3": analysis["tp3"], "rr": analysis["rr"],

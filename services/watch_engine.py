@@ -19,6 +19,7 @@ from services.analysis_runtime import run_analysis
 from services.analyzer import Analyzer
 from services.market import Market
 from services.probability_engine import ProbabilityEngine
+from services.decision_quality import DecisionQualityEngine
 from services.signal_recorder import SignalRecorder
 from services.intelligence_alerts import IntelligenceAlertService
 from services.localization import LocalizationService
@@ -38,6 +39,7 @@ class WatchEngine:
         self.market = Market()
         self.analyzer = Analyzer()
         self.probability = ProbabilityEngine()
+        self.decision_quality = DecisionQualityEngine()
         self.recorder = SignalRecorder()
         self.alerts = IntelligenceAlertService(
             debounce_minutes=int(os.getenv("ALERT_DEBOUNCE_MINUTES", "30")),
@@ -253,6 +255,7 @@ class WatchEngine:
                 setup_key = self.recorder._setup_key(analysis)
                 analysis["timeframe"] = timeframe
                 analysis = self.probability.enrich(analysis, symbol=symbol, timeframe=timeframe, setup_key=setup_key)
+                analysis = self.decision_quality.enrich(analysis, source="WATCH_ENGINE")
                 current = self._snapshot(analysis)
                 signal_id = self.recorder.record(
                     symbol=symbol,

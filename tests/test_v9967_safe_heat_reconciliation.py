@@ -25,6 +25,7 @@ from services.copy_trading import CopyTradingService
 from services.execution_models import RiskProfile
 from services.execution_validator import ExecutionValidator
 from services.portfolio_reconciliation import PortfolioReconciliationService
+from tests.authority_contract_fixture import APPROVED_FEATURES_JSON, approved_signal
 
 
 def setup_db(tmp_path, monkeypatch):
@@ -50,8 +51,8 @@ def seed_signal(signal_id: int, status: str) -> None:
                    bull_score,bear_score,recommendation,setup_key,features_json,reasons_json,
                    created_at,updated_at
                ) VALUES(?, 'BTC','1h','LONG',?,100,90,110,120,130,2,70,70,30,
-                        'BUY','setup','{}','[]',?,?)""",
-            (signal_id, status, now, now),
+                        'BUY','setup',?,'[]',?,?)""",
+            (signal_id, status, APPROVED_FEATURES_JSON, now, now),
         )
 
 
@@ -68,7 +69,7 @@ def seed_position(user_id: int, signal_id: int, *, risk_r: float = 1.0, remainin
 
 
 def executable_signal() -> dict:
-    return {
+    return approved_signal({
         "id": 9001,
         "symbol": "ETH",
         "timeframe": "1h",
@@ -83,7 +84,7 @@ def executable_signal() -> dict:
         "preferred_entry_low": 99.0,
         "preferred_entry_high": 101.0,
         "confidence": 80.0,
-    }
+    })
 
 
 def test_terminal_legacy_position_is_closed_and_no_longer_causes_max_heat(tmp_path, monkeypatch):

@@ -4,15 +4,16 @@ from services.copy_execution_journal import CopyExecutionJournal, JournalStatus
 from services.copy_execution_planner import CopyExecutionPlanner
 from services.execution_models import RiskProfile
 from services.execution_queue import ExecutionQueueService
+from tests.authority_contract_fixture import approved_signal
 
 
 def _signal(signal_id: int | None = None):
     signal_id = signal_id or (9_950_000 + (uuid4().int % 900_000))
-    return {
+    return approved_signal({
         "id": signal_id, "symbol": "BTCUSDT", "timeframe": "1H", "side": "LONG",
         "status": "ACTIVE", "entry": 100.0, "current_price": 100.0, "stop": 99.0,
         "tp1": 102.0, "tp2": 104.0, "tp3": 106.0, "confidence": 90.0,
-    }
+    })
 
 
 def _plan(signal_id: int | None = None):

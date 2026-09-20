@@ -3,10 +3,11 @@ from __future__ import annotations
 from services.copy_training import CopyTrainingPolicy
 from services.execution_models import PortfolioState, RiskProfile
 from services.execution_validator import ExecutionValidator
+from tests.authority_contract_fixture import approved_signal
 
 
 def signal(**updates):
-    value = {
+    value = approved_signal({
         "id": 930,
         "symbol": "BTC",
         "timeframe": "1h",
@@ -21,7 +22,7 @@ def signal(**updates):
         "preferred_entry_low": 99.0,
         "preferred_entry_high": 101.0,
         "confidence": 60.0,
-    }
+    })
     value.update(updates)
     return value
 

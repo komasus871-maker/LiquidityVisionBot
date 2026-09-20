@@ -34,6 +34,8 @@ from handlers.profile import router as profile_router
 from handlers.research import router as research_router
 from handlers.scanner import router as scanner_router
 from handlers.start import router as start_router
+from handlers.terminal import router as terminal_router
+from handlers.pump_scanner import router as pump_scanner_router
 from services.observation_monitor import ObservationMonitor
 from services.signal_tracker import SignalTracker
 from services.watch_engine import WatchEngine
@@ -52,6 +54,7 @@ from services.command_catalog import MAIN_MENU_COMMANDS
 from services.localization import LocalizationService, SUPPORTED_LANGUAGES
 from services.operational_retention import OperationalRetentionService
 from services.product_analytics_middleware import ProductAnalyticsMiddleware
+from services.pump_dump_monitor import PumpDumpMonitor
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -66,6 +69,8 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(admin_router)
     dp.include_router(ai_trading_router)
     dp.include_router(start_router)
+    dp.include_router(terminal_router)
+    dp.include_router(pump_scanner_router)
     dp.include_router(language_router)
     dp.include_router(help_router)
     dp.include_router(price_router)
@@ -167,8 +172,9 @@ async def main() -> None:
     microstructure = MicrostructureObserver(bot=bot)
     live_reconciliation = LiveReconciliationWorker(bot=bot)
     live_copy = LiveCopyWorker(adapter_factory=LiveReconciliationWorker._adapter, bot=bot)
+    pump_scanner = PumpDumpMonitor(bot=bot)
     workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research,
-               microstructure, live_reconciliation, live_copy]
+               microstructure, live_reconciliation, live_copy, pump_scanner]
     worker_tasks = [
         asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
         asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
@@ -179,6 +185,7 @@ async def main() -> None:
         asyncio.create_task(microstructure.run_forever(), name="microstructure-observer"),
         asyncio.create_task(live_reconciliation.run_forever(), name="live-reconciliation"),
         asyncio.create_task(live_copy.run_forever(), name="live-copy-dispatcher"),
+        asyncio.create_task(pump_scanner.run_forever(), name="pump-dump-scanner"),
     ]
 
     mode = deployment_mode()
@@ -200,6 +207,7 @@ async def main() -> None:
                 microstructure_result = await microstructure.check_once()
                 live_reconciliation_result = await live_reconciliation.check_once()
                 live_copy_result = await live_copy.check_once()
+                pump_scanner_result = await pump_scanner.check_once()
                 return {
                     "database_backend": database_backend(),
                     "persistent_database": persistent_database(),
@@ -212,6 +220,7 @@ async def main() -> None:
                     "microstructure_observer": microstructure_result,
                     "live_reconciliation": live_reconciliation_result,
                     "live_copy_dispatcher": live_copy_result,
+                    "pump_dump_scanner": pump_scanner_result,
                 }
 
             webhook_server = WebhookServer(

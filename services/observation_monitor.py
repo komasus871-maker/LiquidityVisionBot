@@ -12,6 +12,8 @@ from services.analysis_runtime import run_analysis
 from services.analyzer import Analyzer
 from services.market import Market
 from services.signal_recorder import SignalRecorder
+from services.decision_quality import DecisionQualityEngine
+from services.probability_engine import ProbabilityEngine
 
 
 class ObservationMonitor:
@@ -24,6 +26,8 @@ class ObservationMonitor:
         self.market = Market()
         self.analyzer = Analyzer()
         self.recorder = SignalRecorder()
+        self.decision_quality = DecisionQualityEngine()
+        self.probability = ProbabilityEngine()
         self._stop = asyncio.Event()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
@@ -44,6 +48,15 @@ class ObservationMonitor:
                         self.market.get_klines(observation["symbol"], observation["timeframe"]), timeout=35
                     )
                     analysis = await asyncio.wait_for(run_analysis(self.analyzer, df, symbol=observation["symbol"], timeframe=observation["timeframe"], source="observation_monitor"), timeout=45)
+                    analysis["symbol"] = observation["symbol"]
+                    analysis["timeframe"] = observation["timeframe"]
+                    analysis = self.probability.enrich(
+                        analysis,
+                        symbol=observation["symbol"],
+                        timeframe=observation["timeframe"],
+                        setup_key=self.recorder._setup_key(analysis),
+                    )
+                    analysis = self.decision_quality.enrich(analysis, source="OBSERVATION_MONITOR")
                     signal_id = self.recorder.record(
                         symbol=observation["symbol"], timeframe=observation["timeframe"], analysis=analysis,
                         owner_telegram_id=observation["owner_telegram_id"],

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from services.conviction_engine import ConvictionEngine
@@ -17,6 +19,14 @@ class DecisionQualityEngine:
     """
 
     EXECUTABLE = {"🟢 READY", "🟡 WAIT FOR TRIGGER", "🎯 WAIT FOR PULLBACK", "🔄 REVERSAL WATCH"}
+    AUTHORITY = "DecisionQualityEngine"
+    DECISION_VERSION = "decision-authority-v1"
+    APPROVED = "APPROVED"
+    NO_TRADE = "NO_TRADE"
+    INVALID_DATA_STATES = {
+        "INVALID", "STALE", "INCOMPLETE", "INSUFFICIENT", "FAILED", "CORRUPT",
+        "GAPPED", "DUPLICATE", "CONFLICTING", "OUT_OF_ORDER", "PROVIDER_ERROR",
+    }
 
     def __init__(self):
         self.unified = UnifiedDecisionEngine()
@@ -123,7 +133,56 @@ class DecisionQualityEngine:
             )
         return "The market is two-sided, so no directional trade thesis is currently trusted."
 
-    def enrich(self, data: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _data_quality(data: dict[str, Any]) -> tuple[str, bool]:
+        quality = data.get("data_quality")
+        if quality is None:
+            quality = (data.get("market_intelligence") or {}).get("data_quality")
+        if isinstance(quality, str):
+            return quality.upper(), False
+        if not isinstance(quality, dict):
+            return "UNKNOWN", False
+        status = str(quality.get("status") or quality.get("state") or "UNKNOWN").upper()
+        explicitly_stale = any(quality.get(key) is True for key in ("stale", "is_stale", "stale_state"))
+        return status, explicitly_stale
+
+    @classmethod
+    def authorization(cls, candidate: dict[str, Any]) -> tuple[bool, str]:
+        """Validate the persisted admission marker without recreating a decision."""
+        metadata: dict[str, Any] = {}
+        features = candidate.get("features")
+        if isinstance(features, dict):
+            metadata.update(features)
+        raw_features = candidate.get("features_json")
+        if raw_features:
+            try:
+                parsed = json.loads(raw_features) if isinstance(raw_features, str) else raw_features
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = {}
+            if isinstance(parsed, dict):
+                metadata.update(parsed)
+        metadata.update(candidate)
+        if metadata.get("decision_authority") != cls.AUTHORITY:
+            return False, "DECISION_AUTHORITY_MISSING"
+        if metadata.get("decision_version") != cls.DECISION_VERSION:
+            return False, "DECISION_VERSION_UNSUPPORTED"
+        if str(metadata.get("decision_source") or "").upper() in {"", "UNSPECIFIED"}:
+            return False, "DECISION_SOURCE_MISSING"
+        path = metadata.get("decision_path")
+        if not isinstance(path, list) or not path or path[-1] != cls.AUTHORITY:
+            return False, "DECISION_PATH_INVALID"
+        if not metadata.get("decision_timestamp"):
+            return False, "DECISION_TIMESTAMP_MISSING"
+        if metadata.get("decision_outcome") != cls.APPROVED:
+            return False, "DECISION_NOT_APPROVED"
+        if metadata.get("decision_gate_passed") is not True:
+            return False, "DECISION_GATE_NOT_PASSED"
+        direction = str(metadata.get("direction") or metadata.get("side") or "").upper()
+        if direction not in {"LONG", "SHORT"}:
+            return False, "DECISION_DIRECTION_INVALID"
+        return True, "APPROVED"
+
+    def enrich(self, data: dict[str, Any], *, source: str | None = None) -> dict[str, Any]:
         data = dict(data)
         data["reasons"] = self._dedupe_text(data.get("reasons"))
         data["triggers"] = self._dedupe_text(data.get("triggers"))
@@ -140,18 +199,43 @@ class DecisionQualityEngine:
         status = str(data.get("execution_status") or "🔵 WATCHLIST")
         hard_block = any(str(x).startswith("⛔") for x in data.get("reasons") or [])
         regime = str((data.get("market_regime") or {}).get("code") or "UNKNOWN")
+        direction = str(data.get("direction") or "NO_TRADE").upper()
+        data_quality, explicitly_stale = self._data_quality(data)
+
+        vetoes: list[str] = []
+        if direction not in {"LONG", "SHORT"}:
+            vetoes.append("INVALID_OR_NO_TRADE_DIRECTION")
+        if status not in self.EXECUTABLE:
+            vetoes.append("STATUS_NOT_EXECUTABLE")
+        if direction_score < 62:
+            vetoes.append("DIRECTION_SCORE_BELOW_GATE")
+        if setup_score < 62:
+            vetoes.append("SETUP_SCORE_BELOW_GATE")
+        if hard_block:
+            vetoes.append("HARD_BLOCK_REASON")
+        if regime in {"RANGING", "COMPRESSION"}:
+            vetoes.append(f"REGIME_{regime}")
+        if not bool(data.get("plan_valid", True)):
+            vetoes.append("PLAN_INVALID")
+        if data_quality in self.INVALID_DATA_STATES or explicitly_stale:
+            vetoes.append("DATA_QUALITY_STALE" if explicitly_stale else f"DATA_QUALITY_{data_quality}")
 
         # Decision gate: weak/no-edge ideas remain observations and cannot be
         # promoted into a full executable trade merely because geometry exists.
-        actionable = (
-            status in self.EXECUTABLE
-            and direction_score >= 62
-            and setup_score >= 62
-            and not hard_block
-            and regime not in {"RANGING", "COMPRESSION"}
-            and bool(data.get("plan_valid", True))
-        )
+        actionable = not vetoes
         data["decision_gate_passed"] = actionable
+        data["decision_authority"] = self.AUTHORITY
+        data["decision_version"] = self.DECISION_VERSION
+        data["decision_source"] = str(source or data.get("decision_source") or data.get("analysis_source") or "UNSPECIFIED").upper()
+        data["decision_outcome"] = self.APPROVED if actionable else self.NO_TRADE
+        data["decision_veto_reasons"] = vetoes
+        data["decision_path"] = [
+            "Analyzer", "TradePlanIntegrity", "ProbabilityEngine", "DecisionQualityEngine"
+        ]
+        data["decision_timestamp"] = str(
+            data.get("timestamp") or data.get("captured_at") or datetime.now(timezone.utc).isoformat()
+        )
+        data["decision_data_quality"] = data_quality
         data["plan_mode"] = "TRADE_PLAN" if actionable else "AREA_OF_INTEREST"
         if not actionable and status == "🟢 READY":
             data["execution_status"] = "🔵 WATCHLIST"

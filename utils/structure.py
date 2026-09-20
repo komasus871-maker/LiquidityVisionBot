@@ -8,40 +8,30 @@ class Structure:
         self.df = df
 
     def swing_highs(self):
-
         highs = self.df["high"].values
-
-        points = []
-
-        for i in range(2, len(highs) - 2):
-
-            if (
-                highs[i] > highs[i - 1]
-                and highs[i] > highs[i - 2]
-                and highs[i] > highs[i + 1]
-                and highs[i] > highs[i + 2]
-            ):
-                points.append((i, highs[i]))
-
-        return points
+        if len(highs) < 5:
+            return []
+        mask = (
+            (highs[2:-2] > highs[1:-3])
+            & (highs[2:-2] > highs[:-4])
+            & (highs[2:-2] > highs[3:-1])
+            & (highs[2:-2] > highs[4:])
+        )
+        indices = np.flatnonzero(mask) + 2
+        return [(int(index), highs[index]) for index in indices]
 
     def swing_lows(self):
-
         lows = self.df["low"].values
-
-        points = []
-
-        for i in range(2, len(lows) - 2):
-
-            if (
-                lows[i] < lows[i - 1]
-                and lows[i] < lows[i - 2]
-                and lows[i] < lows[i + 1]
-                and lows[i] < lows[i + 2]
-            ):
-                points.append((i, lows[i]))
-
-        return points
+        if len(lows) < 5:
+            return []
+        mask = (
+            (lows[2:-2] < lows[1:-3])
+            & (lows[2:-2] < lows[:-4])
+            & (lows[2:-2] < lows[3:-1])
+            & (lows[2:-2] < lows[4:])
+        )
+        indices = np.flatnonzero(mask) + 2
+        return [(int(index), lows[index]) for index in indices]
 
     def market_structure(self):
 

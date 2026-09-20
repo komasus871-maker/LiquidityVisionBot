@@ -1,3 +1,6 @@
+import numpy as np
+
+
 class MitigationBlock:
 
     def __init__(self, df):
@@ -5,66 +8,56 @@ class MitigationBlock:
         self.df = df
 
     def bullish(self):
-
-        candles = self.df.tail(50).reset_index(drop=True)
-
-        price = float(candles.iloc[-1]["close"])
-
-        for i in range(len(candles) - 3):
-
-            candle = candles.iloc[i]
-
-            if candle["close"] >= candle["open"]:
-                continue
-
-            impulse = candles.iloc[i + 1]
-
-            if impulse["close"] <= candle["high"]:
-                continue
-
-            if candle["low"] <= price <= candle["high"]:
-
-                return {
-
-                    "type": "bullish",
-
-                    "low": float(candle["low"]),
-
-                    "high": float(candle["high"])
-
-                }
+        candles = self.df.tail(50)
+        if len(candles) < 4:
+            return None
+        opens = candles["open"].to_numpy()
+        highs = candles["high"].to_numpy()
+        lows = candles["low"].to_numpy()
+        closes = candles["close"].to_numpy()
+        price = float(closes[-1])
+        indices = np.arange(len(candles))
+        next_closes = np.empty_like(closes)
+        next_closes[:-1] = closes[1:]
+        next_closes[-1] = np.nan
+        matches = (
+            (indices < len(candles) - 3)
+            & (closes < opens)
+            & (next_closes > highs)
+            & (lows <= price)
+            & (price <= highs)
+        )
+        found = np.flatnonzero(matches)
+        if found.size:
+            index = int(found[0])
+            return {"type": "bullish", "low": float(lows[index]), "high": float(highs[index])}
 
         return None
 
     def bearish(self):
-
-        candles = self.df.tail(50).reset_index(drop=True)
-
-        price = float(candles.iloc[-1]["close"])
-
-        for i in range(len(candles) - 3):
-
-            candle = candles.iloc[i]
-
-            if candle["close"] <= candle["open"]:
-                continue
-
-            impulse = candles.iloc[i + 1]
-
-            if impulse["close"] >= candle["low"]:
-                continue
-
-            if candle["low"] <= price <= candle["high"]:
-
-                return {
-
-                    "type": "bearish",
-
-                    "low": float(candle["low"]),
-
-                    "high": float(candle["high"])
-
-                }
+        candles = self.df.tail(50)
+        if len(candles) < 4:
+            return None
+        opens = candles["open"].to_numpy()
+        highs = candles["high"].to_numpy()
+        lows = candles["low"].to_numpy()
+        closes = candles["close"].to_numpy()
+        price = float(closes[-1])
+        indices = np.arange(len(candles))
+        next_closes = np.empty_like(closes)
+        next_closes[:-1] = closes[1:]
+        next_closes[-1] = np.nan
+        matches = (
+            (indices < len(candles) - 3)
+            & (closes > opens)
+            & (next_closes < lows)
+            & (lows <= price)
+            & (price <= highs)
+        )
+        found = np.flatnonzero(matches)
+        if found.size:
+            index = int(found[0])
+            return {"type": "bearish", "low": float(lows[index]), "high": float(highs[index])}
 
         return None
 
