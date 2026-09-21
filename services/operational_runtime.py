@@ -94,12 +94,29 @@ def child_runtime_states() -> dict[str, Any]:
             normalized = "copy_execution"
         if normalized not in allowed:
             continue
-        result[normalized] = {
+        child = {
             "last_success_at": item.get("last_success_at"),
+            "last_started_at": item.get("last_started_at"),
+            "last_finished_at": item.get("last_finished_at"),
             "last_error": item.get("last_error"),
             "processed_count": int(item.get("processed_count") or 0),
             "error_count": int(item.get("error_count") or 0),
         }
+        if normalized == "pump_dump_monitor":
+            try:
+                details = json.loads(item.get("details_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details = {}
+            child["scanner"] = {
+                key: details.get(key) for key in (
+                    "status", "universe", "universe_target", "successfully_fetched",
+                    "failed_symbol_count", "baseline_ready_symbols", "shortlisted_symbols",
+                    "deep_enrichment_symbols", "global_events_created", "active_episodes",
+                    "cycle_duration_seconds", "labels_pending", "labels_complete",
+                    "cohorts_sample_ready", "pipeline_timestamps",
+                )
+            }
+        result[normalized] = child
     return result
 
 

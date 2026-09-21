@@ -56,8 +56,12 @@ async def shadow_status(message: Message) -> None:
 @router.message(F.text == "🩺 System")
 async def terminal_health(message: Message) -> None:
     from services.operational_runtime import OperationalHealthRepository
+    from services.pump_dump_scanner import ScannerRepository
     await message.answer(
-        render_system_status(state.health(), OperationalHealthRepository().health()),
+        render_system_status(
+            state.health(), OperationalHealthRepository().health(),
+            ScannerRepository.home_stats(telegram_id=message.from_user.id),
+        ),
         parse_mode="HTML",
     )
 

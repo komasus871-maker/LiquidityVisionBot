@@ -1743,7 +1743,8 @@ def runtime_finished(worker_name: str, *, processed: int, errors: int, details: 
                 last_error=excluded.last_error,
                 processed_count=excluded.processed_count,
                 error_count=excluded.error_count,
-                details_json=excluded.details_json
+                details_json=CASE WHEN excluded.last_error IS NULL
+                    THEN excluded.details_json ELSE runtime_state.details_json END
             """,
             (worker_name, now, None if error else now, error, processed, errors, details_json),
         )

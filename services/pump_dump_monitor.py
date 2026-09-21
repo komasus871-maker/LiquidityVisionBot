@@ -7,6 +7,7 @@ import logging
 import os
 import socket
 import statistics
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -33,13 +34,21 @@ class BinanceFuturesBroadFeed:
     def __init__(self) -> None:
         self._contracts: dict[str, str] = {}
         self._contracts_loaded_at = 0.0
+        self._session: aiohttp.ClientSession | None = None
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
     async def _json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        timeout = aiohttp.ClientTimeout(total=12)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{self.base_url}{path}", params=params) as response:
-                response.raise_for_status()
-                return await response.json()
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=12)
+            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        async with self._session.get(f"{self.base_url}{path}", params=params) as response:
+            response.raise_for_status()
+            return await response.json()
 
     async def instruments(self) -> list[dict[str, Any]]:
         loop = asyncio.get_running_loop()
@@ -100,7 +109,9 @@ class PumpDumpMonitor:
              InlineKeyboardButton(text="⭐ Watchlist", callback_data=f"watch:{base}:1h")],
             [InlineKeyboardButton(text="📈 Chart", url=f"https://www.binance.com/en/futures/{symbol}"),
              InlineKeyboardButton(text="🚀 Terminal", web_app=WebAppInfo(url=terminal_url))],
-            [InlineKeyboardButton(text="🔕 Mute", callback_data=f"pdmute:{symbol}"),
+            [InlineKeyboardButton(text="⚡ Open Scanner", callback_data="scanhome"),
+             InlineKeyboardButton(text="🔕 Mute", callback_data=f"pdmute:{symbol}")],
+            [
              InlineKeyboardButton(text="⚙ Scanner Settings", callback_data="pdsettings")],
         ])
 
@@ -138,6 +149,9 @@ class PumpDumpMonitor:
         }
 
     async def _check_once_owned(self) -> dict[str, Any]:
+        cycle_started = datetime.now(timezone.utc)
+        cycle_timer = time.perf_counter()
+        stages: dict[str, str] = {"cycle_started_at": cycle_started.isoformat()}
         subscribers = self.repository.subscribers()
         self.repository.close_inactive(
             older_than=datetime.now(timezone.utc) - timedelta(
@@ -146,10 +160,16 @@ class PumpDumpMonitor:
         )
         if not self.enabled:
             return {"status": "disabled", **resource_budget()}
-        if not subscribers:
-            return {"status": "idle", "reason": "NO_SUBSCRIBERS", **resource_budget()}
         instruments = await self.feed.instruments()
-        minimum = min(settings.minimum_quote_volume_24h for _, settings in subscribers)
+        stages["universe_discovered_at"] = datetime.now(timezone.utc).isoformat()
+        # The broad radar is an authoritative product data plane, not a
+        # notification side effect.  It must run even before any user has
+        # persisted scanner preferences.
+        global_settings = ScannerSettings()
+        minimum = min(
+            [global_settings.minimum_quote_volume_24h]
+            + [settings.minimum_quote_volume_24h for _, settings in subscribers]
+        )
         universe = select_liquid_universe(instruments, minimum_quote_volume=minimum,
                                           limit=self.universe_limit)
         ticker_by_symbol = {str(item["symbol"]): item for item in instruments}
@@ -160,16 +180,19 @@ class PumpDumpMonitor:
                 try:
                     candles = await self.feed.candles(symbol)
                     ticker = ticker_by_symbol[symbol]
-                    return build_symbol_snapshot(
+                    return symbol, build_symbol_snapshot(
                         symbol=symbol, venue="BINANCE", candles=candles,
                         change_24h_pct=float(ticker.get("change_24h_pct") or 0),
                         quote_volume_24h=float(ticker.get("quote_volume") or 0),
-                    )
+                    ), None
                 except Exception as exc:
                     logging.warning("Pump/dump snapshot failed for %s: %s", symbol, exc)
-                    return None
+                    return symbol, None, f"{type(exc).__name__}: {str(exc)[:120]}"
 
-        snapshots = [item for item in await asyncio.gather(*(one(symbol) for symbol in universe)) if item]
+        fetched = await asyncio.gather(*(one(symbol) for symbol in universe))
+        snapshots = [item for _, item, _ in fetched if item is not None]
+        failed_symbols = {symbol: error for symbol, item, error in fetched if item is None}
+        stages["broad_radar_completed_at"] = datetime.now(timezone.utc).isoformat()
         benchmark_5m = {item.symbol: item.changes_pct.get(5) for item in snapshots}
         market_values = [float(value) for value in benchmark_5m.values() if value is not None]
         market_move = statistics.median(market_values) if market_values else None
@@ -201,7 +224,7 @@ class PumpDumpMonitor:
         # Stage 1 is candle/ticker-only. Only symbols that trip an adaptive
         # anomaly gate are promoted into the bounded shared microstructure state.
         shortlisted: set[str] = set()
-        for _, settings in subscribers:
+        for settings in [global_settings, *[value for _, value in subscribers]]:
             for snapshot in snapshots:
                 if self.detector.detect(snapshot, settings):
                     shortlisted.add(snapshot.symbol)
@@ -210,7 +233,27 @@ class PumpDumpMonitor:
             item.symbol: replace(item, **self._enrichment(deep_rows, item.symbol))
             for item in snapshots if item.symbol in shortlisted
         }
-        delivered, admitted = 0, 0
+        stages["deep_enrichment_completed_at"] = datetime.now(timezone.utc).isoformat()
+        delivered, admitted, global_events = 0, 0, 0
+
+        # Persist a single product-wide, genuine event/episode stream. User
+        # settings below control personalization and delivery, not whether the
+        # scanner itself exists.
+        severity_rank = {"NORMAL": 0, "STRONG": 1, "EXTREME": 2}
+        for broad_snapshot in snapshots:
+            snapshot = enriched.get(broad_snapshot.symbol, broad_snapshot)
+            candidates = sorted(
+                self.detector.detect(snapshot, global_settings),
+                key=lambda item: (severity_rank[item["severity"].value], abs(item["move_pct"])),
+                reverse=True,
+            )[:1]
+            for candidate in candidates:
+                if self.repository.admit(candidate, global_settings, telegram_id=0):
+                    global_events += 1
+            for extra in classify_additional_alerts(snapshot):
+                if self.repository.record_auxiliary(snapshot, extra, telegram_id=0):
+                    global_events += 1
+
         for telegram_id, settings in subscribers:
             allowed = set(universe)
             if settings.market_scope == "WATCHLIST_ONLY":
@@ -222,7 +265,6 @@ class PumpDumpMonitor:
                     continue
                 snapshot = enriched.get(snapshot.symbol, snapshot)
                 candidates = self.detector.detect(snapshot, settings)
-                severity_rank = {"NORMAL": 0, "STRONG": 1, "EXTREME": 2}
                 candidates = sorted(
                     candidates,
                     key=lambda item: (severity_rank[item["severity"].value], abs(item["move_pct"])),
@@ -269,11 +311,31 @@ class PumpDumpMonitor:
                         delivered += 1
                     except Exception as exc:
                         logging.warning("Auxiliary alert delivery failed user=%s: %s", telegram_id, exc)
-        return {"status": "ok", "universe": len(universe), "snapshots": len(snapshots),
+        stages["episode_engine_completed_at"] = datetime.now(timezone.utc).isoformat()
+        outcome_counts = self.repository.outcome_counters()
+        active_global = self.repository.home_stats(telegram_id=0)["active_episodes"]
+        cycle_duration = round(time.perf_counter() - cycle_timer, 3)
+        return {"status": "ok", "universe": len(universe),
+                "universe_target": self.universe_limit,
+                "universe_candidates": len(instruments),
+                "eligible_liquid_symbols": len(universe),
+                "snapshots": len(snapshots), "successfully_fetched": len(snapshots),
+                "failed_symbol_count": len(failed_symbols),
+                "failed_symbols": failed_symbols,
+                "baseline_ready_symbols": len(snapshots),
+                "baseline_required_minutes": 60,
+                "baseline_source": "241x1m provider REST backfill each cycle",
+                "shortlisted_symbols": len(shortlisted),
                 "deep_enrichment_symbols": len(shortlisted),
-                "events": admitted, "delivered": delivered,
+                "global_events_created": global_events,
+                "personalized_events": admitted, "delivered": delivered,
+                "active_episodes": active_global,
+                "subscribers": len(subscribers),
+                "cycle_duration_seconds": cycle_duration,
+                "pipeline_timestamps": stages,
                 "outcome_labels_updated": outcome_updates["updated"],
                 "outcome_labels_finalized": outcome_updates["finalized"],
+                **outcome_counts,
                 **resource_budget()}
 
     async def check_once(self) -> dict[str, Any]:
@@ -298,14 +360,19 @@ class PumpDumpMonitor:
             release_lease(self.worker_name, self.owner_id)
 
     async def run_forever(self) -> None:
-        while not self._stop.is_set():
-            try:
-                await self.check_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logging.exception("Pump/dump monitor cycle failed")
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
-            except asyncio.TimeoutError:
-                pass
+        try:
+            while not self._stop.is_set():
+                try:
+                    await self.check_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.exception("Pump/dump monitor cycle failed")
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            close = getattr(self.feed, "close", None)
+            if callable(close):
+                await close()

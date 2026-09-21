@@ -174,3 +174,50 @@ async def workers_status(message: Message) -> None:
             f"Last error: <code>{html.escape(str(worker.get('last_error') or 'none'))[:350]}</code>", ""
         ])
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("scanner_health"))
+async def scanner_health(message: Message) -> None:
+    actor = message.from_user.id if message.from_user else None
+    if not operators.authorize(
+        actor_telegram_id=actor, capability=OperatorCapability.SYSTEM_ADMIN,
+        action="SCANNER_HEALTH_VIEW",
+    ):
+        await message.answer("⛔ Operator authorization required. The denied attempt was audited.")
+        return
+    from services.pump_dump_scanner import ScannerRepository
+
+    report = ScannerRepository.home_stats(telegram_id=0)
+    venues = report.get("venues") or {}
+    venue_lines = [
+        f"• <b>{html.escape(str(name))}</b>: "
+        f"<code>{html.escape(str(value.get('state') or 'UNKNOWN'))}</code> · "
+        f"{html.escape(str(value.get('reason') or 'reason unavailable'))}"
+        for name, value in sorted(venues.items())
+    ] or ["• forward venue health unavailable"]
+    lines = [
+        "🩺 <b>SCANNER DATA PLANE</b>", "",
+        f"Operational scanner: <b>{html.escape(report['scanner_status'])}</b>",
+        f"Reason: {html.escape(report['scanner_status_reason'])}",
+        f"Universe: <b>{report['monitored_symbols'] if report['monitored_symbols'] is not None else 'unavailable'}"
+        f" / target {report['universe_target']}</b>",
+        f"Fetched / failed: {report.get('successfully_fetched') or 0} / {report.get('failed_symbol_count') or 0}",
+        f"Baseline ready: {report['baseline_ready_symbols']}",
+        f"Estimated readiness: {str(report['estimated_readiness_minutes']) + 'm' if report['estimated_readiness_minutes'] is not None else 'provider-dependent'}",
+        f"Scanner heartbeat age: {report['scanner_heartbeat_age_seconds']}s",
+        f"Broad radar age: {report['broad_radar_age_seconds']}s",
+        f"Episode-engine age: {report['episode_engine_age_seconds']}s",
+        f"Cycle duration: {report['cycle_duration_seconds']}s",
+        f"Shortlist / enriched: {report['shortlisted_symbols']} / {report['deep_enrichment_symbols']}",
+        f"Active / new 1h / escalations 1h: {report['active_episodes']} / "
+        f"{report['new_anomalies_1h']} / {report['escalations_1h']}",
+        f"Snapshots / pending labels / complete labels / sample-ready cohorts: "
+        f"{report['snapshots_collected']} / {report['labels_pending']} / "
+        f"{report['labels_complete']} / {report['cohorts_sample_ready']}",
+        f"Operational-worker heartbeat age: {report['operational_worker_heartbeat_age_seconds']}s",
+        f"Forward-collector heartbeat age: {report['forward_collector_heartbeat_age_seconds']}s",
+        f"Last error: <code>{html.escape(str(report['last_error'] or 'none'))}</code>",
+        "", "<b>Venue health</b>", *venue_lines,
+        "", "Diagnostics only · no trading authority.",
+    ]
+    await message.answer("\n".join(lines), parse_mode="HTML")

@@ -179,6 +179,9 @@ class WebhookServer:
             metadata = {
                 "selected_view": selected_view,
                 "available_views": list(DISCOVERY_MODES),
+                "scanner_health": ScannerRepository.home_stats(
+                    telegram_id=identity.telegram_id,
+                ),
             }
         elif page == "signals":
             with connect() as connection:
@@ -268,6 +271,7 @@ class WebhookServer:
                 "operational_state": operational_health.get("state"),
                 "operational_heartbeat_at": operational_health.get("heartbeat_at"),
                 "operational_rss_mb": operational_health.get("rss_mb"),
+                "scanner": ScannerRepository.home_stats(telegram_id=identity.telegram_id),
                 "forward_disk_status": storage.get("disk_status"),
                 "forward_disk_usage_percent": storage.get("usage_percent"),
                 "forward_disk_free_gb": storage.get("free_gb"),

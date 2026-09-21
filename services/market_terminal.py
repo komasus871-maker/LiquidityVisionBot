@@ -121,6 +121,7 @@ def render_shadow_status(health: dict[str, Any] | None) -> str:
 
 def render_system_status(
     health: dict[str, Any] | None, operational: dict[str, Any] | None = None,
+    scanner: dict[str, Any] | None = None,
 ) -> str:
     live = os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     collector = render_shadow_status(health).splitlines()[2] if health else "Collector: <b>NOT STARTED</b>"
@@ -133,10 +134,18 @@ def render_system_status(
         operational_state = "STALE"
     venue_lines = []
     for name, value in sorted((health or {}).get("venues", {}).items()):
-        error = value.get("last_error")
+        venue_state = value.get("state") or ("DEGRADED" if value.get("last_error") else "UNKNOWN")
         venue_lines.append(
-            f"• {html.escape(name)}: {'DEGRADED' if error else 'CONNECTED/STARTING'}"
+            f"• {html.escape(name)}: {html.escape(str(venue_state))} · "
+            f"{html.escape(str(value.get('reason') or value.get('last_error') or 'awaiting detail'))}"
         )
+    scanner = scanner or {}
+    scanner_line = (
+        f"Scanner: <b>{html.escape(str(scanner.get('scanner_status') or 'NOT STARTED'))}</b> · "
+        f"universe {scanner.get('monitored_symbols') if scanner.get('monitored_symbols') is not None else 'unavailable'}"
+        f"/{scanner.get('universe_target') or '—'} · baseline {scanner.get('baseline_ready_symbols') or 0} · "
+        f"radar age {scanner.get('broad_radar_age_seconds') if scanner.get('broad_radar_age_seconds') is not None else '—'}s"
+    )
     storage = (health or {}).get("storage") or {}
     disk_line = (
         f"Disk: <b>{html.escape(str(storage.get('disk_status') or 'UNAVAILABLE'))}</b> · "
@@ -160,6 +169,7 @@ def render_system_status(
         f"Telegram: <b>ONLINE</b>\n{collector}\n"
         f"Product worker: <b>{html.escape(operational_state)}</b> · "
         f"heartbeat {operational_age if operational_age is not None else '—'}s\n"
+        f"{scanner_line}\n"
         f"LIVE: <b>{'ENABLED' if live else 'DISABLED'}</b>\n"
         "PAPER: <b>AVAILABLE</b>\n"
         "SHADOW: <b>READ-ONLY / ZERO AUTHORITY</b>\n"

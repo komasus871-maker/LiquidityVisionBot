@@ -216,7 +216,21 @@ class PublicConnector:
         self.symbols = tuple(_symbol(symbol) for symbol in symbols)
         self.resync_symbols: set[str] = set()
         self.connection_count = 0
+        self.reconnect_count = 0
+        self.connected = False
+        self.last_connected_at_ms: int | None = None
         self.last_error: str | None = None
+        self.last_error_at_ms: int | None = None
+
+    def mark_connected(self) -> None:
+        self.connected = True
+        self.connection_count += 1
+        self.last_connected_at_ms = now_ms()
+        # A successful reconnect supersedes an earlier transport error. The
+        # error timestamp remains available through reconnect_count rather
+        # than poisoning health forever.
+        self.last_error = None
+        self.last_error_at_ms = None
 
     async def request_resync(self, symbol: str) -> None:
         self.resync_symbols.add(_symbol(symbol))
@@ -231,12 +245,16 @@ class PublicConnector:
                 raise
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}:{str(exc)[:180]}"
+                self.last_error_at_ms = now_ms()
+                self.reconnect_count += 1
                 logging.warning("forward_collector_reconnect venue=%s error=%s", self.venue.value, self.last_error)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=backoff)
                 except asyncio.TimeoutError:
                     pass
                 backoff = min(backoff * 2, 30)
+            finally:
+                self.connected = False
 
     async def _run_connection(self, emit: Emit, stop: asyncio.Event) -> None:
         raise NotImplementedError
@@ -300,7 +318,7 @@ class BinancePublicConnector(PublicConnector):
         timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=90)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.ws_connect(self.WS + "/".join(streams), heartbeat=30, autoping=True) as ws:
-                self.connection_count += 1
+                self.mark_connected()
                 for symbol in self.symbols:
                     await self._snapshot(session, symbol, emit, connection_id)
                 poller = asyncio.create_task(self._poll_context(session, emit, connection_id, stop))
@@ -342,7 +360,7 @@ class OKXPublicConnector(PublicConnector):
         timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.ws_connect(self.WS, heartbeat=25, autoping=True) as ws:
-                self.connection_count += 1
+                self.mark_connected()
                 await ws.send_json({"id": uuid.uuid4().hex[:16], "op": "subscribe", "args": args})
                 while not stop.is_set():
                     if self.resync_symbols:
@@ -436,7 +454,7 @@ class BingXPublicConnector(PublicConnector):
         timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.ws_connect(self.WS, heartbeat=30, autoping=True) as ws:
-                self.connection_count += 1
+                self.mark_connected()
                 for channel in channels:
                     await ws.send_json({"id": uuid.uuid4().hex, "reqType": "sub", "dataType": channel})
                 poller = asyncio.create_task(self._poll_context(session, emit, connection_id, stop))
@@ -480,6 +498,9 @@ class ForwardCollectorSupervisor:
         self.last_checkpoint_ms: dict[tuple[str, str], int] = {}
         self.last_exchange_ts: dict[tuple[str, str, str], int] = {}
         self.last_event_ms_by_venue: dict[str, int] = {}
+        self.last_event_ms_by_venue_channel: dict[tuple[str, str], int] = {}
+        self.last_event_ms_by_venue_channel_symbol: dict[tuple[str, str, str], int] = {}
+        self.symbols_seen_by_venue_channel: dict[tuple[str, str], set[str]] = {}
         self.started_ms = now_ms()
         self.resync_inflight: set[tuple[str, str]] = set()
         self.events_received = 0
@@ -488,9 +509,34 @@ class ForwardCollectorSupervisor:
         self.shadow_decisions = 0
 
     async def emit(self, event: RawMarketEvent) -> None:
-        self.last_event_ms_by_venue[event.venue.value] = max(
-            event.receive_ts_ms, self.last_event_ms_by_venue.get(event.venue.value, 0),
+        venue = event.venue.value
+        self.last_event_ms_by_venue[venue] = max(
+            event.receive_ts_ms, self.last_event_ms_by_venue.get(venue, 0),
         )
+        channel = {
+            EventType.TRADE: "trades",
+            EventType.BOOK_SNAPSHOT: "book",
+            EventType.BOOK_DELTA: "book",
+            EventType.MARK_PRICE: "ticker",
+            EventType.INDEX_PRICE: "ticker",
+            EventType.OPEN_INTEREST: "open_interest",
+            EventType.FUNDING: "funding",
+            EventType.LIQUIDATION: "liquidations",
+        }.get(event.event_type, event.event_type.value.lower())
+        channel_key = venue, channel
+        self.last_event_ms_by_venue_channel[channel_key] = max(
+            event.receive_ts_ms, self.last_event_ms_by_venue_channel.get(channel_key, 0),
+        )
+        self.symbols_seen_by_venue_channel.setdefault(channel_key, set()).add(event.symbol)
+        symbol_channel_key = venue, channel, event.symbol
+        self.last_event_ms_by_venue_channel_symbol[symbol_channel_key] = max(
+            event.receive_ts_ms,
+            self.last_event_ms_by_venue_channel_symbol.get(symbol_channel_key, 0),
+        )
+        connector = self.connectors.get(venue)
+        if connector is not None:
+            connector.last_error = None
+            connector.last_error_at_ms = None
         clock_key = event.venue.value, event.symbol, event.event_type.value
         previous = self.last_exchange_ts.get(clock_key)
         if previous is not None and event.exchange_ts_ms < previous:
@@ -579,24 +625,96 @@ class ForwardCollectorSupervisor:
             last_event_ms = self.last_event_ms_by_venue.get(connector.venue.value)
             age_ms = max(0, current_ms - last_event_ms) if last_event_ms else None
             uptime_ms = max(0, current_ms - self.started_ms)
-            if connector.last_error:
+            channel_details: dict[str, Any] = {}
+            for channel in ("trades", "ticker", "book", "open_interest", "funding", "liquidations"):
+                key = connector.venue.value, channel
+                seen = self.last_event_ms_by_venue_channel.get(key)
+                symbol_ages = {
+                    symbol: max(0, current_ms - timestamp)
+                    for symbol in getattr(connector, "symbols", ())
+                    if (timestamp := self.last_event_ms_by_venue_channel_symbol.get(
+                        (connector.venue.value, channel, symbol)
+                    ))
+                }
+                channel_age = max(symbol_ages.values()) if symbol_ages else (
+                    max(0, current_ms - seen) if seen else None
+                )
+                fresh_symbols = sum(value <= stale_ms for value in symbol_ages.values())
+                configured_symbols = len(getattr(connector, "symbols", ()))
+                complete = (
+                    fresh_symbols == configured_symbols if configured_symbols
+                    else channel_age is not None and channel_age <= stale_ms
+                )
+                channel_details[channel] = {
+                    "last_event_at_ms": seen,
+                    "age_ms": channel_age,
+                    "freshest_age_ms": min(symbol_ages.values()) if symbol_ages else channel_age,
+                    "symbols_seen": len(self.symbols_seen_by_venue_channel.get(key, set())),
+                    "fresh_symbols": fresh_symbols,
+                    "stale_or_missing_symbols": max(0, configured_symbols - fresh_symbols),
+                    "state": (
+                        "FRESH" if complete
+                        else "STALE" if channel_age is not None else "UNAVAILABLE"
+                    ),
+                }
+            critical = ("trades", "ticker", "book")
+            configured_symbol_count = max(1, len(getattr(connector, "symbols", ())))
+            fresh_critical = [
+                name for name in critical if channel_details[name]["state"] == "FRESH"
+                and channel_details[name]["fresh_symbols"] >= configured_symbol_count
+            ]
+            missing_critical = [name for name in critical if name not in fresh_critical]
+            optional_stale = [name for name in ("open_interest", "funding", "liquidations")
+                              if channel_details[name]["state"] != "FRESH"]
+            legacy_health_probe = not hasattr(connector, "symbols")
+            if legacy_health_probe:
+                if connector.last_error:
+                    state = "DEGRADED" if connector.connection_count > 0 or last_event_ms else "DISCONNECTED"
+                    reason = str(connector.last_error)
+                elif last_event_ms and age_ms is not None and age_ms <= stale_ms:
+                    state, reason = "HEALTHY", "aggregate venue event is fresh"
+                elif last_event_ms:
+                    state, reason = "STALE", "aggregate venue event is stale"
+                elif connector.connection_count > 0 and uptime_ms <= warmup_ms:
+                    state, reason = "CONNECTED", "transport connected; awaiting events"
+                elif uptime_ms <= warmup_ms:
+                    state, reason = "WARMING", "awaiting first connection"
+                else:
+                    state, reason = "DISCONNECTED", "no connection or events"
+            elif connector.last_error:
                 state = "DEGRADED" if connector.connection_count > 0 or last_event_ms else "DISCONNECTED"
-            elif last_event_ms and age_ms is not None and age_ms <= stale_ms:
+                reason = str(connector.last_error)
+            elif len(fresh_critical) == len(critical):
                 state = "HEALTHY"
-            elif last_event_ms:
+                reason = "trade, ticker, and book channels fresh across configured symbols"
+            elif uptime_ms <= warmup_ms and not last_event_ms:
+                state = "CONNECTED" if getattr(connector, "connected", False) else "WARMING"
+                reason = "waiting for first complete critical-channel observations"
+            elif last_event_ms and age_ms is not None and age_ms > stale_ms:
                 state = "STALE"
-            elif connector.connection_count > 0 and uptime_ms <= warmup_ms:
-                state = "CONNECTED"
-            elif uptime_ms <= warmup_ms:
-                state = "WARMING"
-            else:
+                reason = f"all venue events stale ({age_ms / 1000:.1f}s old)"
+            elif fresh_critical:
+                state = "DEGRADED"
+                reason = "critical channels incomplete or stale: " + ", ".join(missing_critical)
+            elif connector.last_error or not getattr(connector, "connected", False):
                 state = "DISCONNECTED"
+                reason = connector.last_error or "transport disconnected without fresh critical channels"
+            else:
+                state = "DEGRADED"
+                reason = "no complete critical channel set"
             return {
                 "state": state,
+                "reason": reason,
+                "connected": getattr(connector, "connected", connector.connection_count > 0),
                 "connection_count": connector.connection_count,
+                "reconnect_count": getattr(connector, "reconnect_count", 0),
+                "last_connected_at_ms": getattr(connector, "last_connected_at_ms", None),
                 "last_event_at_ms": last_event_ms,
                 "event_age_ms": age_ms,
                 "last_error": connector.last_error,
+                "last_error_at_ms": getattr(connector, "last_error_at_ms", None),
+                "channels": channel_details,
+                "optional_stale_channels": optional_stale,
                 "capabilities": connector.capabilities,
             }
 

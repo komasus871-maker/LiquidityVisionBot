@@ -199,10 +199,11 @@ OPERATOR_COMMANDS = frozenset({
     "admin", "admin_plan", "admin_plan_status", "admin_plan_revoke", "admin_plan_extend",
     "admin_entitlements", "admin_users", "admin_usage", "admin_plans", "admin_ai_usage",
     "admin_health", "admin_worker_status",
+    "scanner_health",
 })
 
 OPERATOR_HELP = (
-    "Operator-only: /admin_status /migration_status /workers /grant_plan /revoke_plan\n"
+    "Operator-only: /admin_status /migration_status /workers /scanner_health /grant_plan /revoke_plan\n"
     "AI governance: /ai_mode /ai_disable /ai_provider /ai_certification /ai_drift /ai_experiments /ai_kill\n"
     "User-scoped LIVE and demo controls are documented under /help live."
 )

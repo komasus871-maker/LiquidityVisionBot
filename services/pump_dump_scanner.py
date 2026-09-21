@@ -26,7 +26,7 @@ SCANNER_OUTCOME_COST_MODEL = "scanner-cycle-cost-model-v1"
 DISCOVERY_MODES: dict[str, tuple[str, ...]] = {
     "HOT_NOW": (),
     "EARLY_BUILDUP": ("BUILDUP", "EARLY_ANOMALY"),
-    "NEW_ANOMALIES": ("EARLY_ANOMALY", "EARLY_EXPANSION"),
+    "NEW_ANOMALIES": ("EARLY_ANOMALY", "IGNITION", "EARLY_EXPANSION"),
     "STRONGEST_FLOW": ("SPOT_FLOW_LED_MOVE", "MOMENTUM_EXPANSION", "LEVERAGED_BREAKOUT"),
     "OI_BUILDUP": ("BUILDUP", "LEVERAGED_BREAKOUT"),
     "OI_SHOCK": ("OI_SHOCK",),
@@ -40,7 +40,10 @@ DISCOVERY_MODES: dict[str, tuple[str, ...]] = {
     "EXHAUSTION_WATCH": ("EXHAUSTION", "REVERSAL_RISK", "FAILED_BREAKOUT"),
     "VOLUME_EXPLOSION": ("VOLUME_EXPLOSION",),
     "VOLATILITY_COMPRESSION": ("VOLATILITY_COMPRESSION",),
-    "BREAKOUT_IGNITION": ("EARLY_EXPANSION", "MOMENTUM_EXPANSION", "LEVERAGED_BREAKOUT"),
+    "BREAKOUT_IGNITION": (
+        "IGNITION", "EXPANSION", "EARLY_EXPANSION", "MOMENTUM_EXPANSION",
+        "LEVERAGED_BREAKOUT",
+    ),
 }
 
 SCANNER_ALERT_TYPES = (
@@ -360,8 +363,11 @@ class PumpDumpScanner:
         cross = snapshot.cross_venue_diff_pct or 0
         reasons: list[str] = []
         risks: list[str] = []
-        phase = "EARLY_EXPANSION"
+        phase = "IGNITION"
         state = "MOMENTUM_EXPANSION"
+
+        if abs(move) >= 5 or abs(snapshot.robust_zscore.get(window) or 0) >= 5:
+            phase = "EXPANSION"
 
         if (snapshot.relative_volume or 0) >= 2:
             reasons.append(f"relative volume {snapshot.relative_volume:.2f}x")
@@ -386,7 +392,7 @@ class PumpDumpScanner:
             reasons.append("OI contraction and forced liquidation flow")
         if liq >= 1_000_000:
             state = "LIQUIDATION_CASCADE"
-            phase = "MOMENTUM_EXPANSION"
+            phase = "EXPANSION"
             reasons.append(f"liquidations ${liq:,.0f}")
         if spread >= .20 or abs(book or 0) >= .85:
             state = "LIQUIDITY_VACUUM_MOVE"
@@ -471,7 +477,11 @@ class PumpDumpScanner:
                 "ABSORPTION": "CVD_DIVERGENCE", "EXHAUSTION": "EXHAUSTION_TRANSITION",
                 "REVERSAL_RISK": "EXHAUSTION_TRANSITION",
                 "FAILED_BREAKOUT": "EXHAUSTION_TRANSITION",
-            }.get(state, "VOLATILITY_BREAKOUT" if phase == "EARLY_EXPANSION" else "PUMP_DUMP")
+            }.get(
+                state,
+                "VOLATILITY_BREAKOUT" if phase in {"IGNITION", "EXPANSION", "EARLY_EXPANSION"}
+                else "PUMP_DUMP",
+            )
             if alert_type not in settings.enabled_alert_types:
                 continue
             events.append({
@@ -776,14 +786,27 @@ class ScannerRepository:
     def recent(
         limit: int = 50, *, telegram_id: int | None = None, mode: str | None = None,
     ) -> list[dict[str, Any]]:
-        where = " WHERE telegram_id=?" if telegram_id is not None else ""
         bounded = max(1, min(200, int(limit)))
         query_limit = min(500, bounded * 5) if mode else bounded
-        params: tuple[Any, ...] = ((telegram_id, query_limit)
-                                   if telegram_id is not None else (query_limit,))
         with connect() as conn:
-            rows = conn.execute(f"""SELECT * FROM market_anomaly_events{where}
-                ORDER BY observed_at DESC LIMIT ?""", params).fetchall()
+            if telegram_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM market_anomaly_events ORDER BY observed_at DESC LIMIT ?",
+                    (query_limit,),
+                ).fetchall()
+            else:
+                # New deployments expose the authoritative product-wide radar
+                # (telegram_id=0). Fall back to legacy per-user rows only while
+                # an upgraded worker has not yet written its first global row.
+                rows = conn.execute(
+                    "SELECT * FROM market_anomaly_events WHERE telegram_id=0 "
+                    "ORDER BY observed_at DESC LIMIT ?", (query_limit,),
+                ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        "SELECT * FROM market_anomaly_events WHERE telegram_id=? "
+                        "ORDER BY observed_at DESC LIMIT ?", (telegram_id, query_limit),
+                    ).fetchall()
         result = [dict(row) for row in rows]
         selected_mode = str(mode or "HOT_NOW").upper().replace("-", "_")
         states = DISCOVERY_MODES.get(selected_mode)
@@ -796,10 +819,39 @@ class ScannerRepository:
     def event(record_id: int, *, telegram_id: int) -> dict[str, Any] | None:
         with connect() as conn:
             row = conn.execute(
-                "SELECT * FROM market_anomaly_events WHERE id=? AND telegram_id=?",
+                "SELECT * FROM market_anomaly_events WHERE id=? AND telegram_id IN (0,?)",
                 (record_id, telegram_id),
             ).fetchone()
         return dict(row) if row else None
+
+    @staticmethod
+    def outcome_counters(*, minimum_samples: int = 30) -> dict[str, int]:
+        with connect() as conn:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM scanner_outcome_labels WHERE status='PENDING'"
+            ).fetchone()
+            complete = conn.execute(
+                "SELECT COUNT(*) FROM scanner_outcome_labels WHERE status='LABELED'"
+            ).fetchone()
+            snapshots = conn.execute(
+                "SELECT COUNT(DISTINCT event_id) FROM scanner_outcome_labels"
+            ).fetchone()
+            cohorts = conn.execute(
+                """SELECT COUNT(*) FROM (
+                    SELECT o.horizon_minutes,e.market_state,e.phase,COUNT(*) AS n
+                    FROM scanner_outcome_labels o
+                    JOIN market_anomaly_events e ON e.event_id=o.event_id
+                    WHERE o.status='LABELED'
+                    GROUP BY o.horizon_minutes,e.market_state,e.phase
+                    HAVING COUNT(*)>=?
+                ) AS qualified""", (max(1, int(minimum_samples)),),
+            ).fetchone()
+        return {
+            "snapshots_collected": int(snapshots[0]) if snapshots else 0,
+            "labels_pending": int(pending[0]) if pending else 0,
+            "labels_complete": int(complete[0]) if complete else 0,
+            "cohorts_sample_ready": int(cohorts[0]) if cohorts else 0,
+        }
 
     @staticmethod
     def home_stats(*, telegram_id: int, now: datetime | None = None) -> dict[str, Any]:
@@ -807,45 +859,140 @@ class ScannerRepository:
         cutoff = (current - timedelta(hours=1)).isoformat()
         with connect() as conn:
             active = conn.execute(
-                "SELECT COUNT(*) FROM scanner_episode_state WHERE telegram_id=? AND active=1",
-                (telegram_id,),
+                "SELECT COUNT(*) FROM scanner_episode_state WHERE telegram_id=0 AND active=1",
             ).fetchone()
             new_events = conn.execute(
-                "SELECT COUNT(*) FROM market_anomaly_events WHERE telegram_id=? AND observed_at>=?",
-                (telegram_id, cutoff),
+                "SELECT COUNT(*) FROM market_anomaly_events WHERE telegram_id=0 AND observed_at>=?",
+                (cutoff,),
             ).fetchone()
             escalations = conn.execute(
                 "SELECT COUNT(*) FROM scanner_episode_state "
-                "WHERE telegram_id=? AND last_escalation_at>=?",
-                (telegram_id, cutoff),
+                "WHERE telegram_id=0 AND last_escalation_at>=?",
+                (cutoff,),
             ).fetchone()
             runtime = conn.execute(
-                "SELECT last_success_at,details_json FROM runtime_state WHERE worker_name=?",
+                "SELECT * FROM runtime_state WHERE worker_name=?",
                 ("pump-dump-market-alert-monitor",),
+            ).fetchone()
+            operational = conn.execute(
+                "SELECT state,heartbeat_at,last_error,rss_mb FROM operational_worker_health "
+                "WHERE worker_name='operational_product_worker'"
+            ).fetchone()
+            forward = conn.execute(
+                "SELECT state,heartbeat_at,last_event_at,venues_json,last_error "
+                "FROM forward_worker_health WHERE worker_name='forward_microstructure_collector'"
             ).fetchone()
         details: dict[str, Any] = {}
         if runtime:
             try:
-                details = json.loads(runtime[1] or "{}")
+                details = json.loads(runtime["details_json"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 details = {}
-        freshness = None
-        if runtime and runtime[0]:
+
+        def age(value: Any) -> int | None:
+            if not value:
+                return None
             try:
-                seen = datetime.fromisoformat(str(runtime[0]).replace("Z", "+00:00"))
+                seen = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
                 if seen.tzinfo is None:
                     seen = seen.replace(tzinfo=timezone.utc)
-                freshness = max(0, int((current - seen).total_seconds()))
-            except ValueError:
-                freshness = None
-        return {
+                return max(0, int((current - seen).total_seconds()))
+            except (TypeError, ValueError):
+                return None
+
+        interval = max(30, int(os.getenv("PUMP_SCANNER_INTERVAL_SECONDS", "60")))
+        scanner_heartbeat_age = age(runtime["last_started_at"]) if runtime else None
+        scanner_success_age = age(runtime["last_success_at"]) if runtime else None
+        radar_age = age((details.get("pipeline_timestamps") or {}).get(
+            "broad_radar_completed_at"
+        ))
+        episode_age = age((details.get("pipeline_timestamps") or {}).get(
+            "episode_engine_completed_at"
+        ))
+        operational_age = age(operational["heartbeat_at"]) if operational else None
+        forward_age = age(forward["heartbeat_at"]) if forward else None
+        target = int(details.get("universe_target") or resource_budget()["universe_limit"])
+        monitored = details.get("universe")
+        baseline_ready = int(details.get("baseline_ready_symbols") or 0)
+        failed_count = int(details.get("failed_symbol_count") or 0)
+        estimated_readiness = (
+            0 if monitored is not None and baseline_ready >= int(monitored)
+            else max(1, math.ceil(interval / 60))
+            if monitored is not None and failed_count == 0 else None
+        )
+        status = "NOT_STARTED"
+        reason = "No scanner runtime checkpoint exists yet."
+        runtime_status = str(details.get("status") or "UNKNOWN").upper()
+        if runtime_status == "DISABLED":
+            status, reason = "FAILED", "Scanner is disabled in the operational worker."
+        elif not runtime:
+            pass
+        elif operational_age is None or operational_age > interval * 5:
+            status, reason = "FAILED", "Operational-worker heartbeat is unavailable or stale."
+        elif scanner_heartbeat_age is None or scanner_heartbeat_age > interval * 5:
+            status, reason = "FAILED", "Scanner loop has not started within five cycles."
+        elif runtime["last_error"] or scanner_success_age is None:
+            status = "WARMING" if scanner_success_age is None and not runtime["last_error"] else "DEGRADED"
+            reason = str(runtime["last_error"] or "First broad-radar cycle is still warming.")
+        elif scanner_success_age >= interval * 5:
+            status, reason = "FAILED", "No successful broad-radar cycle within five intervals."
+        elif scanner_success_age >= interval * 2:
+            status, reason = "DEGRADED", "Last successful broad-radar cycle is older than two intervals."
+        elif monitored is not None and baseline_ready < int(monitored):
+            status, reason = "WARMING", "Some symbols lack the required 1-minute history backfill."
+        else:
+            status, reason = "RUNNING", "Operational heartbeat and broad-radar cycle are current."
+
+        venues: dict[str, Any] = {}
+        if forward:
+            try:
+                venues = json.loads(forward["venues_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                venues = {}
+        venue_healthy = sum(
+            str(value.get("state") or "").upper() == "HEALTHY" for value in venues.values()
+        )
+        counters = ScannerRepository.outcome_counters()
+        result = {
+            "scanner_status": status,
+            "scanner_status_reason": reason,
             "monitored_symbols": details.get("universe"),
+            "universe_target": target,
+            "universe_candidates": details.get("universe_candidates"),
+            "eligible_liquid_symbols": details.get("eligible_liquid_symbols"),
+            "successfully_fetched": details.get("successfully_fetched"),
+            "failed_symbol_count": failed_count,
+            "failed_symbols": details.get("failed_symbols") or {},
+            "baseline_ready_symbols": baseline_ready,
+            "baseline_required_minutes": int(details.get("baseline_required_minutes") or 60),
+            "baseline_source": details.get("baseline_source"),
+            "estimated_readiness_minutes": estimated_readiness,
+            "shortlisted_symbols": int(details.get("shortlisted_symbols") or 0),
+            "deep_enrichment_symbols": int(details.get("deep_enrichment_symbols") or 0),
             "active_episodes": int(active[0]) if active else 0,
             "new_anomalies_1h": int(new_events[0]) if new_events else 0,
             "escalations_1h": int(escalations[0]) if escalations else 0,
-            "collector_freshness_seconds": freshness,
-            "collector_state": str(details.get("status") or ("NOT_STARTED" if not runtime else "UNKNOWN")),
+            "scanner_heartbeat_age_seconds": scanner_heartbeat_age,
+            "scanner_last_success_age_seconds": scanner_success_age,
+            "broad_radar_age_seconds": radar_age,
+            "episode_engine_age_seconds": episode_age,
+            "collector_freshness_seconds": scanner_success_age,
+            "cycle_duration_seconds": details.get("cycle_duration_seconds"),
+            "pipeline_timestamps": details.get("pipeline_timestamps") or {},
+            "operational_worker_state": operational["state"] if operational else "NOT_STARTED",
+            "operational_worker_heartbeat_age_seconds": operational_age,
+            "operational_worker_rss_mb": operational["rss_mb"] if operational else None,
+            "forward_collector_state": forward["state"] if forward else "NOT_STARTED",
+            "forward_collector_heartbeat_age_seconds": forward_age,
+            "forward_last_event_age_seconds": age(forward["last_event_at"]) if forward else None,
+            "venues": venues,
+            "venues_healthy": venue_healthy,
+            "venues_degraded": max(0, len(venues) - venue_healthy),
+            "last_error": runtime["last_error"] if runtime else None,
+            "collector_state": runtime_status if runtime else "NOT_STARTED",
         }
+        result.update(counters)
+        return result
 
     @staticmethod
     def historical_context(symbol: str, market_state: str, *, minimum_samples: int = 10) -> dict[str, Any]:
@@ -887,8 +1034,7 @@ class ScannerRepository:
         sql = "SELECT direction,move_pct,observed_at FROM market_anomaly_events WHERE observed_at>=?"
         params: tuple[Any, ...] = (cutoff,)
         if telegram_id is not None:
-            sql += " AND telegram_id=?"
-            params += (telegram_id,)
+            sql += " AND telegram_id=0"
         if symbol:
             sql += " AND symbol=?"
             params += (symbol.upper(),)
@@ -1117,6 +1263,11 @@ def resource_budget() -> dict[str, Any]:
         "scan_interval_seconds": interval,
         "bulk_ticker_requests_per_cycle": 1,
         "kline_requests_per_cycle_max": universe,
+        "estimated_request_weight_per_cycle": 40 + (2 * universe),
+        "documented_request_weight_limit_per_minute": 2400,
+        "estimated_request_weight_utilization_pct": round(
+            (40 + 2 * universe) * 60 / interval / 2400 * 100, 2,
+        ),
         "full_depth_subscriptions": 0,
         "estimated_kline_requests_per_minute": round(universe * 60 / interval, 2),
         "bounded": True,
