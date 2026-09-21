@@ -58,13 +58,13 @@ header{padding:18px 16px 8px}h1{font-size:20px;margin:0}small,.muted{color:var(-
 button{border:1px solid var(--line);background:var(--card);color:var(--text);padding:9px 12px;border-radius:12px;white-space:nowrap}
 button.active{border-color:var(--a);color:var(--a)}main{padding:8px 16px 30px}.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere}.tag{color:var(--a);font-weight:700}
-</style></head><body><header><h1>Liquidity Vision</h1><small>Read-only market terminal · no order controls</small></header>
+</style><script src="https://telegram.org/js/telegram-web-app.js"></script></head><body><header><h1>Liquidity Vision</h1><small>Read-only market terminal · no order controls</small></header>
 <nav id="nav"></nav><main><div id="status" class="muted">Authenticating…</div><div id="cards" class="grid"></div></main>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp; if(tg){tg.ready();tg.expand()}
-const init=tg?tg.initData:""; const pages=["overview","scanner","order-flow","derivatives","paper","shadow","system"];
+const init=tg?tg.initData:""; const pages=["overview","markets","scanner","signals","order-flow","derivatives","paper","portfolio","risk","alerts","shadow","system"];
 const nav=document.getElementById("nav"),cards=document.getElementById("cards"),status=document.getElementById("status");
 function clean(v){return v===null||v===undefined?"—":v} function draw(data){cards.innerHTML=""; const rows=data.items||[data]; rows.forEach(x=>{const d=document.createElement("div");d.className="card";d.textContent=Object.entries(x).filter(([k])=>!k.endsWith("_json")).map(([k,v])=>k.replaceAll("_"," ")+": "+clean(typeof v==="object"?JSON.stringify(v):v)).join("\n");cards.appendChild(d)});status.textContent=data.classification||"Bounded current state"}
-async function load(page){[...nav.children].forEach(b=>b.classList.toggle("active",b.dataset.p===page));status.textContent="Loading…";cards.innerHTML="";try{const r=await fetch("/api/terminal/"+page,{headers:{"X-Telegram-Init-Data":init}});if(!r.ok)throw new Error("HTTP "+r.status);draw(await r.json())}catch(e){status.textContent="Terminal unavailable: "+e.message}}
+async function load(page){[...nav.children].forEach(b=>b.classList.toggle("active",b.dataset.p===page));status.textContent="Loading…";cards.innerHTML="";if(!init){status.textContent="Open this Terminal from the Telegram button. Fallback: return to the bot and send /terminal.";return}try{const r=await fetch("/api/terminal/"+page,{headers:{"X-Telegram-Init-Data":init}});if(!r.ok)throw new Error("HTTP "+r.status);draw(await r.json())}catch(e){status.textContent="Terminal unavailable: "+e.message+". Return to Telegram and use the equivalent bot command."}}
 pages.forEach(p=>{const b=document.createElement("button");b.textContent=p.replace("-"," ").toUpperCase();b.dataset.p=p;b.onclick=()=>load(p);nav.appendChild(b)});load("overview");
 </script></body></html>"""

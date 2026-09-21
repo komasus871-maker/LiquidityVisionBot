@@ -26,12 +26,18 @@ services:
         sync: false
       - key: BOT_MODE
         value: webhook
+      - key: WEB_BACKGROUND_JOBS_ENABLED
+        value: "false"
       - key: ENVIRONMENT
         value: production
       - key: EXECUTION_MODE
         value: PAPER
       - key: FORWARD_WORKER_EXPECTED
         value: "true"
+      - key: OPERATIONAL_WORKER_EXPECTED
+        value: "true"
+      - key: OPERATIONAL_HEARTBEAT_STALE_SECONDS
+        value: "180"
       - key: FORWARD_HEARTBEAT_STALE_SECONDS
         value: "180"
       - key: OKX_PUBLIC_MAX_ATTEMPTS
@@ -61,7 +67,7 @@ services:
       - key: SCANNER_CACHE_TTL
         value: "30"
       - key: WEBHOOK_MAX_ACTIVE_UPDATES
-        value: "100"
+        value: "20"
       - key: COPY_EXECUTION_ENABLED
         value: "true"
       - key: COPY_EXECUTION_INTERVAL
@@ -127,7 +133,7 @@ services:
       - key: MICROSTRUCTURE_COLLECTION_ENABLED
         value: "false"
       - key: PUMP_SCANNER_ENABLED
-        value: "true"
+        value: "false"
       - key: PUMP_SCANNER_INTERVAL_SECONDS
         value: "60"
       - key: PUMP_SCANNER_UNIVERSE_LIMIT
@@ -165,7 +171,7 @@ services:
       - key: LIVE_EXCHANGE_BINGX_ENABLED
         value: "false"
       - key: LIVE_RECONCILIATION_ENABLED
-        value: "true"
+        value: "false"
       - key: LIVE_RECONCILIATION_INTERVAL_SECONDS
         value: "120"
       - key: LIVE_GLOBAL_MAX_POSITIONS
@@ -310,9 +316,84 @@ services:
         value: "30"
 
   - type: worker
-    name: liquidityvision-forward-worker
+    name: liquidityvision-operational-worker
     runtime: python
     plan: 0.5c-512mb
+    numInstances: 1
+    maxShutdownDelaySeconds: 120
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m tools.run_operational_worker
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ENVIRONMENT
+        value: production
+      - key: EXECUTION_MODE
+        value: PAPER
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REQUIRE_PERSISTENT_DB
+        value: "true"
+      - key: PGSSLMODE
+        value: require
+      - key: OPERATIONAL_LEASE_SECONDS
+        value: "120"
+      - key: SIGNAL_CHECK_INTERVAL
+        value: "60"
+      - key: OBSERVATION_CHECK_INTERVAL
+        value: "300"
+      - key: WATCHLIST_CHECK_INTERVAL
+        value: "300"
+      - key: COPY_EXECUTION_ENABLED
+        value: "true"
+      - key: COPY_EXECUTION_INTERVAL
+        value: "60"
+      - key: COPY_EXECUTION_LEASE_SECONDS
+        value: "180"
+      - key: RESEARCH_INTERVAL_SECONDS
+        value: "300"
+      - key: RESEARCH_BATCH_LIMIT
+        value: "200"
+      - key: PUMP_SCANNER_ENABLED
+        value: "true"
+      - key: PUMP_SCANNER_INTERVAL_SECONDS
+        value: "60"
+      - key: PUMP_SCANNER_UNIVERSE_LIMIT
+        value: "40"
+      - key: PUMP_SCANNER_CONCURRENCY
+        value: "5"
+      - key: MICROSTRUCTURE_COLLECTION_ENABLED
+        value: "false"
+      - key: OPERATIONAL_RETENTION_ENABLED
+        value: "true"
+      - key: OPERATIONAL_MAINTENANCE_INITIAL_DELAY_SECONDS
+        value: "300"
+      - key: OPERATIONAL_MAINTENANCE_INTERVAL_SECONDS
+        value: "21600"
+      - key: AI_TRADING_MODE
+        value: AI_OFF
+      - key: AI_PROVIDER
+        value: disabled
+      - key: LIVE_EXECUTION_ENABLED
+        value: "false"
+      - key: LIVE_DISPATCHER_ENABLED
+        value: "false"
+      - key: LIVE_RECONCILIATION_ENABLED
+        value: "false"
+      - key: ALLOW_USER_LIVE_CONNECTIONS
+        value: "false"
+      - key: BINGX_PRODUCTION_ADAPTER_ALLOWED
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+
+  - type: worker
+    name: liquidityvision-forward-worker
+    runtime: python
+    plan: 1c-2g
     numInstances: 1
     maxShutdownDelaySeconds: 120
     buildCommand: pip install -r requirements.txt
@@ -321,7 +402,7 @@ services:
     disk:
       name: forward-evidence
       mountPath: /var/data
-      sizeGB: 100
+      sizeGB: 50
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
@@ -348,7 +429,39 @@ services:
       - key: FORWARD_FEATURE_INTERVAL_MS
         value: "1000"
       - key: FORWARD_MIN_FREE_BYTES
-        value: "10737418240"
+        value: "5368709120"
+      - key: FORWARD_OBJECT_STORAGE_ENABLED
+        value: "true"
+      - key: FORWARD_OBJECT_ENDPOINT_URL
+        sync: false
+      - key: FORWARD_OBJECT_REGION
+        sync: false
+      - key: FORWARD_OBJECT_BUCKET
+        sync: false
+      - key: FORWARD_OBJECT_ACCESS_KEY_ID
+        sync: false
+      - key: FORWARD_OBJECT_SECRET_ACCESS_KEY
+        sync: false
+      - key: FORWARD_OBJECT_PREFIX
+        value: forward-evidence/schema-v2
+      - key: FORWARD_LOCAL_CACHE_BYTES
+        value: "5368709120"
+      - key: FORWARD_PARTITION_SECONDS
+        value: "300"
+      - key: FORWARD_METADATA_RETENTION_SECONDS
+        value: "7200"
+      - key: FORWARD_METADATA_COMPACT_INTERVAL_SECONDS
+        value: "3600"
+      - key: FORWARD_REMOTE_AUDIT_INTERVAL_SECONDS
+        value: "3600"
+      - key: FORWARD_DISK_WARNING_FREE_GB
+        value: "15"
+      - key: FORWARD_DISK_CRITICAL_FREE_GB
+        value: "5"
+      - key: FORWARD_DISK_WARNING_DAYS
+        value: "1.5"
+      - key: FORWARD_DISK_CRITICAL_DAYS
+        value: "0.5"
       - key: FORWARD_LEASE_SECONDS
         value: "120"
       - key: FORWARD_PREVIOUS_EVIDENCE_END_UTC

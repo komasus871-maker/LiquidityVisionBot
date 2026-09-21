@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -16,6 +17,16 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = "forward-microstructure-event-v2"
 RAW_ENCODING = "ZLIB_JSON_UTF8"
+
+
+class _ClosingSQLiteConnection(sqlite3.Connection):
+    """Make `with connection` release Windows file handles, not only commit."""
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
 
 
 class Venue(str, Enum):
@@ -126,7 +137,9 @@ class AppendOnlyEventStore:
     """Durable SQLite ledger whose research tables reject UPDATE and DELETE."""
 
     def __init__(self, path: str | Path, *, raw_partition_root: str | Path | None = None,
-                 minimum_free_bytes: int = 10 * 1024**3):
+                 minimum_free_bytes: int = 10 * 1024**3,
+                 program_identity: str | None = None,
+                 max_segment_seconds: int = 300):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -136,11 +149,15 @@ class AppendOnlyEventStore:
             from services.forward_partition_store import PartitionedRawLedger
             self.raw_ledger = PartitionedRawLedger(
                 self.raw_partition_root, minimum_free_bytes=minimum_free_bytes,
+                program_identity=program_identity,
+                max_segment_seconds=max_segment_seconds,
             )
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
+        connection = sqlite3.connect(
+            self.path, timeout=30, factory=_ClosingSQLiteConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
@@ -301,7 +318,7 @@ class AppendOnlyEventStore:
     def append_feature(self, snapshot: dict[str, Any]) -> str:
         payload = canonical_json(snapshot)
         snapshot_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             try:
                 connection.execute("""INSERT INTO feature_snapshots(
                     snapshot_id,feature_ts_ms,receive_ts_ms,venue,symbol,schema_version,data_quality,feature_json
@@ -319,7 +336,7 @@ class AppendOnlyEventStore:
             raise ValueError("forward lab decisions must never have execution authority")
         payload = canonical_json(decision)
         decision_id = decision.get("decision_id") or hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             try:
                 connection.execute("""INSERT INTO shadow_decisions(
                     decision_id,candidate_id,family,direction,decision_ts_ms,first_evidence_ts_ms,
@@ -336,7 +353,7 @@ class AppendOnlyEventStore:
     def append_label(self, label: dict[str, Any]) -> str:
         payload = canonical_json(label)
         label_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             try:
                 connection.execute(
                     "INSERT INTO outcome_labels(label_id,decision_id,horizon_ms,observed_ts_ms,label_json) VALUES(?,?,?,?,?)",
@@ -348,7 +365,7 @@ class AppendOnlyEventStore:
 
     def unresolved_shadow_decisions(self, expected_horizons: Iterable[int]) -> list[dict[str, Any]]:
         expected = {int(value) for value in expected_horizons}
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             decisions = connection.execute(
                 "SELECT decision_id,decision_json FROM shadow_decisions ORDER BY decision_ts_ms,decision_id"
             ).fetchall()
@@ -365,7 +382,7 @@ class AppendOnlyEventStore:
 
     def checkpoint(self, *, recorded_ts_ms: int, venue: str, symbol: str, connection_id: str | None,
                    last_sequence: int | None, state: str, details: dict[str, Any]) -> None:
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             connection.execute("""INSERT INTO collector_checkpoints(
                 recorded_ts_ms,venue,symbol,connection_id,last_sequence,state,details_json
             ) VALUES(?,?,?,?,?,?,?)""", (
@@ -380,7 +397,7 @@ class AppendOnlyEventStore:
             "end_ts_ms": end_ts_ms, "reason": reason, "severity": severity,
         }
         gap_id = hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             try:
                 connection.execute("""INSERT INTO gap_records(
                     gap_id,venue,symbol,feed,start_ts_ms,end_ts_ms,reason,severity,replay_usable,details_json
@@ -395,7 +412,7 @@ class AppendOnlyEventStore:
     def append_portfolio_event(self, event: dict[str, Any]) -> str:
         payload = canonical_json(event)
         event_id = event.get("portfolio_event_id") or hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
             try:
                 connection.execute("""INSERT INTO portfolio_shadow_events(
                     portfolio_event_id,event_ts_ms,policy_id,event_type,event_json
@@ -414,6 +431,91 @@ class AppendOnlyEventStore:
                 os.fsync(segment.handle.fileno())
         with self._connect() as connection:
             connection.execute("PRAGMA wal_checkpoint(FULL)")
+
+    def compact_rebuildable_metadata(
+        self, *, retain_after_ts_ms: int, remote_verified_through_ts_ms: int,
+        expected_horizon_count: int = 9,
+    ) -> dict[str, Any]:
+        """Atomically bound derived cache after canonical raw evidence is remote-safe.
+
+        Raw events are never handled here. Recent rows and every unresolved decision
+        remain available for restart labeling. Older derived rows are reproducible
+        from checksum-verified raw partitions under the frozen program identity.
+        """
+        if self.raw_ledger is None:
+            raise RuntimeError("metadata compaction requires partitioned canonical raw storage")
+        if int(remote_verified_through_ts_ms) < int(retain_after_ts_ms):
+            raise RuntimeError("canonical raw archive does not cover the metadata compaction cutoff")
+        temporary = self.path.with_suffix(self.path.suffix + ".compact")
+        temporary.unlink(missing_ok=True)
+        for suffix in ("-wal", "-shm"):
+            Path(str(temporary) + suffix).unlink(missing_ok=True)
+        with self._lock:
+            with self._connect() as source:
+                raw_count = int(source.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0])
+                if raw_count:
+                    raise RuntimeError("refusing to compact metadata containing canonical raw rows")
+                before = {
+                    table: int(source.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    for table in ("feature_snapshots", "shadow_decisions", "outcome_labels", "collector_checkpoints")
+                }
+                source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            original_bytes = self.path.stat().st_size if self.path.is_file() else 0
+            shutil.copy2(self.path, temporary)
+            bounded = sqlite3.connect(temporary, timeout=30)
+            try:
+                bounded.execute("PRAGMA foreign_keys=OFF")
+                bounded.execute("BEGIN IMMEDIATE")
+                for table in (
+                    "raw_events", "feature_snapshots", "shadow_decisions", "outcome_labels",
+                    "collector_checkpoints", "gap_records", "portfolio_shadow_events",
+                ):
+                    bounded.execute(f"DROP TRIGGER IF EXISTS {table}_no_delete")
+                bounded.execute("""CREATE TEMP TABLE retained_decisions AS
+                    SELECT d.decision_id FROM shadow_decisions d
+                    LEFT JOIN outcome_labels l ON l.decision_id=d.decision_id
+                    GROUP BY d.decision_id,d.decision_ts_ms
+                    HAVING d.decision_ts_ms>=? OR COUNT(DISTINCT l.horizon_ms)<?""",
+                    (int(retain_after_ts_ms), int(expected_horizon_count)))
+                bounded.execute("""DELETE FROM outcome_labels
+                    WHERE decision_id NOT IN (SELECT decision_id FROM retained_decisions)""")
+                bounded.execute("""DELETE FROM shadow_decisions
+                    WHERE decision_id NOT IN (SELECT decision_id FROM retained_decisions)""")
+                bounded.execute("""DELETE FROM feature_snapshots
+                    WHERE feature_ts_ms<? AND snapshot_id NOT IN (
+                        SELECT feature_snapshot_id FROM shadow_decisions
+                    )""", (int(retain_after_ts_ms),))
+                bounded.execute("""DELETE FROM collector_checkpoints
+                    WHERE checkpoint_id NOT IN (
+                        SELECT MAX(checkpoint_id) FROM collector_checkpoints GROUP BY venue,symbol
+                    )""")
+                for table in (
+                    "raw_events", "feature_snapshots", "shadow_decisions", "outcome_labels",
+                    "collector_checkpoints", "gap_records", "portfolio_shadow_events",
+                ):
+                    bounded.execute(f"""CREATE TRIGGER {table}_no_delete
+                        BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, 'APPEND_ONLY'); END""")
+                after = {
+                    table: int(bounded.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    for table in ("feature_snapshots", "shadow_decisions", "outcome_labels", "collector_checkpoints")
+                }
+                bounded.commit()
+                bounded.execute("VACUUM")
+                bounded.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                bounded.rollback()
+                raise
+            finally:
+                bounded.close()
+            os.replace(temporary, self.path)
+            for suffix in ("-wal", "-shm"):
+                Path(str(temporary) + suffix).unlink(missing_ok=True)
+            return {
+                "retain_after_ts_ms": int(retain_after_ts_ms),
+                "before": before, "after": after,
+                "original_bytes": original_bytes,
+                "compacted_bytes": self.path.stat().st_size,
+            }
 
     def close(self) -> None:
         if self.raw_ledger is not None:

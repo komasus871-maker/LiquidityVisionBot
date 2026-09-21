@@ -1,27 +1,43 @@
 from __future__ import annotations
 
 from html import escape
+from importlib import import_module
+from typing import Any
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from services.capabilities import CapabilityService
-from services.edge_discovery import EdgeDiscoveryEngine
-from services.market_intelligence import concise_market_story
-from services.market_intelligence_repository import MarketIntelligenceRepository
-from services.research_engine import ResearchEngine
 from services.usage_policy import UsagePolicyService
-from services.user_analytics_export import UserAnalyticsExportService
 from utils.symbols import normalize_usdt_symbol
 
 
 router = Router()
-engine = ResearchEngine()
-edge_engine = EdgeDiscoveryEngine()
+
+
+class _LazyService:
+    def __init__(self, module: str, name: str) -> None:
+        self.module = module
+        self.name = name
+        self.instance: Any | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        if self.instance is None:
+            self.instance = getattr(import_module(self.module), self.name)()
+        return getattr(self.instance, name)
+
+
+engine = _LazyService("services.research_engine", "ResearchEngine")
+edge_engine = _LazyService("services.edge_discovery", "EdgeDiscoveryEngine")
 capabilities = CapabilityService()
-market_repo = MarketIntelligenceRepository()
+market_repo = _LazyService("services.market_intelligence_repository", "MarketIntelligenceRepository")
 usage = UsagePolicyService()
+
+
+def concise_market_story(snapshot: dict) -> str:
+    from services.market_intelligence import concise_market_story as render_story
+    return render_story(snapshot)
 
 
 async def _require_capability(message: Message, capability: str) -> bool:
@@ -105,6 +121,7 @@ async def export_analytics(message: Message):
             f"remaining <b>{allowance['remaining']}</b>.", parse_mode="HTML")
         return
     try:
+        from services.user_analytics_export import UserAnalyticsExportService
         filename, payload = UserAnalyticsExportService().build(
             message.from_user.id, format_name=format_name, days=days)
     except ValueError as exc:

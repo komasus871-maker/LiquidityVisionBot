@@ -226,9 +226,10 @@ def test_terminal_is_read_only_bounded_and_never_scans_raw_partitions() -> None:
 
 def test_render_and_live_invariants_remain_fail_closed() -> None:
     text = Path("render.yaml").read_text(encoding="utf-8")
-    assert text.count("type: web") == 1 and text.count("type: worker") == 1
-    assert text.count("LIVE_EXECUTION_ENABLED") == 2
-    assert text.count('value: "false"') >= 9
+    assert text.count("type: web") == 1 and text.count("type: worker") == 2
+    assert text.count("LIVE_EXECUTION_ENABLED") == 3
+    assert text.count('value: "false"') >= 14
     assert "PUMP_SCANNER_UNIVERSE_LIMIT" in text
+    assert "python -m tools.run_operational_worker" in text
     assert "python -m tools.run_forward_microstructure_collector" in text
     assert "C:\\Users" not in text and ".codex" not in text

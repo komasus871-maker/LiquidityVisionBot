@@ -13,6 +13,8 @@ from typing import Any
 
 from database.database import acquire_lease, create_tables, release_lease
 from services.forward_event_store import AppendOnlyEventStore
+from services.forward_evidence_archive import ForwardEvidenceArchive
+from services.forward_object_storage import S3CompatibleObjectStorage
 from services.forward_public_collectors import (
     BinancePublicConnector, BingXPublicConnector, ForwardCollectorSupervisor,
     OKXPublicConnector,
@@ -30,6 +32,10 @@ LEASE_NAME = "forward-microstructure-production-v1"
 
 def _storage_root() -> Path:
     return Path(os.getenv("FORWARD_STORAGE_ROOT", "data/forward_microstructure"))
+
+
+def _enabled(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -128,7 +134,18 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
     store = AppendOnlyEventStore(
         Path(args.database), raw_partition_root=Path(args.raw_partitions),
         minimum_free_bytes=args.minimum_free_bytes,
+        program_identity=f"forward-microstructure-alpha-v1:{identity_hash}",
+        max_segment_seconds=int(os.getenv("FORWARD_PARTITION_SECONDS", "300")),
     )
+    archive: ForwardEvidenceArchive | None = None
+    if _enabled("FORWARD_OBJECT_STORAGE_ENABLED"):
+        archive = ForwardEvidenceArchive(
+            Path(args.raw_partitions), S3CompatibleObjectStorage.from_environment(),
+            prefix=os.getenv("FORWARD_OBJECT_PREFIX", "forward-evidence/schema-v2"),
+            local_cache_bytes=int(os.getenv("FORWARD_LOCAL_CACHE_BYTES", str(5 * 1024**3))),
+            minimum_free_bytes=args.minimum_free_bytes,
+            registry_sink=shared.register_partition,
+        )
     migration_boundary = _record_startup_gaps(
         store, shared, venues, symbols, time.time_ns() // 1_000_000,
     )
@@ -138,16 +155,52 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     async def heartbeat() -> None:
+        last_compaction = 0.0
+        last_remote_audit = 0.0
         while True:
             if not acquire_lease(LEASE_NAME, instance_id, lease_seconds):
                 raise RuntimeError("authoritative forward collector lease was lost")
             health = supervisor.health()
             raw_health = store.raw_ledger.health() if store.raw_ledger else {}
+            archive_health: dict[str, Any] = {}
+            if archive and store.raw_ledger:
+                store.raw_ledger.seal_completed()
+                await asyncio.to_thread(archive.process_pending)
+                await asyncio.to_thread(archive.evict_verified, force_to_cache_limit=True)
+                if time.monotonic() - last_remote_audit >= int(
+                    os.getenv("FORWARD_REMOTE_AUDIT_INTERVAL_SECONDS", "3600")
+                ):
+                    await asyncio.to_thread(archive.audit_remote, limit=20)
+                    last_remote_audit = time.monotonic()
+                archive_health = archive.health()
+                now_monotonic = time.monotonic()
+                if (
+                    archive_health["pending_partitions"] == 0
+                    and archive_health["checksum_failures"] == 0
+                    and archive_health["last_successful_upload_at"]
+                    and now_monotonic - last_compaction >= int(
+                        os.getenv("FORWARD_METADATA_COMPACT_INTERVAL_SECONDS", "3600")
+                    )
+                ):
+                    retain_ms = int(os.getenv("FORWARD_METADATA_RETENTION_SECONDS", "7200")) * 1_000
+                    await asyncio.to_thread(
+                        store.compact_rebuildable_metadata,
+                        retain_after_ts_ms=time.time_ns() // 1_000_000 - retain_ms,
+                        remote_verified_through_ts_ms=int(
+                            archive_health["newest_evidence_ts_ms"] or 0
+                        ),
+                    )
+                    last_compaction = now_monotonic
             last_ms = raw_health.get("last_write_ts_ms")
             shared.heartbeat(
                 instance_id=instance_id, state="RUNNING", started_at=started_at,
                 candidate_identity_hash=identity_hash, venues=health["venues"],
-                storage=raw_health | {"metadata_database": str(Path(args.database))},
+                storage=raw_health | archive_health | {
+                    "metadata_database": str(Path(args.database)),
+                    "metadata_database_bytes": (
+                        Path(args.database).stat().st_size if Path(args.database).is_file() else 0
+                    ),
+                },
                 last_event_at=_iso_from_ms(last_ms) if last_ms else None,
                 migration_boundary_at=migration_boundary,
             )
@@ -201,6 +254,13 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
                 task.cancel()
         await asyncio.gather(collector_task, heartbeat_task, shutdown_task, return_exceptions=True)
         store.close()
+        if archive:
+            try:
+                await asyncio.to_thread(archive.process_pending, force=True)
+                await asyncio.to_thread(archive.evict_verified, force_to_cache_limit=True)
+            except Exception:
+                # Sealed local partitions remain on disk for restart recovery.
+                pass
         release_lease(LEASE_NAME, instance_id)
 
 

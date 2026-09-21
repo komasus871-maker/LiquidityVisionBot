@@ -6,7 +6,7 @@ import heapq
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterable, Iterator
 
 from services.forward_event_store import (
     AppendOnlyEventStore, EventType, IntegrityStatus, RawMarketEvent, Venue, decode_raw_payload,
@@ -85,14 +85,32 @@ class ForwardEventReplay:
     """Rebuild derived snapshots and Shadow decisions without touching the source ledger."""
 
     def __init__(self, source: str | Path, output: str | Path, *,
-                 raw_partition_root: str | Path | None = None, feature_interval_ms: int = 1_000):
+                 raw_partition_root: str | Path | None = None, feature_interval_ms: int = 1_000,
+                 remote_registry: Iterable[dict[str, Any]] | None = None,
+                 object_backend: Any | None = None, cache_root: str | Path | None = None):
         self.source = Path(source)
         self.output = Path(output)
         self.raw_partition_root = Path(raw_partition_root) if raw_partition_root else None
         self.feature_interval_ms = max(100, feature_interval_ms)
+        self.remote_registry = list(remote_registry) if remote_registry is not None else None
+        self.object_backend = object_backend
+        self.cache_root = Path(cache_root) if cache_root else self.output.parent / ".forward-replay-cache"
+
+    def _events(self) -> Iterator[RawMarketEvent]:
+        if self.remote_registry is None:
+            yield from iter_raw_events(self.source, self.raw_partition_root)
+            return
+        if self.object_backend is None:
+            raise ValueError("remote replay requires an object backend")
+        from services.forward_evidence_archive import RemotePartitionReplay
+        for record in RemotePartitionReplay(
+            self.object_backend, self.cache_root,
+        ).records(self.remote_registry):
+            if not record.get("duplicate"):
+                yield _event_from_record(record)
 
     def run(self) -> ReplayResult:
-        if not self.source.is_file():
+        if not self.source.is_file() and self.remote_registry is None:
             raise FileNotFoundError(self.source)
         if self.output.exists():
             raise FileExistsError(f"replay output already exists: {self.output}")
@@ -105,7 +123,7 @@ class ForwardEventReplay:
         events_replayed = 0
         resync_intervals = 0
 
-        for event in iter_raw_events(self.source, self.raw_partition_root):
+        for event in self._events():
             events_replayed += 1
             result = engine.ingest(event, include_snapshot=False)
             if result["resync_required"]:
@@ -129,12 +147,22 @@ class ForwardEventReplay:
                     observed_ts_ms=event.receive_ts_ms, mid=float(mid), book=snapshot["book"],
                 )
 
-        source_decisions = _ids(self.source, "shadow_decisions", "decision_id")
+        source_decisions = (
+            _ids(self.source, "shadow_decisions", "decision_id") if self.source.is_file() else set()
+        )
         replay_decisions = _ids(self.output, "shadow_decisions", "decision_id")
-        source_features = _ids(self.source, "feature_snapshots", "snapshot_id")
+        source_features = (
+            _ids(self.source, "feature_snapshots", "snapshot_id") if self.source.is_file() else set()
+        )
         replay_features = _ids(self.output, "feature_snapshots", "snapshot_id")
+        remote = self.remote_registry is not None
         return ReplayResult(
             events_replayed=events_replayed, resync_intervals=resync_intervals,
-            counts=store.counts(), decision_ids_match=source_decisions == replay_decisions,
-            feature_ids_match=source_features == replay_features,
+            counts=store.counts(),
+            decision_ids_match=(
+                source_decisions <= replay_decisions if remote else source_decisions == replay_decisions
+            ),
+            feature_ids_match=(
+                source_features <= replay_features if remote else source_features == replay_features
+            ),
         )

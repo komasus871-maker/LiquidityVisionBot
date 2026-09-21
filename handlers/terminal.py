@@ -55,7 +55,11 @@ async def shadow_status(message: Message) -> None:
 @router.message(Command("terminal_health"))
 @router.message(F.text == "🩺 System")
 async def terminal_health(message: Message) -> None:
-    await message.answer(render_system_status(state.health()), parse_mode="HTML")
+    from services.operational_runtime import OperationalHealthRepository
+    await message.answer(
+        render_system_status(state.health(), OperationalHealthRepository().health()),
+        parse_mode="HTML",
+    )
 
 
 @router.message(F.text == "📝 Paper")

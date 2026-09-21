@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 
 import database.database as database
+import pytest
 from services.forward_event_store import AppendOnlyEventStore, EventType, RawMarketEvent, Venue
-from services.forward_partition_store import iter_partition_records
+from services.forward_partition_store import disk_health, iter_partition_records
 from services.forward_runtime_state import (
     EXPECTED_CANDIDATE_IDS, ForwardRuntimeStateRepository, candidate_identity,
 )
 from services.market_terminal import (
-    render_market_overview, render_order_flow, render_shadow_status,
+    render_market_overview, render_order_flow, render_shadow_status, render_system_status,
 )
 
 
@@ -85,6 +86,18 @@ def test_terminal_views_do_not_disclose_candidate_performance() -> None:
     assert "BINANCE" in orderflow
     assert "10 frozen" in shadow
     assert "Candidate WR, PF, expectancy and PnL remain hidden" in shadow
+    system = render_system_status({
+        "state": "RUNNING", "heartbeat_at": "2026-09-20T12:00:00+00:00",
+        "venues": {}, "storage": {
+            "disk_status": "HEALTHY", "usage_percent": 18.2,
+            "free_gb": 450.0, "estimated_days_remaining": 34.1,
+            "object_storage_status": "HEALTHY", "pending_partitions": 0,
+            "pending_upload_bytes": 0, "estimated_spool_hours_remaining": 68.1,
+        },
+    })
+    assert "Disk: <b>HEALTHY</b>" in system
+    assert "18.2% used" in system and "34.1 days" in system
+    assert "Object archive: <b>HEALTHY</b>" in system and "68.1h" in system
 
 
 def test_partitioned_raw_storage_is_manifested_and_replayable(tmp_path: Path) -> None:
@@ -111,17 +124,46 @@ def test_partitioned_raw_storage_is_manifested_and_replayable(tmp_path: Path) ->
     assert json.loads(manifests[0].read_text(encoding="utf-8"))["event_count"] == 1
 
 
-def test_render_blueprint_separates_app_and_single_disk_worker() -> None:
+def test_render_blueprint_separates_app_operational_and_single_disk_worker() -> None:
     text = Path("render.yaml").read_text(encoding="utf-8")
     assert text.count("type: web") == 1
-    assert text.count("type: worker") == 1
+    assert text.count("type: worker") == 2
+    assert "name: liquidityvision-operational-worker" in text
+    assert "startCommand: python -m tools.run_operational_worker" in text
     assert "name: liquidityvision-forward-worker" in text
     assert "startCommand: python -m tools.run_forward_microstructure_collector" in text
     assert "mountPath: /var/data" in text
+    assert "sizeGB: 50" in text
+    assert "FORWARD_OBJECT_STORAGE_ENABLED" in text
+    assert "FORWARD_OBJECT_BUCKET" in text
+    assert "FORWARD_LOCAL_CACHE_BYTES" in text
     assert "FORWARD_COLLECTION_ENABLED" in text
     assert "FORWARD_PREVIOUS_EVIDENCE_END_UTC" in text
-    assert text.count("LIVE_EXECUTION_ENABLED") == 2
+    assert text.count("LIVE_EXECUTION_ENABLED") == 3
     assert "value: SHADOW" in text
+
+
+def test_forward_disk_health_thresholds_and_projection() -> None:
+    healthy = disk_health(
+        total_bytes=550 * 1024**3, used_bytes=100 * 1024**3,
+        free_bytes=450 * 1024**3, growth_bytes_per_day=13_840_635_579,
+        minimum_free_bytes=10 * 1024**3,
+    )
+    assert healthy["disk_status"] == "HEALTHY"
+    assert healthy["usage_percent"] == pytest.approx(18.18, abs=.01)
+    assert healthy["estimated_days_remaining"] > 30
+    warning = disk_health(
+        total_bytes=550 * 1024**3, used_bytes=460 * 1024**3,
+        free_bytes=90 * 1024**3, growth_bytes_per_day=13_840_635_579,
+        minimum_free_bytes=10 * 1024**3,
+    )
+    assert warning["disk_status"] == "WARNING"
+    critical = disk_health(
+        total_bytes=550 * 1024**3, used_bytes=510 * 1024**3,
+        free_bytes=40 * 1024**3, growth_bytes_per_day=13_840_635_579,
+        minimum_free_bytes=10 * 1024**3,
+    )
+    assert critical["disk_status"] == "CRITICAL"
 
 
 def test_restart_checkpoint_creates_explicit_non_replayable_gap(monkeypatch, tmp_path: Path) -> None:

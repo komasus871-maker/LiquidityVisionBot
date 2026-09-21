@@ -139,3 +139,20 @@ work even though they are not all shown as first-level reply buttons.
 - The Mini App uses only bounded PostgreSQL current state and aggregate rows.
 - Frozen forward candidates and their evidence-start semantics are not
   imported by these product components.
+
+## Executable runtime matrix
+
+`services.functionality_audit.full_functionality_matrix()` expands this
+registry into the release-time ownership audit. The current matrix contains
+253 unique rows: all 189 normalized commands/callbacks, 13 reply controls, 12
+Terminal pages, 15 scanner discovery modes, 14 configurable scanner alert
+categories, and 10 continuous/maintenance/migration components. Each row
+records its concrete handler, service dependencies, data source, state owner,
+background dependency, tables, output contract, failure/degradation path,
+runtime class, runtime owner, permissions and economic authority.
+
+The audit resolves callback decorators from source rather than treating router
+registration as proof of functionality. Release tests require every callback
+to resolve to a concrete handler, every visible reply control to map to a real
+command, every Terminal page to have an authenticated API route, and every
+matrix ID to be unique.

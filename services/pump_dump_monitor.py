@@ -5,6 +5,10 @@ import asyncio
 import json
 import logging
 import os
+import socket
+import statistics
+import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,6 +16,7 @@ import aiohttp
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
+from database.database import acquire_lease, release_lease, runtime_finished, runtime_started
 from services.forward_runtime_state import ForwardRuntimeStateRepository
 from services.pump_dump_scanner import (
     Candle, PumpDumpScanner, ScannerRepository, ScannerSettings,
@@ -78,6 +83,7 @@ class PumpDumpMonitor:
         self.concurrency = max(1, min(10, int(os.getenv("PUMP_SCANNER_CONCURRENCY", "5"))))
         self.enabled = os.getenv("PUMP_SCANNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._stop = asyncio.Event()
+        self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
     def stop(self) -> None:
         self._stop.set()
@@ -131,7 +137,7 @@ class PumpDumpMonitor:
             "data_quality": freshest.get("data_quality") or "ENRICHED",
         }
 
-    async def check_once(self) -> dict[str, Any]:
+    async def _check_once_owned(self) -> dict[str, Any]:
         subscribers = self.repository.subscribers()
         self.repository.close_inactive(
             older_than=datetime.now(timezone.utc) - timedelta(
@@ -147,7 +153,6 @@ class PumpDumpMonitor:
         universe = select_liquid_universe(instruments, minimum_quote_volume=minimum,
                                           limit=self.universe_limit)
         ticker_by_symbol = {str(item["symbol"]): item for item in instruments}
-        deep_rows = self.forward.latest_states(("BTCUSDT", "ETHUSDT", "SOLUSDT"))
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def one(symbol: str):
@@ -159,13 +164,46 @@ class PumpDumpMonitor:
                         symbol=symbol, venue="BINANCE", candles=candles,
                         change_24h_pct=float(ticker.get("change_24h_pct") or 0),
                         quote_volume_24h=float(ticker.get("quote_volume") or 0),
-                        enrichment=self._enrichment(deep_rows, symbol),
                     )
                 except Exception as exc:
                     logging.warning("Pump/dump snapshot failed for %s: %s", symbol, exc)
                     return None
 
         snapshots = [item for item in await asyncio.gather(*(one(symbol) for symbol in universe)) if item]
+        benchmark_5m = {item.symbol: item.changes_pct.get(5) for item in snapshots}
+        market_values = [float(value) for value in benchmark_5m.values() if value is not None]
+        market_move = statistics.median(market_values) if market_values else None
+        btc_move, eth_move = benchmark_5m.get("BTCUSDT"), benchmark_5m.get("ETHUSDT")
+        magnitudes = sorted(abs(value) for value in market_values)
+        snapshots = [replace(
+            item,
+            btc_relative_return_pct=(
+                round(item.changes_pct[5] - btc_move, 4) if btc_move is not None else None
+            ),
+            eth_relative_return_pct=(
+                round(item.changes_pct[5] - eth_move, 4) if eth_move is not None else None
+            ),
+            market_relative_return_pct=(
+                round(item.changes_pct[5] - market_move, 4) if market_move is not None else None
+            ),
+            cross_sectional_percentile=(
+                round(100 * sum(value <= abs(item.changes_pct[5]) for value in magnitudes)
+                      / len(magnitudes), 1) if magnitudes else None
+            ),
+        ) for item in snapshots]
+
+        # Stage 1 is candle/ticker-only. Only symbols that trip an adaptive
+        # anomaly gate are promoted into the bounded shared microstructure state.
+        shortlisted: set[str] = set()
+        for _, settings in subscribers:
+            for snapshot in snapshots:
+                if self.detector.detect(snapshot, settings):
+                    shortlisted.add(snapshot.symbol)
+        deep_rows = self.forward.latest_states(tuple(sorted(shortlisted))) if shortlisted else []
+        enriched = {
+            item.symbol: replace(item, **self._enrichment(deep_rows, item.symbol))
+            for item in snapshots if item.symbol in shortlisted
+        }
         delivered, admitted = 0, 0
         for telegram_id, settings in subscribers:
             allowed = set(universe)
@@ -176,6 +214,7 @@ class PumpDumpMonitor:
             for snapshot in snapshots:
                 if snapshot.symbol not in allowed:
                     continue
+                snapshot = enriched.get(snapshot.symbol, snapshot)
                 candidates = self.detector.detect(snapshot, settings)
                 severity_rank = {"NORMAL": 0, "STRONG": 1, "EXTREME": 2}
                 candidates = sorted(
@@ -188,7 +227,7 @@ class PumpDumpMonitor:
                     if not alert:
                         continue
                     admitted += 1
-                    if self.bot is not None:
+                    if self.bot is not None and settings.notifications_enabled and not settings.quiet_mode:
                         try:
                             await self.bot.send_message(
                                 telegram_id, render_alert_card(alert), parse_mode="HTML",
@@ -204,12 +243,15 @@ class PumpDumpMonitor:
                 }
                 new_auxiliary: list[str] = []
                 for extra in classify_additional_alerts(snapshot):
+                    if extra["alert_type"] not in settings.enabled_alert_types:
+                        continue
                     if enabled_aux.get(extra["alert_type"], True) is False:
                         continue
                     if self.repository.record_auxiliary(snapshot, extra, telegram_id=telegram_id):
                         new_auxiliary.append(extra["alert_type"])
                         admitted += 1
-                if new_auxiliary and self.bot is not None:
+                if (new_auxiliary and self.bot is not None and settings.notifications_enabled
+                        and not settings.quiet_mode):
                     try:
                         labels = "\n".join(f"• {kind.replace('_', ' ')}" for kind in new_auxiliary)
                         await self.bot.send_message(
@@ -222,7 +264,29 @@ class PumpDumpMonitor:
                     except Exception as exc:
                         logging.warning("Auxiliary alert delivery failed user=%s: %s", telegram_id, exc)
         return {"status": "ok", "universe": len(universe), "snapshots": len(snapshots),
+                "deep_enrichment_symbols": len(shortlisted),
                 "events": admitted, "delivered": delivered, **resource_budget()}
+
+    async def check_once(self) -> dict[str, Any]:
+        ttl = max(self.interval_seconds * 2, 180)
+        if not acquire_lease(self.worker_name, self.owner_id, ttl):
+            return {"status": "skipped", "reason": "LEASE_BUSY", **resource_budget()}
+        runtime_started(self.worker_name)
+        try:
+            result = await self._check_once_owned()
+            runtime_finished(
+                self.worker_name, processed=int(result.get("snapshots") or 0), errors=0,
+                details=result,
+            )
+            return result
+        except Exception as exc:
+            runtime_finished(
+                self.worker_name, processed=0, errors=1,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        finally:
+            release_lease(self.worker_name, self.owner_id)
 
     async def run_forever(self) -> None:
         while not self._stop.is_set():

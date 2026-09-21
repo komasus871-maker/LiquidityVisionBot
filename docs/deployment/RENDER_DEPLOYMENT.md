@@ -2,26 +2,29 @@
 
 ## Production shape
 
-The Blueprint defines two independently restartable services:
+The Blueprint defines three independently restartable services:
 
 1. `liquidityvisionbot-1` is the Telegram webhook web service. It exposes
    `/health`, accepts Telegram updates, serves analysis, alerts, PAPER and the
    authenticated read-only Mini App terminal, and stores shared product state
-   in PostgreSQL. Its resource-bounded broad scanner uses public bulk tickers
-   plus capped one-minute candle requests; it never subscribes broad L2.
-2. `liquidityvision-forward-worker` is the single continuous public-data
-   collector. It writes compressed append-only raw partitions and its local
-   research metadata database under `/var/data/forward_microstructure` on its
-   attached persistent disk. It publishes only bounded current-market state,
-   experiment identity, gaps and a heartbeat to the same PostgreSQL database.
+   in PostgreSQL. It does not run continuous product or research loops.
+2. `liquidityvision-operational-worker` owns lease-protected signal, watchlist,
+   observation, PAPER lifecycle, alert, anomaly-radar, research projection and
+   retention cycles. It can send notifications but owns no webhook or polling.
+3. `liquidityvision-forward-worker` is the single continuous public-data
+   collector. It writes compressed append-only raw partitions to a bounded
+   `/var/data/forward_microstructure` spool, moves sealed/verified evidence to
+   S3-compatible object storage, and keeps a bounded local derived cache. It
+   publishes compact partition identity, bounded current-market state, gaps and
+   health to PostgreSQL.
 
 The Telegram service never reads the worker disk and never scans raw events.
-The worker has no Telegram token, exchange credentials, order adapter or
+The forward worker has no Telegram token, exchange credentials, order adapter or
 execution authority. A PostgreSQL lease prevents two production collectors
 from writing the same experiment.
 
-Start commands are `python bot.py` for the web service and
-`python -m tools.run_forward_microstructure_collector` for the worker.
+Start commands are `python bot.py`, `python -m tools.run_operational_worker`,
+and `python -m tools.run_forward_microstructure_collector`.
 
 ## Required configuration
 
@@ -34,18 +37,34 @@ Set these secrets on the existing Telegram web service:
   Blueprint value.
 - Role-specific Telegram admin ID variables already present in `render.yaml`.
 
-Set `DATABASE_URL` on `liquidityvision-forward-worker` to the **same** internal
-PostgreSQL URL. No private exchange API keys belong on the worker.
+Set `DATABASE_URL` on both workers to the **same** internal PostgreSQL URL.
+Set `BOT_TOKEN` on the operational worker for outbound Telegram notifications.
+No private exchange API keys belong on the forward worker.
+
+Set these forward-worker object-storage secrets. Use a least-privilege key
+restricted to the single evidence bucket/prefix (object read/write/list/head;
+no delete or account administration). Any later authorized retention deletion
+should use a separate short-lived maintenance credential:
+
+- `FORWARD_OBJECT_ENDPOINT_URL`: provider S3 endpoint (R2 or B2); use the AWS
+  endpoint when AWS S3 is selected.
+- `FORWARD_OBJECT_REGION`: provider region (`auto` for R2 where supported).
+- `FORWARD_OBJECT_BUCKET`: dedicated immutable-evidence bucket.
+- `FORWARD_OBJECT_ACCESS_KEY_ID` and `FORWARD_OBJECT_SECRET_ACCESS_KEY`.
+
+The non-secret prefix is `forward-evidence/schema-v2`. Never place any of these
+credentials in Git, the disk, manifests, health output, or PostgreSQL.
 
 The Blueprint locks `LIVE_EXECUTION_ENABLED=false`,
 `LIVE_DISPATCHER_ENABLED=false`, `ALLOW_USER_LIVE_CONNECTIONS=false`, and
-`BINGX_PRODUCTION_ADAPTER_ALLOWED=false`. The web service uses `PAPER`; the
-forward worker uses `SHADOW`. Do not override these values.
+`BINGX_PRODUCTION_ADAPTER_ALLOWED=false` on all three services. The web and
+operational services use `PAPER`; the forward worker uses `SHADOW`. Do not
+override these values.
 
 `TELEGRAM_BOT_TOKEN` is accepted as an explicit alias for local or future
 configuration, but if both token variables are present they must match.
 
-The web service also fixes the scanner budget at:
+The operational worker fixes the scanner budget at:
 
 ```text
 PUMP_SCANNER_ENABLED=true
@@ -76,19 +95,21 @@ startup. Any identity mismatch blocks startup.
 
 ## Persistent storage
 
-Only `/var/data` survives worker restarts. The configured 100 GB disk is a
-conservative initial allocation, not a guaranteed 30-day capacity. Check the
-worker's `storage.free_bytes` heartbeat and Render disk metrics after the first
-24 hours, calculate the measured daily growth rate, and increase the disk well
-before the 10 GiB safety floor. Render disks can be increased but not reduced.
-If free space crosses the safety floor, the collector fails closed instead of
-silently losing evidence.
+Only `/var/data` survives worker restarts. The configured 50 GB disk is a spool,
+not the 30-day archive. It retains a 5 GiB verified local cache and a 5 GiB
+fail-closed free-space reserve. During an archive outage both raw partitions and
+the temporarily uncompacted derived cache grow at the measured combined rate of
+13.8406 GB/day; after cache occupancy this gives about 68.7 hours of outage
+tolerance. The collector continues retrying with bounded exponential backoff,
+reports `DEGRADED`, and fails closed before the reserve rather than discarding
+evidence. Render disks can still be expanded later.
 
-Each raw partition is split by UTC date, venue, symbol and event type. Every
-finalized segment has a manifest containing count, byte size, time bounds and
-SHA-256. Frame CRCs make partial/truncated writes detectable. The SQLite file
-on disk holds only bounded research metadata, checkpoints, decisions and
-outcome labels; shared operational reads use PostgreSQL.
+Partitions use five-minute UTC buckets under date/hour, venue, symbol and event
+type. Every sealed object records receive/exchange bounds, count, size, SHA-256,
+event coverage, collector version and frozen program identity. Frame CRCs detect
+partial writes. A local copy is evictable only after data and manifest objects
+both pass remote verification. The PostgreSQL registry contains identity,
+location, checksum, state and retention metadata—never raw payloads.
 
 ## Deployment order
 
@@ -98,10 +119,13 @@ outcome labels; shared operational reads use PostgreSQL.
    Reuse the existing `liquidityvisionbot-1` service; do not create a second
    Telegram web service with the same token.
 4. Supply the existing web-service secrets when prompted.
-5. Set the same internal `DATABASE_URL` on both services.
-6. Verify the worker has the `forward-evidence` disk mounted at `/var/data` and
-   exactly one instance.
-7. Deploy the worker, then deploy the web service. Do not start a local
+5. Set the same internal `DATABASE_URL` on all three services and the existing
+   `BOT_TOKEN` on web plus the operational worker.
+6. Run `python -m tools.run_product_migrations` once as a Render one-off job.
+7. Create the dedicated object bucket/key, set the five object-storage secrets,
+   and verify the forward worker has the 50 GB `forward-evidence` disk mounted at
+   `/var/data` with exactly one instance.
+8. Deploy both workers, then deploy the web service. Do not start a local
    collector after the hosted worker acquires its lease.
 
 ## Verification
@@ -115,25 +139,30 @@ outcome labels; shared operational reads use PostgreSQL.
   or expired Telegram `initData` with HTTP 403.
 - `/shadow_status` must show a fresh heartbeat and exactly ten frozen Shadow
   candidates without WR, PF, expectancy or PnL.
-- Worker logs must show one lease owner and continuing Binance/OKX/BingX
+- Operational logs must show one master lease and advancing product cycles.
+- Forward-worker logs must show one lease owner and continuing Binance/OKX/BingX
   events. A second worker must exit with `lease is already held`.
-- Confirm the persistent disk contains `forward-metadata.sqlite3` and dated
-  `raw/.../*.fwdz` segments.
+- Confirm the spool contains `forward-metadata.sqlite3`, active partitions, and
+  local manifests/remote sidecars. Confirm sealed objects appear under
+  `forward-evidence/schema-v2/<venue>/<symbol>/YYYY/MM/DD/HH/`.
+- `/terminal_health` and Terminal System must show object status, pending bytes,
+  remaining spool hours, last upload, verified bytes, and zero integrity faults.
 - Confirm every LIVE flag remains false in the Render effective environment.
 
 ## Restart and failure behavior
 
-On a normal deploy Render sends `SIGTERM`; the worker flushes and finalizes raw
-segments within the configured shutdown window. On restart it invalidates
+On a normal deploy Render sends `SIGTERM`; the forward worker flushes, seals and
+attempts to archive active segments within the configured shutdown window. On
+restart it scans sealed/unverified manifests and resumes uploads without changing
+keys or inventing events. An archive outage retains local sources and backs off;
+a checksum/key collision is `CRITICAL` and blocks eviction. It also invalidates
 unfinished label horizons, records the downtime gap, resynchronizes books, and
-continues with new public events. Sequence gaps trigger a book resync and remain
-visible in checkpoints. Telegram remains available if the worker is down;
-`/shadow_status` reports a stale heartbeat.
+continues with new public events. Telegram remains independently available.
 
 ## Rollback
 
-Roll back the web service and worker independently to the previous Git commit.
-Never delete or replace the worker disk during rollback. If the worker version
+Roll back the web service and workers independently to the previous Git commit.
+Never delete or replace the forward-worker disk during rollback. If the worker version
 is rolled back, leave it stopped unless that version understands the existing
 partition schema. The application can remain online with the worker stopped.
 Keep LIVE disabled throughout rollback.

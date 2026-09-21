@@ -20,6 +20,30 @@ from database.database import connect
 
 
 WINDOW_MINUTES = (1, 3, 5, 15, 30, 60)
+DISCOVERY_MODES: dict[str, tuple[str, ...]] = {
+    "HOT_NOW": (),
+    "EARLY_BUILDUP": ("BUILDUP", "EARLY_ANOMALY"),
+    "NEW_ANOMALIES": ("EARLY_ANOMALY", "EARLY_EXPANSION"),
+    "STRONGEST_FLOW": ("SPOT_FLOW_LED_MOVE", "MOMENTUM_EXPANSION", "LEVERAGED_BREAKOUT"),
+    "OI_BUILDUP": ("BUILDUP", "LEVERAGED_BREAKOUT"),
+    "OI_SHOCK": ("OI_SHOCK",),
+    "SQUEEZES": ("SHORT_SQUEEZE", "LONG_SQUEEZE"),
+    "LIQUIDATION_CASCADES": ("LIQUIDATION_CASCADE",),
+    "LIQUIDITY_VACUUM": ("LIQUIDITY_VACUUM_MOVE",),
+    "CVD_DIVERGENCES": ("CVD_DIVERGENCE", "ABSORPTION"),
+    "CROSS_VENUE": ("CROSS_VENUE_DISLOCATION",),
+    "EXHAUSTION_WATCH": ("EXHAUSTION", "REVERSAL_RISK", "FAILED_BREAKOUT"),
+    "VOLUME_EXPLOSION": ("VOLUME_EXPLOSION",),
+    "VOLATILITY_COMPRESSION": ("VOLATILITY_COMPRESSION",),
+    "BREAKOUT_IGNITION": ("EARLY_EXPANSION", "MOMENTUM_EXPANSION", "LEVERAGED_BREAKOUT"),
+}
+
+SCANNER_ALERT_TYPES = (
+    "PUMP_DUMP", "EARLY_BUILDUP", "OI_SHOCK", "OI_BUILDUP", "FUNDING_EXTREME",
+    "LIQUIDATION_CASCADE", "CVD_DIVERGENCE", "CROSS_VENUE_DISLOCATION",
+    "SPREAD_EXPANSION", "LIQUIDITY_VACUUM", "VOLUME_EXPLOSION",
+    "VOLATILITY_COMPRESSION", "VOLATILITY_BREAKOUT", "EXHAUSTION_TRANSITION",
+)
 
 
 class Severity(StrEnum):
@@ -56,6 +80,9 @@ class ScannerSettings:
     oi_shock_alerts: bool = True
     funding_extreme_alerts: bool = True
     muted_symbols: tuple[str, ...] = ()
+    notifications_enabled: bool = True
+    quiet_mode: bool = False
+    enabled_alert_types: tuple[str, ...] = SCANNER_ALERT_TYPES
 
 
 @dataclass(frozen=True)
@@ -88,6 +115,20 @@ class SymbolSnapshot:
     structure: str | None = None
     data_quality: str = "BASIC"
     freshness_seconds: float = 0.0
+    robust_zscore: dict[int, float | None] = field(default_factory=dict)
+    historical_percentile: dict[int, float | None] = field(default_factory=dict)
+    return_velocity_pct: float | None = None
+    return_acceleration_pct: float | None = None
+    volume_robust_zscore: float | None = None
+    distance_from_vwap_pct: float | None = None
+    btc_relative_return_pct: float | None = None
+    eth_relative_return_pct: float | None = None
+    market_relative_return_pct: float | None = None
+    cross_sectional_percentile: float | None = None
+    range_expansion: float | None = None
+    body_to_range: float | None = None
+    upper_wick_ratio: float | None = None
+    lower_wick_ratio: float | None = None
 
     def public_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -115,6 +156,11 @@ class MarketAlert:
     alert_type: str = "PUMP_DUMP"
     classification: str = "MARKET_ALERT"
     economic_authority: bool = False
+    phase: str = "EARLY_ANOMALY"
+    market_state: str = "UNKNOWN_MIXED"
+    evidence_quality: str = "BASIC"
+    reasons: tuple[str, ...] = ()
+    risk_flags: tuple[str, ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -149,6 +195,25 @@ def _resampled_closes(candles: Sequence[Candle], minutes: int) -> list[float]:
     for index in range(minutes - 1, len(candles), minutes):
         result.append(float(candles[index].close))
     return result
+
+
+def robust_zscore(value: float, history: Sequence[float]) -> float | None:
+    clean = [float(item) for item in history if math.isfinite(float(item))]
+    if len(clean) < 20:
+        return None
+    median = statistics.median(clean)
+    mad = statistics.median(abs(item - median) for item in clean)
+    if mad <= 1e-12:
+        return None
+    return round((float(value) - median) / (1.4826 * mad), 3)
+
+
+def historical_percentile(value: float, history: Sequence[float]) -> float | None:
+    clean = [abs(float(item)) for item in history if math.isfinite(float(item))]
+    if len(clean) < 20:
+        return None
+    magnitude = abs(float(value))
+    return round(100 * sum(item <= magnitude for item in clean) / len(clean), 1)
 
 
 def select_liquid_universe(
@@ -201,6 +266,29 @@ def build_symbol_snapshot(
     recent_high = max(float(item.high) for item in recent)
     range_position = ((price - recent_low) / (recent_high - recent_low)
                       if recent_high > recent_low else None)
+    zscores: dict[int, float | None] = {}
+    percentiles: dict[int, float | None] = {}
+    closes = [float(item.close) for item in ordered]
+    for window, move in changes.items():
+        samples = [percent_change(closes[index - window], closes[index])
+                   for index in range(window, len(closes) - 1)]
+        zscores[window] = robust_zscore(move, samples)
+        percentiles[window] = historical_percentile(move, samples)
+    current_volume = float(ordered[-1].quote_volume)
+    volume_zscore = robust_zscore(current_volume, recent_volumes)
+    weighted = sum(float(item.close) * max(0.0, float(item.quote_volume)) for item in recent)
+    volume_total = sum(max(0.0, float(item.quote_volume)) for item in recent)
+    rolling_vwap = weighted / volume_total if volume_total > 0 else None
+    distance_vwap = percent_change(rolling_vwap, price) if rolling_vwap else None
+    velocity = returns[-1] if returns else None
+    acceleration = returns[-1] - returns[-2] if len(returns) > 1 else None
+    latest = ordered[-1]
+    latest_range = max(0.0, float(latest.high) - float(latest.low))
+    prior_ranges = [max(0.0, float(item.high) - float(item.low)) for item in ordered[-61:-1]]
+    baseline_range = statistics.median(prior_ranges) if prior_ranges else 0.0
+    body = abs(float(latest.close) - float(latest.open))
+    upper_wick = max(0.0, float(latest.high) - max(float(latest.open), float(latest.close)))
+    lower_wick = max(0.0, min(float(latest.open), float(latest.close)) - float(latest.low))
     enrich = dict(enrichment or {})
     now = observed_at or datetime.now(timezone.utc)
     last_at = ordered[-1].opened_at
@@ -227,11 +315,24 @@ def build_symbol_snapshot(
         trend=enrich.get("trend"), structure=enrich.get("structure"),
         data_quality=str(enrich.get("data_quality") or "BASIC"),
         freshness_seconds=max(0.0, (now - last_at).total_seconds()),
+        robust_zscore=zscores, historical_percentile=percentiles,
+        return_velocity_pct=round(velocity, 4) if velocity is not None else None,
+        return_acceleration_pct=round(acceleration, 4) if acceleration is not None else None,
+        volume_robust_zscore=volume_zscore,
+        distance_from_vwap_pct=round(distance_vwap, 4) if distance_vwap is not None else None,
+        btc_relative_return_pct=enrich.get("btc_relative_return_pct"),
+        eth_relative_return_pct=enrich.get("eth_relative_return_pct"),
+        market_relative_return_pct=enrich.get("market_relative_return_pct"),
+        cross_sectional_percentile=enrich.get("cross_sectional_percentile"),
+        range_expansion=(round(latest_range / baseline_range, 3) if baseline_range > 0 else None),
+        body_to_range=(round(body / latest_range, 3) if latest_range > 0 else None),
+        upper_wick_ratio=(round(upper_wick / latest_range, 3) if latest_range > 0 else None),
+        lower_wick_ratio=(round(lower_wick / latest_range, 3) if latest_range > 0 else None),
     )
 
 
 class PumpDumpScanner:
-    version = "pump-dump-scanner-v1"
+    version = "opportunity-anomaly-scanner-v2"
 
     @staticmethod
     def _severity(move: float, threshold: float, normalized: float | None,
@@ -243,11 +344,86 @@ class PumpDumpScanner:
             return Severity.STRONG
         return Severity.NORMAL
 
+    @staticmethod
+    def _interpret(snapshot: SymbolSnapshot, move: float, window: int) -> dict[str, Any]:
+        up = move >= 0
+        oi = snapshot.oi_change_pct
+        flow = snapshot.taker_imbalance
+        liq = snapshot.liquidations_usd or 0
+        spread = snapshot.spread_pct or 0
+        book = snapshot.book_imbalance
+        cross = snapshot.cross_venue_diff_pct or 0
+        reasons: list[str] = []
+        risks: list[str] = []
+        phase = "EARLY_EXPANSION"
+        state = "MOMENTUM_EXPANSION"
+
+        if (snapshot.relative_volume or 0) >= 2:
+            reasons.append(f"relative volume {snapshot.relative_volume:.2f}x")
+        percentile = snapshot.historical_percentile.get(window)
+        if percentile is not None:
+            reasons.append(f"{percentile:.1f} historical percentile")
+        zscore = snapshot.robust_zscore.get(window)
+        if zscore is not None:
+            reasons.append(f"robust z-score {zscore:+.2f}")
+        if snapshot.market_relative_return_pct is not None:
+            reasons.append(f"market-relative {snapshot.market_relative_return_pct:+.2f}%")
+
+        if abs(move) < 1.0 and ((snapshot.relative_volume or 0) >= 3 or abs(oi or 0) >= 3):
+            phase, state = "BUILDUP", "BUILDUP"
+        elif abs(move) < 2.0:
+            phase, state = "EARLY_ANOMALY", "EARLY_ANOMALY"
+        if abs(oi or 0) >= 3 and flow is not None and ((up and flow > .15) or (not up and flow < -.15)):
+            state = "LEVERAGED_BREAKOUT"
+            reasons.append(f"OI {oi:+.2f}% confirms directional taker flow")
+        elif oi is not None and oi < -2 and liq >= 250_000:
+            state = "SHORT_SQUEEZE" if up else "LONG_SQUEEZE"
+            reasons.append("OI contraction and forced liquidation flow")
+        if liq >= 1_000_000:
+            state = "LIQUIDATION_CASCADE"
+            phase = "MOMENTUM_EXPANSION"
+            reasons.append(f"liquidations ${liq:,.0f}")
+        if spread >= .20 or abs(book or 0) >= .85:
+            state = "LIQUIDITY_VACUUM_MOVE"
+            reasons.append("spread/depth indicates liquidity withdrawal")
+            risks.append("fragile book liquidity")
+        if abs(cross) >= .25:
+            state = "CROSS_VENUE_DISLOCATION"
+            reasons.append(f"cross-venue dispersion {cross:+.3f}%")
+            risks.append("venue disagreement")
+        if flow is not None and ((up and flow < -.1) or (not up and flow > .1)):
+            state = "ABSORPTION"
+            reasons.append("price and aggressor flow disagree")
+            risks.append("CVD/price divergence")
+        if (snapshot.return_acceleration_pct is not None and
+                move * snapshot.return_acceleration_pct < 0 and abs(move) >= 5):
+            state, phase = "EXHAUSTION", "EXHAUSTION"
+            risks.append("flow/return acceleration is decelerating")
+        if abs(snapshot.funding_rate or 0) >= .001:
+            risks.append("funding extreme")
+        if spread >= .10:
+            risks.append("spread widening")
+        available = sum(value is not None for value in (
+            oi, flow, snapshot.cvd, snapshot.spread_pct, book,
+            snapshot.cross_venue_diff_pct, snapshot.liquidations_usd,
+        ))
+        quality = "HIGH" if available >= 5 and snapshot.freshness_seconds <= 90 else (
+            "MEDIUM" if available >= 2 and snapshot.freshness_seconds <= 180 else "BASIC"
+        )
+        return {
+            "phase": phase, "market_state": state, "reasons": tuple(reasons),
+            "risk_flags": tuple(dict.fromkeys(risks)), "evidence_quality": quality,
+        }
+
     def detect(self, snapshot: SymbolSnapshot, settings: ScannerSettings) -> list[dict[str, Any]]:
         if not settings.enabled or snapshot.symbol in settings.muted_symbols:
             return []
-        if (snapshot.quote_volume_24h is not None
-                and snapshot.quote_volume_24h < settings.minimum_quote_volume_24h):
+        if (snapshot.quote_volume_24h is None or not math.isfinite(snapshot.quote_volume_24h)
+                or snapshot.quote_volume_24h < settings.minimum_quote_volume_24h):
+            return []
+        if snapshot.freshness_seconds > 180 or snapshot.data_quality.upper() in {
+            "STALE", "UNAVAILABLE", "INVALID",
+        }:
             return []
         ranks = {Severity.NORMAL: 0, Severity.STRONG: 1, Severity.EXTREME: 2}
         events: list[dict[str, Any]] = []
@@ -255,7 +431,18 @@ class PumpDumpScanner:
             if window not in snapshot.changes_pct:
                 continue
             move = snapshot.changes_pct[window]
-            if abs(move) < settings.move_threshold_pct:
+            adaptive = (
+                abs(snapshot.robust_zscore.get(window) or 0) >= 4
+                and (snapshot.relative_volume or 0) >= 2
+                and abs(move) >= max(.10, settings.move_threshold_pct * .20)
+            )
+            buildup = (
+                (snapshot.relative_volume or 0) >= 3
+                and (abs(snapshot.robust_zscore.get(window) or 0) >= 2 or
+                     abs(snapshot.oi_change_pct or 0) >= 3)
+                and abs(move) >= .05
+            )
+            if abs(move) < settings.move_threshold_pct and not adaptive and not buildup:
                 continue
             direction = "PUMP" if move > 0 else "DUMP"
             if (direction == "PUMP" and not settings.pump_alerts) or (
@@ -267,6 +454,21 @@ class PumpDumpScanner:
             )
             if ranks[severity] < ranks[settings.minimum_severity]:
                 continue
+            interpretation = self._interpret(snapshot, move, window)
+            state = interpretation["market_state"]
+            phase = interpretation["phase"]
+            alert_type = {
+                "BUILDUP": "EARLY_BUILDUP", "EARLY_ANOMALY": "EARLY_BUILDUP",
+                "LEVERAGED_BREAKOUT": "OI_BUILDUP",
+                "LIQUIDATION_CASCADE": "LIQUIDATION_CASCADE",
+                "CROSS_VENUE_DISLOCATION": "CROSS_VENUE_DISLOCATION",
+                "LIQUIDITY_VACUUM_MOVE": "LIQUIDITY_VACUUM",
+                "ABSORPTION": "CVD_DIVERGENCE", "EXHAUSTION": "EXHAUSTION_TRANSITION",
+                "REVERSAL_RISK": "EXHAUSTION_TRANSITION",
+                "FAILED_BREAKOUT": "EXHAUSTION_TRANSITION",
+            }.get(state, "VOLATILITY_BREAKOUT" if phase == "EARLY_EXPANSION" else "PUMP_DUMP")
+            if alert_type not in settings.enabled_alert_types:
+                continue
             events.append({
                 "symbol": snapshot.symbol, "venue": snapshot.venue,
                 "direction": direction, "severity": severity,
@@ -276,7 +478,9 @@ class PumpDumpScanner:
                 "volatility_normalized_move": snapshot.normalized_moves.get(window),
                 "snapshot": snapshot, "observed_at": snapshot.observed_at,
                 "classification": "MARKET_ALERT", "economic_authority": False,
+                "alert_type": alert_type,
                 "version": self.version,
+                **interpretation,
             })
         return events
 
@@ -311,6 +515,12 @@ class ScannerRepository:
             oi_shock_alerts=bool(data["oi_shock_alerts"]),
             funding_extreme_alerts=bool(data["funding_extreme_alerts"]),
             muted_symbols=values("muted_symbols_json", ()),
+            notifications_enabled=bool(data.get("notifications_enabled", 1)),
+            quiet_mode=bool(data.get("quiet_mode", 0)),
+            enabled_alert_types=(
+                tuple(str(item).upper() for item in values("alert_types_json", SCANNER_ALERT_TYPES))
+                or SCANNER_ALERT_TYPES
+            ),
         )
 
     @staticmethod
@@ -321,8 +531,9 @@ class ScannerRepository:
                 telegram_id,enabled,market_scope,custom_symbols_json,windows_json,
                 move_threshold_pct,minimum_quote_volume_24h,minimum_severity,
                 cooldown_seconds,re_alert_pct,pump_alerts,dump_alerts,liquidation_alerts,
-                oi_shock_alerts,funding_extreme_alerts,muted_symbols_json,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                oi_shock_alerts,funding_extreme_alerts,muted_symbols_json,
+                notifications_enabled,quiet_mode,alert_types_json,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(telegram_id) DO UPDATE SET
                 enabled=excluded.enabled,market_scope=excluded.market_scope,
                 custom_symbols_json=excluded.custom_symbols_json,windows_json=excluded.windows_json,
@@ -333,14 +544,19 @@ class ScannerRepository:
                 dump_alerts=excluded.dump_alerts,liquidation_alerts=excluded.liquidation_alerts,
                 oi_shock_alerts=excluded.oi_shock_alerts,
                 funding_extreme_alerts=excluded.funding_extreme_alerts,
-                muted_symbols_json=excluded.muted_symbols_json,updated_at=excluded.updated_at""",
+                muted_symbols_json=excluded.muted_symbols_json,
+                notifications_enabled=excluded.notifications_enabled,
+                quiet_mode=excluded.quiet_mode,alert_types_json=excluded.alert_types_json,
+                updated_at=excluded.updated_at""",
                 (telegram_id, int(settings.enabled), settings.market_scope,
                  json.dumps(settings.custom_symbols), json.dumps(settings.windows),
                  settings.move_threshold_pct, settings.minimum_quote_volume_24h,
                  settings.minimum_severity.value, settings.cooldown_seconds, settings.re_alert_pct,
                  int(settings.pump_alerts), int(settings.dump_alerts),
                  int(settings.liquidation_alerts), int(settings.oi_shock_alerts),
-                 int(settings.funding_extreme_alerts), json.dumps(settings.muted_symbols), now))
+                 int(settings.funding_extreme_alerts), json.dumps(settings.muted_symbols),
+                 int(settings.notifications_enabled), int(settings.quiet_mode),
+                 json.dumps(settings.enabled_alert_types), now))
 
     @staticmethod
     def subscribers() -> list[tuple[int, ScannerSettings]]:
@@ -349,14 +565,56 @@ class ScannerRepository:
         return [(int(row[0]), ScannerRepository.settings(int(row[0]))) for row in rows]
 
     @staticmethod
-    def recent(limit: int = 50, *, telegram_id: int | None = None) -> list[dict[str, Any]]:
+    def recent(
+        limit: int = 50, *, telegram_id: int | None = None, mode: str | None = None,
+    ) -> list[dict[str, Any]]:
         where = " WHERE telegram_id=?" if telegram_id is not None else ""
-        params: tuple[Any, ...] = ((telegram_id, max(1, min(200, int(limit))))
-                                   if telegram_id is not None else (max(1, min(200, int(limit))),))
+        bounded = max(1, min(200, int(limit)))
+        query_limit = min(500, bounded * 5) if mode else bounded
+        params: tuple[Any, ...] = ((telegram_id, query_limit)
+                                   if telegram_id is not None else (query_limit,))
         with connect() as conn:
             rows = conn.execute(f"""SELECT * FROM market_anomaly_events{where}
                 ORDER BY observed_at DESC LIMIT ?""", params).fetchall()
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+        selected_mode = str(mode or "HOT_NOW").upper().replace("-", "_")
+        states = DISCOVERY_MODES.get(selected_mode)
+        if states:
+            result = [row for row in result if row.get("alert_type") in states
+                      or row.get("market_state") in states or row.get("phase") in states]
+        return result[:bounded]
+
+    @staticmethod
+    def historical_context(symbol: str, market_state: str, *, minimum_samples: int = 10) -> dict[str, Any]:
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute(
+                """SELECT episode_id,move_pct,phase,market_state,observed_at
+                   FROM market_anomaly_events WHERE symbol=? AND market_state=?
+                   ORDER BY observed_at DESC LIMIT 500""",
+                (symbol.upper(), market_state),
+            ).fetchall()]
+        episodes: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            episodes.setdefault(str(row["episode_id"]), []).append(row)
+        maxima = [max(abs(float(item["move_pct"])) for item in episode)
+                  for episode in episodes.values() if episode]
+        durations = []
+        for episode in episodes.values():
+            times = [datetime.fromisoformat(str(item["observed_at"])) for item in episode]
+            if times:
+                durations.append((max(times) - min(times)).total_seconds() / 60)
+        adequate = len(episodes) >= max(1, int(minimum_samples))
+        return {
+            "symbol": symbol.upper(), "market_state": market_state,
+            "similar_episode_count": len(episodes), "sample_adequate": adequate,
+            "typical_max_extension_pct": (
+                round(statistics.median(maxima), 3) if adequate and maxima else None
+            ),
+            "typical_duration_minutes": (
+                round(statistics.median(durations), 1) if adequate and durations else None
+            ),
+            "predictive_probability": None,
+        }
 
     @staticmethod
     def stats_24h(symbol: str | None = None, *, telegram_id: int | None = None,
@@ -410,7 +668,9 @@ class ScannerRepository:
     def close_inactive(*, older_than: datetime) -> int:
         with connect() as conn:
             result = conn.execute(
-                "UPDATE scanner_episode_state SET active=0 WHERE active=1 AND last_seen_at<?",
+                """UPDATE scanner_episode_state SET active=0,end_state='CLOSED',
+                   previous_phase=current_phase,current_phase='CLOSED'
+                   WHERE active=1 AND last_seen_at<?""",
                 (older_than.isoformat(),),
             )
         return max(0, int(result.rowcount or 0))
@@ -428,7 +688,9 @@ class ScannerRepository:
                 elapsed = (now - datetime.fromisoformat(previous["last_alert_at"])).total_seconds()
                 escalation = severity_rank[event["severity"].value] > severity_rank[previous["severity"]]
                 extension = abs(event["move_pct"]) >= abs(float(previous["peak_move_pct"])) + settings.re_alert_pct
-                alert = escalation or extension or elapsed >= settings.cooldown_seconds
+                phase_change = event["phase"] != (previous.get("current_phase") or "EARLY_ANOMALY")
+                state_change = event["market_state"] != (previous.get("market_state") or "UNKNOWN_MIXED")
+                alert = escalation or extension or phase_change or state_change or elapsed >= settings.cooldown_seconds
                 episode_id = previous["episode_id"]
                 started_at = previous["started_at"]
                 peak = max(abs(event["move_pct"]), abs(float(previous["peak_move_pct"])))
@@ -449,6 +711,19 @@ class ScannerRepository:
                 alert_count=excluded.alert_count,active=1""",
                 (telegram_id, *key, episode_id, started_at, now.isoformat(), last_alert, peak,
                  event["severity"].value, count))
+            previous_phase = previous.get("current_phase") if previous else None
+            peak_severity = event["severity"].value
+            if previous and severity_rank.get(str(previous.get("peak_severity")), 0) > severity_rank[peak_severity]:
+                peak_severity = str(previous["peak_severity"])
+            last_escalation = (
+                now.isoformat() if alert else (previous.get("last_escalation_at") if previous else None)
+            )
+            conn.execute("""UPDATE scanner_episode_state SET
+                current_phase=?,previous_phase=?,market_state=?,peak_severity=?,
+                last_escalation_at=?,data_quality=?,end_state=NULL
+                WHERE telegram_id=? AND venue=? AND symbol=? AND direction=? AND window_minutes=?""",
+                (event["phase"], previous_phase, event["market_state"], peak_severity,
+                 last_escalation, event["evidence_quality"], telegram_id, *key))
             if not alert:
                 return None
             cutoff = (now - timedelta(hours=24)).isoformat()
@@ -462,13 +737,16 @@ class ScannerRepository:
             conn.execute("""INSERT INTO market_anomaly_events(
                 event_id,telegram_id,episode_id,symbol,venue,alert_type,direction,severity,window_minutes,
                 move_pct,price_start,price_end,relative_volume,normalized_move,
-                signal_count_24h,snapshot_json,classification,economic_authority,observed_at,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING""",
-                (event_id, telegram_id, episode_id, event["symbol"], event["venue"], "PUMP_DUMP",
+                signal_count_24h,snapshot_json,classification,economic_authority,phase,market_state,
+                evidence_quality,reasons_json,risk_flags_json,observed_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING""",
+                (event_id, telegram_id, episode_id, event["symbol"], event["venue"], event["alert_type"],
                  event["direction"], event["severity"].value, event["window_minutes"],
                  event["move_pct"], event["price_start"], event["price_end"],
                  event["relative_volume"], event["volatility_normalized_move"], signal_count,
                  json.dumps(snapshot.public_dict(), sort_keys=True), "MARKET_ALERT", 0,
+                 event["phase"], event["market_state"], event["evidence_quality"],
+                 json.dumps(event["reasons"]), json.dumps(event["risk_flags"]),
                  now.isoformat(), datetime.now(timezone.utc).isoformat()))
         return MarketAlert(
             event_id=event_id, episode_id=episode_id, symbol=event["symbol"],
@@ -478,6 +756,10 @@ class ScannerRepository:
             relative_volume=event["relative_volume"],
             volatility_normalized_move=event["volatility_normalized_move"],
             signal_count_24h=signal_count, observed_at=now, snapshot=snapshot,
+            phase=event["phase"], market_state=event["market_state"],
+            evidence_quality=event["evidence_quality"], reasons=event["reasons"],
+            risk_flags=event["risk_flags"],
+            alert_type=event["alert_type"],
         )
 
 
@@ -502,6 +784,11 @@ def classify_additional_alerts(snapshot: SymbolSnapshot) -> tuple[dict[str, Any]
          key=lambda value: value or 0) is not None and
          max((value or 0) for value in snapshot.normalized_moves.values()) >= 4,
          {"max_normalized_move": max((value or 0) for value in snapshot.normalized_moves.values())}),
+        ("VOLATILITY_COMPRESSION", (snapshot.range_expansion or 1) <= .55
+         and abs(snapshot.changes_pct.get(5) or 0) <= 1
+         and (snapshot.relative_volume or 0) >= 1.5,
+         {"range_expansion": snapshot.range_expansion,
+          "relative_volume": snapshot.relative_volume}),
     ]
     return tuple({"alert_type": kind, "classification": "MARKET_ALERT",
                   "economic_authority": False, **details}
@@ -512,10 +799,12 @@ def render_alert_card(alert: MarketAlert) -> str:
     snapshot = alert.snapshot
     icon = "🟢" if alert.direction == "PUMP" else "🔴"
     lines = [
-        f"{icon} <b>MARKET ALERT · {alert.direction} · {alert.symbol}</b>",
+        f"{icon} <b>{alert.symbol} · {alert.phase.replace('_', ' ')}</b>",
+        "<i>MARKET ALERT · never execution authority</i>",
         f"<b>{alert.move_pct:+.2f}% / {alert.window_minutes}m</b>",
         f"<code>{alert.price_start:.8g} → {alert.price_end:.8g}</code>", "",
-        f"Severity: <b>{alert.severity.value}</b>",
+        f"State: <b>{alert.market_state.replace('_', ' ')}</b>",
+        f"Severity / evidence: <b>{alert.severity.value} / {alert.evidence_quality}</b>",
     ]
     optional = [
         ("Volume", f"{snapshot.relative_volume:.2f}× normal" if snapshot.relative_volume is not None else None),
@@ -529,8 +818,18 @@ def render_alert_card(alert: MarketAlert) -> str:
         ("Spread", f"{snapshot.spread_pct:.3f}%" if snapshot.spread_pct is not None else None),
         ("Cross-venue", (f"{snapshot.cross_venue_diff_pct:+.3f}%"
                          if snapshot.cross_venue_diff_pct is not None else None)),
+        ("Abnormality", (f"{snapshot.historical_percentile.get(alert.window_minutes):.1f}th percentile"
+                         if snapshot.historical_percentile.get(alert.window_minutes) is not None else None)),
+        ("BTC relative", (f"{snapshot.btc_relative_return_pct:+.2f}%"
+                          if snapshot.btc_relative_return_pct is not None else None)),
+        ("Market relative", (f"{snapshot.market_relative_return_pct:+.2f}%"
+                             if snapshot.market_relative_return_pct is not None else None)),
     ]
     lines.extend(f"{label}: {value}" for label, value in optional if value is not None)
+    if alert.reasons:
+        lines += ["", "<b>WHY IS THIS HERE?</b>", *[f"• {reason}" for reason in alert.reasons]]
+    if alert.risk_flags:
+        lines += ["", "<b>Risk flags</b>", *[f"• {risk}" for risk in alert.risk_flags]]
     lines += ["", f"Signals 24h: <b>{alert.signal_count_24h}</b>",
               f"Exchange: {alert.venue}", f"Data: {snapshot.data_quality} · {snapshot.freshness_seconds:.0f}s old",
               f"Time: {alert.observed_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", "",

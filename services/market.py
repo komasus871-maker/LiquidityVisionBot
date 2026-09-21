@@ -1,3 +1,5 @@
+import asyncio
+
 from services.cache import cache
 from services.data_integrity import DataIntegrityEngine
 from services.providers.okx import OKXProvider
@@ -6,6 +8,8 @@ import pandas as pd
 
 
 class Market:
+
+    _inflight: dict[str, asyncio.Task] = {}
 
     def __init__(self):
 
@@ -40,11 +44,23 @@ class Market:
             frame.attrs["market_data_cache_hit"] = True
         else:
             try:
-                frame = await self.provider.get_klines(
-                    symbol=normalized_symbol,
-                    interval=canonical_interval,
-                    limit=limit,
-                )
+                task = self._inflight.get(cache_key)
+                if task is None:
+                    task = asyncio.create_task(self.provider.get_klines(
+                        symbol=normalized_symbol,
+                        interval=canonical_interval,
+                        limit=limit,
+                    ))
+                    self._inflight[cache_key] = task
+                    def _discard_completed(done: asyncio.Task, key: str = cache_key) -> None:
+                        if self._inflight.get(key) is done:
+                            self._inflight.pop(key, None)
+                    task.add_done_callback(_discard_completed)
+                try:
+                    frame = await asyncio.shield(task)
+                finally:
+                    if task.done() and self._inflight.get(cache_key) is task:
+                        self._inflight.pop(cache_key, None)
             except Exception as exc:
                 error_frame = DataIntegrityEngine.provider_error_frame(
                     provider=type(self.provider).__name__, symbol=normalized_symbol,

@@ -1088,6 +1088,14 @@ def create_tables() -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS operational_worker_health(
+                worker_name TEXT PRIMARY KEY, instance_id TEXT NOT NULL,
+                state TEXT NOT NULL, started_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL, child_states_json TEXT NOT NULL DEFAULT '{}',
+                rss_mb DOUBLE PRECISION, last_error TEXT, updated_at TEXT NOT NULL
+            )
+        """)
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS forward_gap_events(
                 id {id_col}, event_key TEXT NOT NULL UNIQUE,
@@ -1103,6 +1111,23 @@ def create_tables() -> None:
                 candidate_ids_json TEXT NOT NULL, feature_schema TEXT NOT NULL,
                 execution_authority INTEGER NOT NULL DEFAULT 0,
                 frozen_at TEXT NOT NULL, registered_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS forward_partition_registry(
+                partition_id TEXT PRIMARY KEY, schema_version TEXT NOT NULL,
+                venue TEXT NOT NULL, symbol TEXT NOT NULL,
+                event_types_json TEXT NOT NULL, bucket_start_ts_ms BIGINT NOT NULL,
+                first_receive_ts_ms BIGINT NOT NULL, last_receive_ts_ms BIGINT NOT NULL,
+                first_exchange_ts_ms BIGINT, last_exchange_ts_ms BIGINT,
+                event_count BIGINT NOT NULL, byte_count BIGINT NOT NULL,
+                sha256 TEXT NOT NULL, object_key TEXT NOT NULL UNIQUE,
+                manifest_object_key TEXT NOT NULL,
+                upload_state TEXT NOT NULL, replay_available INTEGER NOT NULL DEFAULT 0,
+                retention_state TEXT NOT NULL, incident_state TEXT,
+                collector_version TEXT, program_identity TEXT,
+                finalized_at TEXT NOT NULL, remote_verified_at TEXT,
+                local_state TEXT NOT NULL DEFAULT 'PRESENT', updated_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -1173,7 +1198,10 @@ def create_tables() -> None:
                 liquidation_alerts INTEGER NOT NULL DEFAULT 1,
                 oi_shock_alerts INTEGER NOT NULL DEFAULT 1,
                 funding_extreme_alerts INTEGER NOT NULL DEFAULT 1,
-                muted_symbols_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
+                muted_symbols_json TEXT NOT NULL DEFAULT '[]',
+                notifications_enabled INTEGER NOT NULL DEFAULT 1,
+                quiet_mode INTEGER NOT NULL DEFAULT 0,
+                alert_types_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
             )
         """)
         conn.execute(f"""
@@ -1185,6 +1213,10 @@ def create_tables() -> None:
                 last_alert_at TEXT NOT NULL, peak_move_pct NUMERIC(18,8) NOT NULL,
                 severity TEXT NOT NULL, alert_count INTEGER NOT NULL DEFAULT 0,
                 active INTEGER NOT NULL DEFAULT 1,
+                current_phase TEXT NOT NULL DEFAULT 'EARLY_ANOMALY',
+                previous_phase TEXT, market_state TEXT NOT NULL DEFAULT 'UNKNOWN_MIXED',
+                peak_severity TEXT NOT NULL DEFAULT 'NORMAL', last_escalation_at TEXT,
+                data_quality TEXT NOT NULL DEFAULT 'BASIC', end_state TEXT,
                 PRIMARY KEY(telegram_id,venue,symbol,direction,window_minutes)
             )
         """)
@@ -1199,7 +1231,12 @@ def create_tables() -> None:
                 relative_volume NUMERIC(18,8), normalized_move NUMERIC(18,8),
                 signal_count_24h INTEGER NOT NULL, snapshot_json TEXT NOT NULL,
                 classification TEXT NOT NULL DEFAULT 'MARKET_ALERT',
-                economic_authority INTEGER NOT NULL DEFAULT 0, observed_at TEXT NOT NULL,
+                economic_authority INTEGER NOT NULL DEFAULT 0,
+                phase TEXT NOT NULL DEFAULT 'EARLY_ANOMALY',
+                market_state TEXT NOT NULL DEFAULT 'UNKNOWN_MIXED',
+                evidence_quality TEXT NOT NULL DEFAULT 'BASIC',
+                reasons_json TEXT NOT NULL DEFAULT '[]', risk_flags_json TEXT NOT NULL DEFAULT '[]',
+                observed_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         """)
@@ -1247,6 +1284,27 @@ def create_tables() -> None:
         _add_column(conn, "market_anomaly_events", "created_at", "TEXT")
         _add_column(conn, "market_anomaly_events", "telegram_id", "BIGINT NOT NULL DEFAULT 0")
         _add_column(conn, "scanner_episode_state", "telegram_id", "BIGINT NOT NULL DEFAULT 0")
+        for name, definition in {
+            "current_phase": "TEXT NOT NULL DEFAULT 'EARLY_ANOMALY'",
+            "previous_phase": "TEXT",
+            "market_state": "TEXT NOT NULL DEFAULT 'UNKNOWN_MIXED'",
+            "peak_severity": "TEXT NOT NULL DEFAULT 'NORMAL'",
+            "last_escalation_at": "TEXT",
+            "data_quality": "TEXT NOT NULL DEFAULT 'BASIC'",
+            "end_state": "TEXT",
+        }.items():
+            _add_column(conn, "scanner_episode_state", name, definition)
+        for name, definition in {
+            "phase": "TEXT NOT NULL DEFAULT 'EARLY_ANOMALY'",
+            "market_state": "TEXT NOT NULL DEFAULT 'UNKNOWN_MIXED'",
+            "evidence_quality": "TEXT NOT NULL DEFAULT 'BASIC'",
+            "reasons_json": "TEXT NOT NULL DEFAULT '[]'",
+            "risk_flags_json": "TEXT NOT NULL DEFAULT '[]'",
+        }.items():
+            _add_column(conn, "market_anomaly_events", name, definition)
+        _add_column(conn, "scanner_user_settings", "notifications_enabled", "INTEGER NOT NULL DEFAULT 1")
+        _add_column(conn, "scanner_user_settings", "quiet_mode", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "scanner_user_settings", "alert_types_json", "TEXT NOT NULL DEFAULT '[]'")
         for name, definition in {
             "owner_telegram_id": "BIGINT", "triggered_at": "TEXT", "activated_at": "TEXT",
             "expires_at": "TEXT", "invalidated_at": "TEXT", "preferred_entry_low": "DOUBLE PRECISION",
@@ -1555,6 +1613,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_microstructure_expiry ON microstructure_aggregates(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_forward_market_symbol_time ON forward_market_state(symbol,updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_forward_gap_time ON forward_gap_events(gap_start_at)",
+            "CREATE INDEX IF NOT EXISTS idx_forward_partition_time ON forward_partition_registry(first_receive_ts_ms,last_receive_ts_ms)",
+            "CREATE INDEX IF NOT EXISTS idx_forward_partition_state ON forward_partition_registry(upload_state,retention_state)",
             "CREATE INDEX IF NOT EXISTS idx_market_source_symbol_type_time ON market_source_snapshots(symbol,source_type,observed_at)",
             "CREATE INDEX IF NOT EXISTS idx_market_source_expiry ON market_source_snapshots(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_capability_entitlements_user ON capability_entitlements(telegram_id,capability)",
@@ -1563,6 +1623,8 @@ def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_intelligence_alert_user_time ON intelligence_alert_events(telegram_id,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_market_anomaly_symbol_time ON market_anomaly_events(symbol,observed_at)",
             "CREATE INDEX IF NOT EXISTS idx_market_anomaly_type_time ON market_anomaly_events(alert_type,observed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_anomaly_state_time ON market_anomaly_events(market_state,observed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scanner_episode_active ON scanner_episode_state(active,last_seen_at)",
             "CREATE INDEX IF NOT EXISTS idx_feature_usage_user_cap_time ON feature_usage_events(telegram_id,capability,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",

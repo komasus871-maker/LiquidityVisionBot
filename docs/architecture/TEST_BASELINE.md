@@ -159,3 +159,51 @@ The forward lab used only deterministic local fixtures for its test suites. A se
 - Final full suite: **599 passed, 6 failed in 59.96 seconds**.
 
 The six failures are exactly the same **PRE_EXISTING** node IDs listed above. Relative to the 577/6 historical-flow baseline, the forward lab adds **22 passing tests**, preserves the six known failures, and introduces **0 NEW_REGRESSION**, **0 OUTDATED_CONTRACT**, **0 ENVIRONMENT_DEPENDENT**, and **0 UNKNOWN** new failures.
+
+## Production runtime/product maximization verification
+
+The Render runtime split, operational ownership, authenticated Terminal,
+two-stage anomaly scanner, bounded cache/request coalescing, and deployment
+safety contracts were verified without changing historical research outputs,
+candidate identities, strategy defaults, or execution authority.
+
+- Focused deployment/runtime/Terminal/scanner/DecisionAuthority/PAPER/recovery
+  regression set: **51 passed in 6.76 seconds**.
+- Static compilation passed for `bot.py`, `database`, `handlers`, `services`,
+  `tools`, and `tests`.
+- Final full suite: **635 passed, 6 failed in 63.20 seconds**.
+- The six failures are exactly the established **PRE_EXISTING** node IDs listed
+  above. This sprint introduces **0 NEW_REGRESSION**.
+
+LIVE remained fail-closed, no order was submitted, no sealed outcome was read,
+and no deployment, commit, or push occurred.
+
+## Forward object-storage architecture verification
+
+The forward evidence redesign preserves the measured event fidelity while
+moving only sealed, checksum-verified partitions to provider-neutral object
+storage. Tests use the deterministic in-memory S3-compatible backend and no
+cloud credentials or candidate outcomes.
+
+- Focused forward/storage/Render/runtime/DecisionAuthority/PAPER/LIVE suite:
+  **120 passed, 1 failed**. The single failure is the established LIVE-readiness
+  contract mismatch listed below; therefore the focused result has
+  **0 NEW_REGRESSION**.
+- Storage/deployment/runtime subset: **59 passed**.
+- Windows compacted-SQLite atomic swap: **10 consecutive passing runs** with
+  no residual `.compact`, WAL or SHM files.
+- Static compilation passed for the repository Python sources.
+- Final full suite: **650 passed, 6 failed in 82.19 seconds**.
+
+The six failures are exactly the established **PRE_EXISTING** node IDs:
+
+1. `tests/test_v102_multilingual_autonomous_platform.py::test_market_intelligence_v102_separates_scores_and_fusion`
+2. `tests/test_v102_multilingual_autonomous_platform.py::test_alert_engine_v3_records_usage_delivery_and_unchanged_state`
+3. `tests/test_v102_multilingual_autonomous_platform.py::test_copy_analytics_v2_empty_state_and_public_error_sanitizer`
+4. `tests/test_v103_operational_intelligence.py::test_quality_readiness_scanner_and_fusion_v3_semantics`
+5. `tests/test_v9910_durable_live_execution.py::test_readiness_reports_every_failure_and_can_pass`
+6. `tests/test_v9918_market_intelligence.py::test_pump_and_dump_reversal_distinguish_continuation_from_exhaustion`
+
+`NEW_REGRESSION = 0`. No strategy, candidate identity, collection fidelity,
+retention requirement, production default, LIVE flag, commit, push or deployment
+changed during this storage task.

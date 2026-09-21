@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+from pathlib import Path
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
@@ -16,6 +17,21 @@ from services.ai_trading import configured_capabilities
 from services.providers.okx import OKXProvider
 from services.market_intelligence_repository import MarketIntelligenceRepository
 _STARTED_AT = datetime.now(timezone.utc)
+
+
+def _process_resources() -> dict[str, Any]:
+    result: dict[str, Any] = {"rss_mb": None, "cpu_time_seconds": None}
+    try:
+        pages = Path("/proc/self/statm").read_text(encoding="ascii").split()
+        result["rss_mb"] = round(
+            int(pages[1]) * int(os.sysconf("SC_PAGE_SIZE")) / 1_048_576, 2,
+        )
+        fields = Path("/proc/self/stat").read_text(encoding="ascii").split()
+        ticks = float(os.sysconf("SC_CLK_TCK"))
+        result["cpu_time_seconds"] = round((int(fields[13]) + int(fields[14])) / ticks, 3)
+    except (AttributeError, IndexError, OSError, ValueError):
+        pass
+    return result
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -243,6 +259,23 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         if forward_age is None or forward_age > max(30, int(os.getenv("FORWARD_HEARTBEAT_STALE_SECONDS", "180"))):
             status = "warning" if status == "ok" else status
 
+    try:
+        from services.operational_runtime import OperationalHealthRepository
+        operational_health = OperationalHealthRepository().health()
+    except Exception as exc:
+        operational_health = {"state": "UNAVAILABLE", "last_error": str(exc)[:200]}
+    operational_expected = os.getenv(
+        "OPERATIONAL_WORKER_EXPECTED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if operational_expected:
+        operational_heartbeat = _parse_time((operational_health or {}).get("heartbeat_at"))
+        operational_age = (
+            int((now - operational_heartbeat).total_seconds()) if operational_heartbeat else None
+        )
+        threshold = max(30, int(os.getenv("OPERATIONAL_HEARTBEAT_STALE_SECONDS", "180")))
+        if operational_age is None or operational_age > threshold:
+            status = "warning" if status == "ok" else status
+
     return {
         "status": status,
         "service": "Liquidity Vision Intelligence",
@@ -282,6 +315,11 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
             "candidate_outcomes_exposed": False,
             "execution_authority": False,
         },
+        "operational_worker": {
+            "expected": operational_expected,
+            "health": operational_health,
+            "live_execution_authority": False,
+        },
         "live_feature_flag": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "live": {
             "global_execution_enabled": os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
@@ -307,6 +345,7 @@ def collect_runtime_diagnostics(*, stale_after_seconds: int | None = None) -> di
         "stale_workers": stale_workers,
         "worker_stale_after_seconds": stale_after,
         "uptime_seconds": max(0, int((now - _STARTED_AT).total_seconds())),
+        "process": _process_resources(),
         "python": platform.python_version(),
         "timestamp": now.isoformat(),
     }

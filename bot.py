@@ -36,25 +36,24 @@ from handlers.scanner import router as scanner_router
 from handlers.start import router as start_router
 from handlers.terminal import router as terminal_router
 from handlers.pump_scanner import router as pump_scanner_router
-from services.observation_monitor import ObservationMonitor
-from services.signal_tracker import SignalTracker
-from services.watch_engine import WatchEngine
 from services.webhook_server import WebhookServer
-from services.trade_memory import TradeMemoryService
-from services.historical_execution_migration import HistoricalExecutionMigrationService
-from services.copy_execution_worker import CopyExecutionWorker
-from services.ai_trading import AIShadowWorker, configured_ai_interval
 from services.ai_operations import AIConfigurationValidator
 from services.ai_intelligence import AIObservationIntelligence
-from services.research_worker import ResearchWorker
-from services.microstructure_observer import MicrostructureObserver
-from services.live_reconciliation_worker import LiveReconciliationWorker
-from services.live_copy import LiveCopyWorker
 from services.command_catalog import MAIN_MENU_COMMANDS
 from services.localization import LocalizationService, SUPPORTED_LANGUAGES
-from services.operational_retention import OperationalRetentionService
 from services.product_analytics_middleware import ProductAnalyticsMiddleware
-from services.pump_dump_monitor import PumpDumpMonitor
+
+# Compatibility injection points used by the established startup tests.  They
+# intentionally remain ``None`` in production so the corresponding modules are
+# still imported only after a non-web process explicitly enables the work.
+HistoricalExecutionMigrationService = None
+TradeMemoryService = None
+SignalTracker = None
+ObservationMonitor = None
+WatchEngine = None
+CopyExecutionWorker = None
+AIShadowWorker = None
+ResearchWorker = None
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -103,6 +102,86 @@ def deployment_mode() -> str:
     return "webhook" if on_render else "polling"
 
 
+def web_background_jobs_enabled(mode: str | None = None) -> bool:
+    """Webhook deployments are a hard Telegram/API-only process boundary."""
+    resolved = mode or deployment_mode()
+    if resolved == "webhook":
+        return False
+    return os.getenv("LOCAL_BACKGROUND_JOBS_ENABLED", "true").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _build_non_web_workers(bot: Bot) -> dict[str, object]:
+    """Lazy-load legacy operational loops for explicit local polling only."""
+    if not web_background_jobs_enabled("polling"):
+        return {}
+    from services.ai_trading import AIShadowWorker as DefaultAIShadowWorker, configured_ai_interval
+    from services.copy_execution_worker import CopyExecutionWorker as DefaultCopyExecutionWorker
+    from services.live_copy import LiveCopyWorker
+    from services.live_reconciliation_worker import LiveReconciliationWorker
+    from services.microstructure_observer import MicrostructureObserver
+    from services.observation_monitor import ObservationMonitor as DefaultObservationMonitor
+    from services.pump_dump_monitor import PumpDumpMonitor
+    from services.research_worker import ResearchWorker as DefaultResearchWorker
+    from services.signal_tracker import SignalTracker as DefaultSignalTracker
+    from services.watch_engine import WatchEngine as DefaultWatchEngine
+
+    signal_tracker_cls = SignalTracker or DefaultSignalTracker
+    observation_monitor_cls = ObservationMonitor or DefaultObservationMonitor
+    watch_engine_cls = WatchEngine or DefaultWatchEngine
+    copy_execution_cls = CopyExecutionWorker or DefaultCopyExecutionWorker
+    ai_shadow_cls = AIShadowWorker or DefaultAIShadowWorker
+    research_worker_cls = ResearchWorker or DefaultResearchWorker
+
+    live_reconciliation = LiveReconciliationWorker(bot=bot)
+    return {
+        "signal-tracker": signal_tracker_cls(
+            interval_seconds=int(os.getenv("SIGNAL_CHECK_INTERVAL", "60")), bot=bot,
+        ),
+        "observation-monitor": observation_monitor_cls(bot=bot),
+        "watch-engine": watch_engine_cls(bot=bot),
+        "copy-execution": copy_execution_cls(),
+        "ai-shadow": ai_shadow_cls(interval_seconds=configured_ai_interval()),
+        "research-engine": research_worker_cls(),
+        "microstructure-observer": MicrostructureObserver(bot=bot),
+        "live-reconciliation": live_reconciliation,
+        "live-copy-dispatcher": LiveCopyWorker(
+            adapter_factory=LiveReconciliationWorker._adapter, bot=bot,
+        ),
+        "pump-dump-scanner": PumpDumpMonitor(bot=bot),
+    }
+
+
+def _run_startup_maintenance(mode: str) -> None:
+    """Backfills and research projections never run inside the Render web process."""
+    if mode == "webhook":
+        logging.info("Webhook lightweight profile: startup maintenance skipped")
+        return
+    from services.historical_execution_migration import (
+        HistoricalExecutionMigrationService as DefaultHistoricalExecutionMigrationService,
+    )
+    from services.operational_retention import OperationalRetentionService
+    from services.trade_memory import TradeMemoryService as DefaultTradeMemoryService
+
+    migration_cls = HistoricalExecutionMigrationService or DefaultHistoricalExecutionMigrationService
+    trade_memory_cls = TradeMemoryService or DefaultTradeMemoryService
+
+    phase = time.perf_counter()
+    migration = migration_cls().run(
+        batch_size=int(os.getenv("HISTORICAL_MIGRATION_BATCH_SIZE", "500"))
+    )
+    logging.info("Historical execution migration: %s", migration.as_dict())
+    logging.info("Startup phase historical_migration duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
+    phase = time.perf_counter()
+    backfill = trade_memory_cls().backfill(limit=int(os.getenv("MEMORY_BACKFILL_LIMIT", "500")))
+    logging.info("AI memory backfill: scanned=%s created=%s", backfill["scanned"], backfill["created"])
+    logging.info("Startup phase memory_backfill duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
+    phase = time.perf_counter()
+    retention = OperationalRetentionService().run()
+    logging.info("Operational retention: %s duration_ms=%.1f", retention, (time.perf_counter() - phase) * 1000)
+
+
 async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> None:
     for worker in workers:
         stop = getattr(worker, "stop", None)
@@ -116,23 +195,12 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 
 async def main() -> None:
     startup_started = time.perf_counter()
+    mode = deployment_mode()
     logging.info("Creating database...")
     phase = time.perf_counter()
     create_tables()
     logging.info("Startup phase database_schema duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
-    phase = time.perf_counter()
-    migration = HistoricalExecutionMigrationService().run(
-        batch_size=int(os.getenv("HISTORICAL_MIGRATION_BATCH_SIZE", "500"))
-    )
-    logging.info("Historical execution migration: %s", migration.as_dict())
-    logging.info("Startup phase historical_migration duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
-    phase = time.perf_counter()
-    backfill = TradeMemoryService().backfill(limit=int(os.getenv("MEMORY_BACKFILL_LIMIT", "500")))
-    logging.info("AI memory backfill: scanned=%s created=%s", backfill["scanned"], backfill["created"])
-    logging.info("Startup phase memory_backfill duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
-    phase = time.perf_counter()
-    retention = OperationalRetentionService().run()
-    logging.info("Operational retention: %s duration_ms=%.1f", retention, (time.perf_counter() - phase) * 1000)
+    _run_startup_maintenance(mode)
     db_health = ping_database()
     logging.info("Database ready: backend=%s persistent=%s latency_ms=%s", database_backend(), persistent_database(), db_health.get("latency_ms"))
     ai_config = AIConfigurationValidator().validate()
@@ -163,70 +231,22 @@ async def main() -> None:
     dp = build_dispatcher()
     logging.info("Startup initialization complete duration_ms=%.1f", (time.perf_counter() - startup_started) * 1000)
 
-    tracker = SignalTracker(interval_seconds=int(os.getenv("SIGNAL_CHECK_INTERVAL", "60")), bot=bot)
-    observation_monitor = ObservationMonitor(bot=bot)
-    watch_engine = WatchEngine(bot=bot)
-    copy_execution = CopyExecutionWorker()
-    ai_shadow = AIShadowWorker(interval_seconds=configured_ai_interval())
-    research = ResearchWorker()
-    microstructure = MicrostructureObserver(bot=bot)
-    live_reconciliation = LiveReconciliationWorker(bot=bot)
-    live_copy = LiveCopyWorker(adapter_factory=LiveReconciliationWorker._adapter, bot=bot)
-    pump_scanner = PumpDumpMonitor(bot=bot)
-    workers = [tracker, observation_monitor, watch_engine, copy_execution, ai_shadow, research,
-               microstructure, live_reconciliation, live_copy, pump_scanner]
+    worker_map = _build_non_web_workers(bot) if web_background_jobs_enabled(mode) else {}
+    workers = list(worker_map.values())
     worker_tasks = [
-        asyncio.create_task(tracker.run_forever(), name="signal-tracker"),
-        asyncio.create_task(observation_monitor.run_forever(), name="observation-monitor"),
-        asyncio.create_task(watch_engine.run_forever(), name="watch-engine"),
-        asyncio.create_task(copy_execution.run_forever(), name="copy-execution"),
-        asyncio.create_task(ai_shadow.run_forever(), name="ai-shadow"),
-        asyncio.create_task(research.run_forever(), name="research-engine"),
-        asyncio.create_task(microstructure.run_forever(), name="microstructure-observer"),
-        asyncio.create_task(live_reconciliation.run_forever(), name="live-reconciliation"),
-        asyncio.create_task(live_copy.run_forever(), name="live-copy-dispatcher"),
-        asyncio.create_task(pump_scanner.run_forever(), name="pump-dump-scanner"),
+        asyncio.create_task(worker.run_forever(), name=name)
+        for name, worker in worker_map.items()
     ]
-
-    mode = deployment_mode()
     logging.info("Liquidity Vision starting in %s mode", mode)
 
     webhook_server: WebhookServer | None = None
     try:
         await dp.emit_startup(bot=bot)
         if mode == "webhook":
-            async def maintenance_cycle() -> dict[str, object]:
-                # Free Render sleeps while idle. An external cron can wake the
-                # service and run one complete, lease-protected monitor cycle.
-                watch_result = await watch_engine.check_once()
-                observation_result = await observation_monitor.check_once()
-                tracker_result = await tracker.check_once()
-                copy_result = await copy_execution.check_once()
-                ai_result = await ai_shadow.check_once()
-                research_result = await research.check_once()
-                microstructure_result = await microstructure.check_once()
-                live_reconciliation_result = await live_reconciliation.check_once()
-                live_copy_result = await live_copy.check_once()
-                pump_scanner_result = await pump_scanner.check_once()
-                return {
-                    "database_backend": database_backend(),
-                    "persistent_database": persistent_database(),
-                    "watch_engine": watch_result,
-                    "observation_monitor": observation_result,
-                    "signal_tracker": tracker_result,
-                    "copy_execution": copy_result,
-                    "ai_observation": ai_result,
-                    "research_engine": research_result,
-                    "microstructure_observer": microstructure_result,
-                    "live_reconciliation": live_reconciliation_result,
-                    "live_copy_dispatcher": live_copy_result,
-                    "pump_dump_scanner": pump_scanner_result,
-                }
-
             webhook_server = WebhookServer(
                 bot=bot,
                 dispatcher=dp,
-                maintenance_callback=maintenance_cycle,
+                maintenance_callback=None,
             )
             await webhook_server.start()
             logging.info("Liquidity Vision started in webhook mode.")

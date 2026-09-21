@@ -1,8 +1,8 @@
 """Shared operational state for the hosted forward collector.
 
-Raw evidence remains on the collector's persistent disk.  This module publishes
-only bounded current-state, identity, gap and health records to the application
-database so Telegram never scans the raw event ledger.
+Raw evidence is sealed locally and archived as immutable objects. This module
+publishes only compact partition identity plus bounded current-state, gap and
+health records so Telegram and PostgreSQL never scan or duplicate raw payloads.
 """
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from database.database import connect
-from services.forward_event_store import canonical_json
-from services.forward_shadow_lab import FORWARD_PROGRAM_ID, frozen_forward_candidates
+FORWARD_PROGRAM_ID = "forward-microstructure-alpha-v1"
 
 
 FROZEN_AT_UTC = "2026-09-20T10:42:36.5655344Z"
@@ -25,11 +24,19 @@ EXPECTED_CANDIDATE_IDS = (
 )
 
 
+def canonical_json(value: Any) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str,
+    )
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def candidate_identity() -> tuple[tuple[str, ...], str]:
+    from services.forward_shadow_lab import frozen_forward_candidates
+
     candidate_ids = tuple(candidate.candidate_id for candidate in frozen_forward_candidates())
     if candidate_ids != EXPECTED_CANDIDATE_IDS:
         raise RuntimeError(
@@ -138,6 +145,76 @@ class ForwardRuntimeStateRepository:
                  canonical_json(details or {}), utc_now()),
             )
         return key
+
+    def register_partition(self, record: dict[str, Any]) -> None:
+        """Publish compact searchable identity only; raw payloads stay in object storage."""
+        now = utc_now()
+        existing_error = str(record.get("last_error") or "") or None
+        with connect() as connection:
+            existing = connection.execute(
+                "SELECT sha256,object_key FROM forward_partition_registry WHERE partition_id=?",
+                (record["partition_id"],),
+            ).fetchone()
+            if existing and (
+                str(existing["sha256"]) != str(record["sha256"])
+                or str(existing["object_key"]) != str(record["object_key"])
+            ):
+                raise RuntimeError("partition registry identity collision")
+            connection.execute(
+                """INSERT INTO forward_partition_registry(
+                    partition_id,schema_version,venue,symbol,event_types_json,
+                    bucket_start_ts_ms,first_receive_ts_ms,last_receive_ts_ms,
+                    first_exchange_ts_ms,last_exchange_ts_ms,event_count,byte_count,
+                    sha256,object_key,manifest_object_key,upload_state,replay_available,retention_state,
+                    incident_state,collector_version,program_identity,finalized_at,
+                    remote_verified_at,local_state,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(partition_id) DO UPDATE SET
+                    upload_state=excluded.upload_state,
+                    replay_available=excluded.replay_available,
+                    retention_state=excluded.retention_state,
+                    incident_state=excluded.incident_state,
+                    remote_verified_at=excluded.remote_verified_at,
+                    local_state=excluded.local_state,updated_at=excluded.updated_at""",
+                (
+                    record["partition_id"], record["schema"], record["venue"], record["symbol"],
+                    canonical_json(record.get("event_types") or []), int(record["bucket_start_ts_ms"]),
+                    int(record["first_receive_ts_ms"]), int(record["last_receive_ts_ms"]),
+                    record.get("first_exchange_ts_ms"), record.get("last_exchange_ts_ms"),
+                    int(record["event_count"]), int(record["byte_count"]), record["sha256"],
+                    record["object_key"], record["manifest_object_key"], record["state"],
+                    int(record["state"] == "REMOTE_VERIFIED"),
+                    record.get("retention_state") or "FROZEN_30_DAY",
+                    "CHECKSUM_MISMATCH" if record["state"] == "INTEGRITY_INCIDENT" else existing_error,
+                    record.get("collector_version"), record.get("program_identity"),
+                    record["finalized_at_utc"], record.get("verified_at_utc"),
+                    record.get("local_state") or "PRESENT", now,
+                ),
+            )
+
+    def replay_partitions(
+        self, *, start_ts_ms: int | None = None, end_ts_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["upload_state='REMOTE_VERIFIED'", "replay_available=1"]
+        params: list[Any] = []
+        if start_ts_ms is not None:
+            clauses.append("last_receive_ts_ms>=?")
+            params.append(int(start_ts_ms))
+        if end_ts_ms is not None:
+            clauses.append("first_receive_ts_ms<=?")
+            params.append(int(end_ts_ms))
+        with connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM forward_partition_registry WHERE " + " AND ".join(clauses)
+                + " ORDER BY bucket_start_ts_ms,partition_id",
+                tuple(params),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["event_types"] = json.loads(value.pop("event_types_json"))
+            result.append(value)
+        return result
 
     def latest_states(self, symbols: Iterable[str] | None = None) -> list[dict[str, Any]]:
         normalized = tuple(dict.fromkeys(str(item).upper() for item in (symbols or ()) if item))

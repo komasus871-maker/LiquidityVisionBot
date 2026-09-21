@@ -5,9 +5,11 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher
@@ -31,7 +33,11 @@ def resolve_public_base_url() -> str:
         or os.getenv("PUBLIC_BASE_URL")
     )
     if explicit:
-        return explicit.rstrip("/")
+        candidate = explicit.rstrip("/")
+        parsed = urlparse(candidate)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise RuntimeError("Telegram WebApp/Webhook public base URL must be valid HTTPS")
+        return candidate
 
     service_name = os.getenv("RENDER_SERVICE_NAME", "").strip()
     if service_name:
@@ -68,6 +74,9 @@ class WebhookServer:
         self.max_active_updates = max(1, int(os.getenv("WEBHOOK_MAX_ACTIVE_UPDATES", "100")))
         self._recent_ids: set[int] = set()
         self._recent_order: deque[int] = deque(maxlen=1000)
+        self._update_latencies_ms: deque[float] = deque(maxlen=500)
+        self._update_errors = 0
+        self._updates_processed = 0
         self.maintenance_callback = maintenance_callback
         self._maintenance_lock = asyncio.Lock()
         self.maintenance_token = os.getenv("MONITOR_CRON_SECRET", "").strip()
@@ -93,7 +102,7 @@ class WebhookServer:
         page = request.match_info["page"]
         state = ForwardRuntimeStateRepository()
         rows = state.latest_states(("BTCUSDT", "ETHUSDT", "SOLUSDT"))
-        if page == "overview":
+        if page in {"overview", "markets"}:
             items = [{"symbol": row["symbol"], "venue": row["venue"],
                       "market_state": row["market_state"], "data_quality": row["data_quality"],
                       "observed_at": row["observed_at"]} for row in rows[:12]]
@@ -109,17 +118,96 @@ class WebhookServer:
                               "observed_at": row["observed_at"]})
         elif page == "scanner":
             items = ScannerRepository.recent(50, telegram_id=identity.telegram_id)
+        elif page == "signals":
+            with connect() as connection:
+                records = connection.execute(
+                    """SELECT id,symbol,timeframe,side,status,confidence,current_price,updated_at
+                       FROM signals WHERE owner_telegram_id=? ORDER BY updated_at DESC LIMIT 50""",
+                    (identity.telegram_id,),
+                ).fetchall()
+            items = [dict(record) for record in records]
         elif page == "paper":
             with connect() as connection:
-                records = connection.execute("""SELECT symbol,status,side,quantity,entry_price,
-                    last_price,realized_pnl,opened_at FROM paper_positions
+                records = connection.execute("""SELECT symbol,status,side,quantity,average_entry,
+                    last_price,realized_pnl,unrealized_pnl,total_commission,opened_at,updated_at
+                    FROM paper_execution_positions
                     WHERE telegram_id=? ORDER BY opened_at DESC LIMIT 50""",
                     (identity.telegram_id,)).fetchall()
             items = [dict(record) for record in records]
-        elif page in {"shadow", "system"}:
+        elif page in {"portfolio", "risk"}:
+            from services.execution_portfolio import ExecutionPortfolioEngine
+            snapshot = ExecutionPortfolioEngine().snapshot(identity.telegram_id).as_dict()
+            if page == "portfolio":
+                keys = (
+                    "starting_balance", "net_equity", "open_positions", "symbols",
+                    "gross_notional", "net_notional", "realized_gross_pnl",
+                    "unrealized_pnl", "commissions", "net_realized_pnl",
+                )
+            else:
+                keys = (
+                    "confirmed_heat_r", "risk_complete", "risk_partial", "risk_missing",
+                    "risk_invalid", "unresolved_risk_count", "resolved", "rejection_count",
+                    "cooldown_symbols", "authority",
+                )
+            items = [{key: snapshot.get(key) for key in keys}]
+        elif page == "alerts":
+            from services.user_preferences import UserPreferenceService
+            preferences = UserPreferenceService().get(identity.telegram_id)
+            scanner = ScannerRepository.settings(identity.telegram_id)
+            with connect() as connection:
+                records = connection.execute(
+                    """SELECT symbol,timeframe,alert_type,severity,status,occurred_at,delivered_at,
+                       suppressed_reason FROM intelligence_alert_events WHERE telegram_id=?
+                       ORDER BY occurred_at DESC LIMIT 25""",
+                    (identity.telegram_id,),
+                ).fetchall()
+            items = [{
+                "notification_categories": preferences.get("notification_categories"),
+                "alert_verbosity": preferences.get("alert_verbosity"),
+                "scanner_enabled": scanner.enabled,
+                "scanner_minimum_severity": scanner.minimum_severity.value,
+                "scanner_cooldown_seconds": scanner.cooldown_seconds,
+            }, *[dict(record) for record in records]]
+        elif page == "shadow":
             health = state.health() or {"state": "NOT_STARTED", "execution_authority": False}
             items = [{key: value for key, value in health.items()
                       if key not in {"candidate_ids_json"}}]
+        elif page == "system":
+            from services.operational_runtime import OperationalHealthRepository
+            forward_health = state.health() or {"state": "NOT_STARTED"}
+            operational_health = OperationalHealthRepository().health() or {"state": "NOT_STARTED"}
+            storage = forward_health.get("storage") or {}
+            items = [{
+                "database_backend": database_backend(),
+                "persistent_database": persistent_database(),
+                "forward_state": forward_health.get("state"),
+                "forward_heartbeat_at": forward_health.get("heartbeat_at"),
+                "operational_state": operational_health.get("state"),
+                "operational_heartbeat_at": operational_health.get("heartbeat_at"),
+                "operational_rss_mb": operational_health.get("rss_mb"),
+                "forward_disk_status": storage.get("disk_status"),
+                "forward_disk_usage_percent": storage.get("usage_percent"),
+                "forward_disk_free_gb": storage.get("free_gb"),
+                "forward_disk_estimated_days_remaining": storage.get("estimated_days_remaining"),
+                "forward_disk_thresholds": storage.get("thresholds"),
+                "forward_spool_pending_bytes": storage.get("pending_upload_bytes"),
+                "forward_spool_hours_remaining": storage.get("estimated_spool_hours_remaining"),
+                "forward_object_storage_status": storage.get("object_storage_status"),
+                "forward_object_last_upload_at": storage.get("last_successful_upload_at"),
+                "forward_object_upload_latency_ms": storage.get("last_upload_latency_ms"),
+                "forward_object_pending_partitions": storage.get("pending_partitions"),
+                "forward_object_failed_uploads": storage.get("failed_uploads"),
+                "forward_object_verified_bytes": storage.get("remotely_verified_bytes"),
+                "forward_object_current_30_day_bytes": storage.get("current_30_day_stored_bytes"),
+                "forward_object_oldest_evidence_ts_ms": storage.get("oldest_evidence_ts_ms"),
+                "forward_object_newest_evidence_ts_ms": storage.get("newest_evidence_ts_ms"),
+                "forward_integrity_checksum_failures": storage.get("checksum_failures"),
+                "forward_integrity_missing_remote_objects": storage.get("missing_remote_objects"),
+                "forward_integrity_manifest_inconsistencies": storage.get("manifest_inconsistencies"),
+                "live_execution_enabled": os.getenv(
+                    "LIVE_EXECUTION_ENABLED", "false"
+                ).strip().lower() in {"1", "true", "yes", "on"},
+            }]
         else:
             return self._json({"status": "not_found"}, 404)
         return self._json({"status": "ok", "page": page, "classification": "MARKET_INTELLIGENCE",
@@ -138,12 +226,17 @@ class WebhookServer:
         return True
 
     async def _process_update(self, update: Update) -> None:
+        started = time.perf_counter()
         try:
             await self.dispatcher.feed_update(self.bot, update)
         except asyncio.CancelledError:
             raise
         except Exception:
+            self._update_errors += 1
             logging.exception("Unhandled exception while processing webhook update %s", update.update_id)
+        finally:
+            self._updates_processed += 1
+            self._update_latencies_ms.append((time.perf_counter() - started) * 1000)
 
     def _task_done(self, task: asyncio.Task[Any]) -> None:
         self._tasks.discard(task)
@@ -219,6 +312,16 @@ class WebhookServer:
                 "pending_update_count": info.pending_update_count,
                 "last_error_message": info.last_error_message,
                 "active_update_tasks": len(self._tasks),
+                "telegram_updates_processed": self._updates_processed,
+                "telegram_update_errors": self._update_errors,
+                "telegram_update_latency_ms_avg": (
+                    round(sum(self._update_latencies_ms) / len(self._update_latencies_ms), 2)
+                    if self._update_latencies_ms else None
+                ),
+                "telegram_update_latency_ms_max": (
+                    round(max(self._update_latencies_ms), 2)
+                    if self._update_latencies_ms else None
+                ),
             })
             http_status = 503 if report["status"] == "degraded" else 200
             return web.json_response(report, status=http_status)

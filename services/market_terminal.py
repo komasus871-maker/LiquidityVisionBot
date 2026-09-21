@@ -119,20 +119,50 @@ def render_shadow_status(health: dict[str, Any] | None) -> str:
     )
 
 
-def render_system_status(health: dict[str, Any] | None) -> str:
+def render_system_status(
+    health: dict[str, Any] | None, operational: dict[str, Any] | None = None,
+) -> str:
     live = os.getenv("LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     collector = render_shadow_status(health).splitlines()[2] if health else "Collector: <b>NOT STARTED</b>"
+    operational_age = _age_seconds((operational or {}).get("heartbeat_at"))
+    operational_threshold = max(
+        30, int(os.getenv("OPERATIONAL_HEARTBEAT_STALE_SECONDS", "180")),
+    )
+    operational_state = str((operational or {}).get("state") or "NOT STARTED")
+    if operational and (operational_age is None or operational_age > operational_threshold):
+        operational_state = "STALE"
     venue_lines = []
     for name, value in sorted((health or {}).get("venues", {}).items()):
         error = value.get("last_error")
         venue_lines.append(
             f"• {html.escape(name)}: {'DEGRADED' if error else 'CONNECTED/STARTING'}"
         )
+    storage = (health or {}).get("storage") or {}
+    disk_line = (
+        f"Disk: <b>{html.escape(str(storage.get('disk_status') or 'UNAVAILABLE'))}</b> · "
+        f"{_number(storage.get('usage_percent'), 1, '%')} used · "
+        f"{_number(storage.get('free_gb'), 1, ' GiB')} free · "
+        f"{_number(storage.get('estimated_days_remaining'), 1, ' days')} remaining"
+    )
+    object_line = (
+        f"Object archive: <b>{html.escape(str(storage.get('object_storage_status') or 'UNAVAILABLE'))}</b> · "
+        f"{int(storage.get('pending_partitions') or 0)} pending / "
+        f"{_number((storage.get('pending_upload_bytes') or 0) / (1024 ** 3), 2, ' GiB')} · "
+        f"{_number(storage.get('estimated_spool_hours_remaining'), 1, 'h')} spool remaining"
+    )
+    integrity_line = (
+        f"Archive integrity: {int(storage.get('checksum_failures') or 0)} checksum failures · "
+        f"{int(storage.get('missing_remote_objects') or 0)} missing remote · "
+        f"{int(storage.get('manifest_inconsistencies') or 0)} manifest issues"
+    )
     return (
         "🩺 <b>SYSTEM</b>\n\n"
         f"Telegram: <b>ONLINE</b>\n{collector}\n"
+        f"Product worker: <b>{html.escape(operational_state)}</b> · "
+        f"heartbeat {operational_age if operational_age is not None else '—'}s\n"
         f"LIVE: <b>{'ENABLED' if live else 'DISABLED'}</b>\n"
         "PAPER: <b>AVAILABLE</b>\n"
-        "SHADOW: <b>READ-ONLY / ZERO AUTHORITY</b>\n\n"
+        "SHADOW: <b>READ-ONLY / ZERO AUTHORITY</b>\n"
+        f"{disk_line}\n{object_line}\n{integrity_line}\n\n"
         "<b>Public feeds</b>\n" + ("\n".join(venue_lines) or "• Awaiting worker heartbeat")
     )
