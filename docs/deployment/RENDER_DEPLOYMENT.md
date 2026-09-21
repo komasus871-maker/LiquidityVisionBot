@@ -116,22 +116,32 @@ location, checksum, state and retention metadata—never raw payloads.
 1. Confirm no local collector process is running.
 2. Commit and push the deployment changes.
 3. In Render, create or sync a Blueprint from this repository's `render.yaml`.
-   Reuse the existing `liquidityvisionbot-1` service; do not create a second
+   Reuse the existing `LiquidityVisionBot-1` service; do not create a second
    Telegram web service with the same token.
 4. Supply the existing web-service secrets when prompted.
 5. Set the same internal `DATABASE_URL` on all three services and the existing
    `BOT_TOKEN` on web plus the operational worker.
-6. Run `python -m tools.run_product_migrations` once as a Render one-off job.
+6. Confirm the web service's `preDeployCommand` is
+   `python -m tools.run_product_migrations`. It is the only schema-DDL authority. All three
+   runtime commands use `SCHEMA_STARTUP_MODE=wait` and may start concurrently;
+   they continue only after the committed schema marker is ready. A manual
+   one-off invocation remains safe and idempotent but is not required per deploy.
 7. Create the dedicated object bucket/key, set the five object-storage secrets,
    and verify the forward worker has the 50 GB `forward-evidence` disk mounted at
    `/var/data` with exactly one instance.
-8. Deploy both workers, then deploy the web service. Do not start a local
-   collector after the hosted worker acquires its lease.
+8. Sync the Blueprint. Deployment ordering is not a correctness dependency:
+   the advisory lock serializes migration contenders and runtime processes wait
+   with a bounded timeout. Do not start a local collector after the hosted
+   worker acquires its lease.
 
 ## Verification
 
-- Open `https://liquidityvisionbot-1.onrender.com/health`; expect HTTP 200 and
-  PostgreSQL persistence.
+- Confirm migration logs contain `MIGRATION_LOCK_ACQUIRED`,
+  `MIGRATION_STARTED`, `MIGRATION_COMPLETE`, `MIGRATION_LOCK_RELEASED`, and
+  `SCHEMA_READY`; each runtime must then log its own `SCHEMA_READY` event.
+- Open `https://liquidityvisionbot-1.onrender.com/health`; expect the fast web
+  readiness response with HTTP 200. Distributed and PostgreSQL state remains on
+  `/terminal_health` and Terminal System rather than Render's promotion probe.
 - In Telegram, run `/start`, `/market_now`, `/orderflow BTCUSDT`, `/pump_scan`,
   `/scanner_settings`, `/deep_analyze BTC 1h`, `/terminal`, `/shadow_status`,
   `/terminal_health`, `/analyze BTC 1h`, `/copy`, and `/positions`.

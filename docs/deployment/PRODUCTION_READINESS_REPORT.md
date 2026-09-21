@@ -23,7 +23,7 @@ authority.
 | `liquidityvisionbot-1` | `python bot.py` | webhook, HTTP/API, Terminal, interactive commands |
 | `liquidityvision-operational-worker` | `python -m tools.run_operational_worker` | product lifecycle, PAPER, alerts, radar, bounded maintenance |
 | `liquidityvision-forward-worker` | `python -m tools.run_forward_microstructure_collector` | public forward feeds, raw evidence, bounded current state, frozen Shadow |
-| Render one-off job | `python -m tools.run_product_migrations` | historical migration and memory backfill |
+| Web pre-deploy migration | `python -m tools.run_product_migrations` | advisory-lock schema DDL, historical migration and memory backfill |
 
 The two workers use independent PostgreSQL singleton leases. The web owns no
 continuous collector. The forward worker has no Telegram or execution authority.
@@ -116,10 +116,14 @@ worker. Delivery failure is isolated from scanning and the webhook.
 
 ## 15. Maintenance and migrations
 
-Schema creation/additive migration is an idempotent prerequisite. Historical
-execution migration and trade-memory backfill move to the explicit one-off
-command. Retention is a six-hour operational-worker cycle after a five-minute
-startup delay. Forward manifests/compaction remain forward-worker duties.
+Schema creation/additive migration has one production authority: the web
+service's `python -m tools.run_product_migrations` pre-deploy command. A stable
+PostgreSQL advisory lock serializes migration attempts; web, operational and
+forward processes only wait for the committed schema/version marker. Historical
+execution migration and trade-memory backfill remain in that explicit,
+idempotent command. Retention is a six-hour operational-worker cycle after a
+five-minute startup delay. Forward manifests/compaction remain forward-worker
+duties.
 
 ## 16. Chosen Render topology
 

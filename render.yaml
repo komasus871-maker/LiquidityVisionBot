@@ -6,6 +6,7 @@ services:
     numInstances: 1
     maxShutdownDelaySeconds: 60
     buildCommand: pip install -r requirements.txt
+    preDeployCommand: python -m tools.run_product_migrations
     startCommand: python bot.py
     healthCheckPath: /health
     autoDeploy: true
@@ -48,6 +49,8 @@ services:
         sync: false
       - key: REQUIRE_PERSISTENT_DB
         value: "true"
+      - key: SCHEMA_STARTUP_MODE
+        value: wait
       - key: PGSSLMODE
         value: require
       - key: MONITOR_CRON_SECRET
@@ -337,6 +340,8 @@ services:
         sync: false
       - key: REQUIRE_PERSISTENT_DB
         value: "true"
+      - key: SCHEMA_STARTUP_MODE
+        value: wait
       - key: PGSSLMODE
         value: require
       - key: OPERATIONAL_LEASE_SECONDS
@@ -411,6 +416,8 @@ services:
         sync: false
       - key: REQUIRE_PERSISTENT_DB
         value: "true"
+      - key: SCHEMA_STARTUP_MODE
+        value: wait
       - key: PGSSLMODE
         value: require
       - key: FORWARD_COLLECTION_ENABLED

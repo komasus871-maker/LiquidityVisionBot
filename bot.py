@@ -12,7 +12,8 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
 from config import BOT_TOKEN
-from database.database import create_tables, database_backend, persistent_database, ping_database
+from database.database import database_backend, persistent_database, ping_database
+from database.schema_management import initialize_service_database
 from handlers.admin import router as admin_router
 from handlers.operator import router as operator_router
 from handlers.ai_trading import router as ai_trading_router
@@ -196,9 +197,9 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 async def main() -> None:
     startup_started = time.perf_counter()
     mode = deployment_mode()
-    logging.info("Creating database...")
+    logging.info("Verifying database schema...")
     phase = time.perf_counter()
-    create_tables()
+    initialize_service_database(service_name="web")
     logging.info("Startup phase database_schema duration_ms=%.1f", (time.perf_counter() - phase) * 1000)
     _run_startup_maintenance(mode)
     db_health = ping_database()

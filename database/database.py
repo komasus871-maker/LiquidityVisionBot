@@ -101,12 +101,14 @@ class DBConnection:
         return False
 
 
-def connect() -> DBConnection:
+def connect(*, lock_timeout_ms: int | None = None) -> DBConnection:
     if USE_POSTGRES:
         kwargs: dict[str, Any] = {
             "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "15")),
             "application_name": "liquidity-vision-bot",
         }
+        if lock_timeout_ms is not None:
+            kwargs["options"] = f"-c lock_timeout={max(1, int(lock_timeout_ms))}ms"
         # Most hosted PostgreSQL providers require TLS. If sslmode is already
         # embedded in the URL, psycopg2 safely accepts this explicit value too.
         kwargs["sslmode"] = os.getenv("PGSSLMODE", "require")
@@ -178,8 +180,8 @@ def _id_column() -> str:
     return "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 
-def create_tables() -> None:
-    with connect() as conn:
+def create_tables(*, lock_timeout_ms: int | None = None) -> None:
+    with connect(lock_timeout_ms=lock_timeout_ms) as conn:
         id_col = _id_column()
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS user_exchange_credentials(

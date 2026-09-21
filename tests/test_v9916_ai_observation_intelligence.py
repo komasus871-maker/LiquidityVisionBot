@@ -323,7 +323,7 @@ async def test_bot_startup_reaches_telegram_transport_after_ai_validation(
         def validate(self):
             return SimpleNamespace(valid=True, errors=[], warnings=[])
 
-    monkeypatch.setattr(bot_module, "create_tables", lambda: None)
+    monkeypatch.setattr(bot_module, "initialize_service_database", lambda **_: None)
     monkeypatch.setattr(bot_module, "HistoricalExecutionMigrationService", Migration)
     monkeypatch.setattr(bot_module, "TradeMemoryService", Memory)
     monkeypatch.setattr(bot_module, "ping_database", lambda: {"latency_ms": 0})

@@ -67,8 +67,9 @@ BACKGROUND_COMPONENTS = (
      "liquidityvision-operational-worker", ("operational_retention_runs",)),
     ("worker.forward_microstructure", "Forward collector and frozen Shadow lab", "C.FORWARD_RESEARCH",
      "liquidityvision-forward-worker", ("forward_market_state", "forward_worker_health")),
-    ("migration.product", "Historical execution and trade-memory backfill", "E.ONE_TIME_MIGRATION",
-     "Render one-off job", ("historical_migration_runs", "historical_execution_records", "trade_memories")),
+    ("migration.product", "Schema migration and bounded product backfills", "E.ONE_TIME_MIGRATION",
+     "LiquidityVisionBot-1 pre-deploy",
+     ("schema_migrations", "historical_migration_runs", "historical_execution_records", "trade_memories")),
 )
 
 
@@ -262,9 +263,12 @@ def runtime_ownership_matrix() -> tuple[dict[str, Any], ...]:
             "forbidden": ("Telegram authority", "production strategy authority", "LIVE execution"),
         },
         {
-            "owner": "Render one-off job", "class": "E.ONE_TIME_MIGRATION",
+            "owner": "LiquidityVisionBot-1 pre-deploy", "class": "E.ONE_TIME_MIGRATION",
             "command": "python -m tools.run_product_migrations", "singleton": True,
-            "responsibilities": ("historical execution migration", "trade-memory backfill"),
-            "forbidden": ("web startup", "continuous execution"),
+            "responsibilities": (
+                "advisory-lock-protected schema DDL", "historical execution migration",
+                "trade-memory backfill",
+            ),
+            "forbidden": ("service runtime", "continuous execution"),
         },
     )

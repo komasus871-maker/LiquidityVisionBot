@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from database.database import acquire_lease, create_tables, release_lease
+from database.database import acquire_lease, release_lease
+from database.schema_management import initialize_service_database
 from services.forward_event_store import AppendOnlyEventStore
 from services.forward_evidence_archive import ForwardEvidenceArchive
 from services.forward_object_storage import S3CompatibleObjectStorage
@@ -119,7 +120,7 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
     if os.getenv("FORWARD_COLLECTION_ENABLED", "false").strip().lower() not in {"1", "true", "yes", "on"}:
         raise RuntimeError("FORWARD_COLLECTION_ENABLED must be explicitly true")
 
-    create_tables()
+    initialize_service_database(service_name="forward-worker")
     shared = ForwardRuntimeStateRepository()
     identity_hash = shared.register_identity()
     instance_id = (

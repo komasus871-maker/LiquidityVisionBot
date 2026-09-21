@@ -10,10 +10,10 @@ block storage for the full research window.
 
 | Runtime | Command | Owns | Must not own |
 |---|---|---|---|
-| `liquidityvisionbot-1` | `python bot.py` | Telegram webhook, HTTP health/API, authenticated Terminal, interactive commands | continuous collectors, maintenance, raw evidence, LIVE execution |
+| `LiquidityVisionBot-1` | `python bot.py` | Telegram webhook, HTTP health/API, authenticated Terminal, interactive commands | continuous collectors, maintenance, raw evidence, LIVE execution, schema DDL |
 | `liquidityvision-operational-worker` | `python -m tools.run_operational_worker` | signal/watch/observation advancement, PAPER copy/lifecycle, anomaly alerts, research projections, bounded retention | webhook/polling, raw forward feeds, LIVE execution |
 | `liquidityvision-forward-worker` | `python -m tools.run_forward_microstructure_collector` | Binance/OKX/BingX public feeds, reconstructable books, flow/derivatives features, sealed raw partitions, verified object archive, frozen Shadow evaluations | Telegram, product decisions, execution |
-| Render one-off job | `python -m tools.run_product_migrations` | historical execution migration and trade-memory backfill | every-restart startup work |
+| Web pre-deploy migration | `python -m tools.run_product_migrations` | advisory-lock-protected schema DDL, historical execution migration and trade-memory backfill | service runtime work |
 
 Topology A (combined operational and forward worker) saves one 512 MB service,
 but couples raw-evidence durability and Telegram product progression to one
@@ -44,13 +44,22 @@ jobs retain their existing idempotency and per-job leases. PAPER execution uses
 durable queue claims; forward collection records restart gaps and resumes from
 durable checkpoints. Neither worker has LIVE authority.
 
+Schema DDL has one production authority: the web service's Render
+`preDeployCommand`. `run_product_migrations` holds a stable PostgreSQL session
+advisory lock, retries bounded deadlock/serialization failures with jitter, and
+publishes the committed schema-version marker only through the transactional
+`create_tables` path. Web, operational and forward runtime commands perform
+read-only schema/version checks and wait for the migration for a bounded period;
+they never issue startup DDL. PostgreSQL releases the session lock if the
+migration process crashes.
+
 ## Maintenance classification
 
 | Task | Classification | Owner |
 |---|---|---|
-| schema creation/additive migration | bounded startup prerequisite | each process, idempotent |
-| historical execution migration | one-time migration | Render one-off job |
-| trade-memory backfill | one-time/bounded backfill | Render one-off job |
+| schema creation/additive migration | serialized pre-deploy prerequisite | web pre-deploy migration command only |
+| historical execution migration | idempotent pre-deploy migration | web pre-deploy migration command |
+| trade-memory backfill | bounded pre-deploy backfill | web pre-deploy migration command |
 | retention | periodic maintenance | operational worker, six-hour default |
 | forward raw compaction/manifests | continuous forward durability | forward worker |
 | sealed partition upload/verification/local eviction | continuous forward durability | forward worker |

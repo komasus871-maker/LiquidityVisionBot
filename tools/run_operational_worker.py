@@ -9,7 +9,8 @@ import signal
 import socket
 from typing import Any
 
-from database.database import acquire_lease, create_tables, release_lease
+from database.database import acquire_lease, release_lease
+from database.schema_management import initialize_service_database
 from services.operational_runtime import (
     OPERATIONAL_COMPONENTS, OPERATIONAL_WORKER_NAME, OperationalHealthRepository,
     OperationalMaintenanceWorker, child_runtime_states, utc_now,
@@ -68,7 +69,7 @@ async def run() -> dict[str, Any]:
     from aiogram.enums import ParseMode
     from config import BOT_TOKEN
 
-    create_tables()
+    initialize_service_database(service_name="operational-worker")
     instance_id = (
         os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or
         f"{socket.gethostname()}-{os.getpid()}"
