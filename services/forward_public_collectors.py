@@ -6,6 +6,7 @@ import gzip
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from dataclasses import replace
@@ -18,6 +19,7 @@ from services.forward_event_store import (
 )
 from services.forward_microstructure_engine import CrossVenueState, MicrostructureFeatureEngine
 from services.forward_shadow_lab import ForwardOutcomeLabeler, ForwardShadowEngine
+from services.runtime_supervision import bounded_thread_call
 
 
 Emit = Callable[[RawMarketEvent], Awaitable[None]]
@@ -221,11 +223,33 @@ class PublicConnector:
         self.last_connected_at_ms: int | None = None
         self.last_error: str | None = None
         self.last_error_at_ms: int | None = None
+        self.task_state = "NOT_STARTED"
+        self.current_stage = "not_started"
+        self.last_progress_at_ms = now_ms()
+        self.last_progress_monotonic = time.monotonic()
+        self.last_success_at_ms: int | None = None
+        self.last_restart_reason: str | None = None
+        self.next_retry_at_ms: int | None = None
+        self.connection_max_seconds = max(
+            30.0, float(os.getenv("FORWARD_CONNECTION_MAX_SECONDS", "82800")),
+        )
+        self.base_backoff_seconds = max(
+            0.05, float(os.getenv("FORWARD_RECONNECT_BASE_SECONDS", "1")),
+        )
+
+    def mark_progress(self, stage: str, *, successful: bool = False) -> None:
+        self.current_stage = stage
+        self.last_progress_at_ms = now_ms()
+        self.last_progress_monotonic = time.monotonic()
+        if successful:
+            self.last_success_at_ms = self.last_progress_at_ms
 
     def mark_connected(self) -> None:
         self.connected = True
         self.connection_count += 1
         self.last_connected_at_ms = now_ms()
+        self.task_state = "RUNNING"
+        self.mark_progress("connected", successful=True)
         # A successful reconnect supersedes an earlier transport error. The
         # error timestamp remains available through reconnect_count rather
         # than poisoning health forever.
@@ -236,25 +260,36 @@ class PublicConnector:
         self.resync_symbols.add(_symbol(symbol))
 
     async def run(self, emit: Emit, stop: asyncio.Event) -> None:
-        backoff = 1.0
+        backoff = self.base_backoff_seconds
+        self.task_state = "STARTING"
         while not stop.is_set():
             try:
-                await self._run_connection(emit, stop)
+                self.mark_progress("connecting")
+                await asyncio.wait_for(
+                    self._run_connection(emit, stop), timeout=self.connection_max_seconds,
+                )
                 backoff = 1.0
             except asyncio.CancelledError:
+                self.task_state = "CANCELLED"
                 raise
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}:{str(exc)[:180]}"
                 self.last_error_at_ms = now_ms()
                 self.reconnect_count += 1
+                self.last_restart_reason = self.last_error
+                self.task_state = "RECONNECTING"
+                self.current_stage = "restart_backoff"
                 logging.warning("forward_collector_reconnect venue=%s error=%s", self.venue.value, self.last_error)
+                delay = backoff * random.uniform(0.8, 1.2)
+                self.next_retry_at_ms = now_ms() + int(delay * 1000)
                 try:
-                    await asyncio.wait_for(stop.wait(), timeout=backoff)
+                    await asyncio.wait_for(stop.wait(), timeout=delay)
                 except asyncio.TimeoutError:
                     pass
                 backoff = min(backoff * 2, 30)
             finally:
                 self.connected = False
+        self.task_state = "STOPPED"
 
     async def _run_connection(self, emit: Emit, stop: asyncio.Event) -> None:
         raise NotImplementedError
@@ -267,7 +302,9 @@ class BinancePublicConnector(PublicConnector):
         "liquidations": "FORCE_ORDER_PUBLIC", "open_interest": "REST_POLLED",
         "funding_mark_index": "WEBSOCKET",
     }
-    WS = "wss://fstream.binance.com/stream?streams="
+    # Binance's current USD-M public catalog moved combined streams below
+    # /public/stream during the UM/CM market-stream migration.
+    WS = "wss://fstream.binance.com/public/stream?streams="
     REST = "https://fapi.binance.com"
 
     async def _snapshot(self, session: aiohttp.ClientSession, symbol: str, emit: Emit, connection_id: str) -> None:
@@ -320,6 +357,7 @@ class BinancePublicConnector(PublicConnector):
             async with session.ws_connect(self.WS + "/".join(streams), heartbeat=30, autoping=True) as ws:
                 self.mark_connected()
                 for symbol in self.symbols:
+                    self.mark_progress(f"snapshot:{symbol}")
                     await self._snapshot(session, symbol, emit, connection_id)
                 poller = asyncio.create_task(self._poll_context(session, emit, connection_id, stop))
                 try:
@@ -328,6 +366,7 @@ class BinancePublicConnector(PublicConnector):
                             await self._snapshot(session, symbol, emit, connection_id)
                             self.resync_symbols.discard(symbol)
                         message = await ws.receive(timeout=30)
+                        self.mark_progress("receiving", successful=True)
                         if message.type == aiohttp.WSMsgType.TEXT:
                             for event in parse_binance_message(json.loads(message.data), receive_ts_ms=now_ms(), connection_id=connection_id):
                                 await emit(event)
@@ -357,11 +396,14 @@ class OKXPublicConnector(PublicConnector):
             ))
             args.append({"channel": "index-tickers", "instId": f"{symbol[:-4]}-USDT"})
         args.append({"channel": "liquidation-orders", "instType": "SWAP"})
-        timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=None)
+        timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=35)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.ws_connect(self.WS, heartbeat=25, autoping=True) as ws:
                 self.mark_connected()
-                await ws.send_json({"id": uuid.uuid4().hex[:16], "op": "subscribe", "args": args})
+                await asyncio.wait_for(
+                    ws.send_json({"id": uuid.uuid4().hex[:16], "op": "subscribe", "args": args}),
+                    timeout=10,
+                )
                 while not stop.is_set():
                     if self.resync_symbols:
                         self.resync_symbols.clear()
@@ -369,8 +411,14 @@ class OKXPublicConnector(PublicConnector):
                     try:
                         message = await ws.receive(timeout=20)
                     except asyncio.TimeoutError:
-                        await ws.send_str("ping")
+                        self.mark_progress("ping_waiting_for_pong")
+                        await asyncio.wait_for(ws.send_str("ping"), timeout=10)
+                        pong = await asyncio.wait_for(ws.receive(), timeout=20)
+                        if pong.type != aiohttp.WSMsgType.TEXT or pong.data != "pong":
+                            raise ConnectionError("OKX pong deadline exceeded")
+                        self.mark_progress("pong_received", successful=True)
                         continue
+                    self.mark_progress("receiving", successful=True)
                     if message.type == aiohttp.WSMsgType.TEXT:
                         if message.data == "pong":
                             continue
@@ -451,16 +499,20 @@ class BingXPublicConnector(PublicConnector):
         for symbol in self.symbols:
             venue_symbol = f"{symbol[:-4]}-USDT"
             channels.extend((f"{venue_symbol}@trade", f"{venue_symbol}@depth20@500ms", f"{venue_symbol}@markPrice"))
-        timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=None)
+        timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=45)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.ws_connect(self.WS, heartbeat=30, autoping=True) as ws:
                 self.mark_connected()
                 for channel in channels:
-                    await ws.send_json({"id": uuid.uuid4().hex, "reqType": "sub", "dataType": channel})
+                    await asyncio.wait_for(
+                        ws.send_json({"id": uuid.uuid4().hex, "reqType": "sub", "dataType": channel}),
+                        timeout=10,
+                    )
                 poller = asyncio.create_task(self._poll_context(session, emit, connection_id, stop))
                 try:
                     while not stop.is_set():
                         message = await ws.receive(timeout=30)
+                        self.mark_progress("receiving", successful=True)
                         if message.type in {aiohttp.WSMsgType.BINARY, aiohttp.WSMsgType.TEXT}:
                             if message.type == aiohttp.WSMsgType.BINARY:
                                 try:
@@ -584,7 +636,10 @@ class ForwardCollectorSupervisor:
         self.store.append_feature(snapshot | {"cross_venue": cross})
         if self.snapshot_sink is not None:
             try:
-                self.snapshot_sink(snapshot, cross)
+                await bounded_thread_call(
+                    self.snapshot_sink, snapshot, cross,
+                    timeout_seconds=float(os.getenv("FORWARD_STATE_PUBLISH_TIMEOUT_SECONDS", "20")),
+                )
             except Exception:
                 # Shared current-state publication must not destroy the raw
                 # append-only evidence stream during a transient DB outage.
@@ -602,7 +657,30 @@ class ForwardCollectorSupervisor:
 
     async def run(self, *, duration_seconds: float = 0) -> dict[str, Any]:
         stop = asyncio.Event()
-        tasks = [asyncio.create_task(connector.run(self.emit, stop), name=f"collector-{name}")
+
+        async def supervise(name: str, connector: PublicConnector) -> None:
+            backoff = float(getattr(connector, "base_backoff_seconds", 1.0))
+            while not stop.is_set():
+                try:
+                    await connector.run(self.emit, stop)
+                    if stop.is_set():
+                        return
+                    reason = "PROVIDER_TASK_EXITED"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    reason = f"{type(exc).__name__}:{str(exc)[:180]}"
+                connector.task_state = "RESTARTING"
+                connector.last_restart_reason = reason
+                connector.reconnect_count = int(getattr(connector, "reconnect_count", 0)) + 1
+                logging.error("forward_provider_task_restart venue=%s reason=%s", name, reason)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=backoff * random.uniform(0.8, 1.2))
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 30)
+
+        tasks = [asyncio.create_task(supervise(name, connector), name=f"collector-{name}")
                  for name, connector in self.connectors.items()]
         try:
             if duration_seconds > 0:
@@ -713,6 +791,12 @@ class ForwardCollectorSupervisor:
                 "event_age_ms": age_ms,
                 "last_error": connector.last_error,
                 "last_error_at_ms": getattr(connector, "last_error_at_ms", None),
+                "task_state": getattr(connector, "task_state", "UNKNOWN"),
+                "current_stage": getattr(connector, "current_stage", None),
+                "last_progress_at_ms": getattr(connector, "last_progress_at_ms", None),
+                "last_success_at_ms": getattr(connector, "last_success_at_ms", None),
+                "last_restart_reason": getattr(connector, "last_restart_reason", None),
+                "next_retry_at_ms": getattr(connector, "next_retry_at_ms", None),
                 "channels": channel_details,
                 "optional_stale_channels": optional_stale,
                 "capabilities": connector.capabilities,

@@ -875,19 +875,31 @@ class ScannerRepository:
                 ("pump-dump-market-alert-monitor",),
             ).fetchone()
             operational = conn.execute(
-                "SELECT state,heartbeat_at,last_error,rss_mb FROM operational_worker_health "
+                "SELECT state,heartbeat_at,last_error,rss_mb,child_states_json FROM operational_worker_health "
                 "WHERE worker_name='operational_product_worker'"
             ).fetchone()
             forward = conn.execute(
-                "SELECT state,heartbeat_at,last_event_at,venues_json,last_error "
+                "SELECT state,heartbeat_at,last_event_at,venues_json,storage_json,last_error "
                 "FROM forward_worker_health WHERE worker_name='forward_microstructure_collector'"
             ).fetchone()
         details: dict[str, Any] = {}
+        operational_children: dict[str, Any] = {}
+        forward_storage: dict[str, Any] = {}
         if runtime:
             try:
                 details = json.loads(runtime["details_json"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 details = {}
+        if operational:
+            try:
+                operational_children = json.loads(operational["child_states_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                operational_children = {}
+        if forward:
+            try:
+                forward_storage = json.loads(forward["storage_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                forward_storage = {}
 
         def age(value: Any) -> int | None:
             if not value:
@@ -923,6 +935,7 @@ class ScannerRepository:
         status = "NOT_STARTED"
         reason = "No scanner runtime checkpoint exists yet."
         runtime_status = str(details.get("status") or "UNKNOWN").upper()
+        enrichment_status = str(details.get("enrichment_status") or "UNKNOWN").upper()
         if runtime_status == "DISABLED":
             status, reason = "FAILED", "Scanner is disabled in the operational worker."
         elif not runtime:
@@ -940,6 +953,9 @@ class ScannerRepository:
             status, reason = "DEGRADED", "Last successful broad-radar cycle is older than two intervals."
         elif monitored is not None and baseline_ready < int(monitored):
             status, reason = "WARMING", "Some symbols lack the required 1-minute history backfill."
+        elif enrichment_status == "DEGRADED":
+            status = "DEGRADED"
+            reason = "Broad Scanner is current; optional forward microstructure enrichment is unavailable."
         else:
             status, reason = "RUNNING", "Operational heartbeat and broad-radar cycle are current."
 
@@ -953,6 +969,8 @@ class ScannerRepository:
             str(value.get("state") or "").upper() == "HEALTHY" for value in venues.values()
         )
         counters = ScannerRepository.outcome_counters()
+        scanner_task = operational_children.get("pump_dump_monitor") or {}
+        forward_supervisor = forward_storage.get("supervisor") or {}
         result = {
             "scanner_status": status,
             "scanner_status_reason": reason,
@@ -968,7 +986,10 @@ class ScannerRepository:
             "baseline_source": details.get("baseline_source"),
             "estimated_readiness_minutes": estimated_readiness,
             "shortlisted_symbols": int(details.get("shortlisted_symbols") or 0),
+            "enrichment_requested_symbols": int(details.get("enrichment_requested_symbols") or 0),
             "deep_enrichment_symbols": int(details.get("deep_enrichment_symbols") or 0),
+            "enrichment_status": details.get("enrichment_status") or "UNKNOWN",
+            "forward_microstructure_state": details.get("forward_microstructure_state") or "UNKNOWN",
             "active_episodes": int(active[0]) if active else 0,
             "new_anomalies_1h": int(new_events[0]) if new_events else 0,
             "escalations_1h": int(escalations[0]) if escalations else 0,
@@ -978,11 +999,28 @@ class ScannerRepository:
             "episode_engine_age_seconds": episode_age,
             "collector_freshness_seconds": scanner_success_age,
             "cycle_duration_seconds": details.get("cycle_duration_seconds"),
+            "cycle_started_at": details.get("cycle_started_at") or runtime["last_started_at"] if runtime else None,
+            "cycle_completed_at": details.get("cycle_completed_at") or runtime["last_finished_at"] if runtime else None,
+            "scanner_task_state": scanner_task.get("task_state") or "UNKNOWN",
+            "scanner_current_stage": (
+                (scanner_task.get("scanner") or {}).get("current_stage")
+                or scanner_task.get("current_stage") or details.get("current_stage") or "UNKNOWN"
+            ),
+            "scanner_restart_count": int(scanner_task.get("restart_count") or 0),
+            "scanner_last_restart_reason": scanner_task.get("last_restart_reason"),
             "pipeline_timestamps": details.get("pipeline_timestamps") or {},
             "operational_worker_state": operational["state"] if operational else "NOT_STARTED",
+            "operational_process_state": operational["state"] if operational else "NOT_STARTED",
+            "operational_supervisor_state": (
+                "RUNNING" if operational_age is not None and operational_age <= 30 else "STALE"
+            ),
             "operational_worker_heartbeat_age_seconds": operational_age,
             "operational_worker_rss_mb": operational["rss_mb"] if operational else None,
             "forward_collector_state": forward["state"] if forward else "NOT_STARTED",
+            "forward_process_state": forward["state"] if forward else "NOT_STARTED",
+            "forward_supervisor_state": forward_supervisor.get("task_state") or "UNKNOWN",
+            "forward_restart_count": int(forward_supervisor.get("restart_count") or 0),
+            "forward_last_restart_reason": forward_supervisor.get("last_restart_reason"),
             "forward_collector_heartbeat_age_seconds": forward_age,
             "forward_last_event_age_seconds": age(forward["last_event_at"]) if forward else None,
             "venues": venues,

@@ -146,6 +146,18 @@ def render_system_status(
         f"/{scanner.get('universe_target') or '—'} · baseline {scanner.get('baseline_ready_symbols') or 0} · "
         f"radar age {scanner.get('broad_radar_age_seconds') if scanner.get('broad_radar_age_seconds') is not None else '—'}s"
     )
+    task_line = (
+        f"Runtime: operational {html.escape(str(scanner.get('operational_process_state') or operational_state))} / "
+        f"supervisor {html.escape(str(scanner.get('operational_supervisor_state') or 'UNKNOWN'))} · "
+        f"scanner task {html.escape(str(scanner.get('scanner_task_state') or 'UNKNOWN'))} · "
+        f"stage {html.escape(str(scanner.get('scanner_current_stage') or 'UNKNOWN'))} · "
+        f"restarts {int(scanner.get('scanner_restart_count') or 0)}"
+    )
+    forward_line = (
+        f"Forward runtime: {html.escape(str(scanner.get('forward_process_state') or 'NOT STARTED'))} / "
+        f"supervisor {html.escape(str(scanner.get('forward_supervisor_state') or 'UNKNOWN'))} · "
+        f"heartbeat {scanner.get('forward_collector_heartbeat_age_seconds') if scanner.get('forward_collector_heartbeat_age_seconds') is not None else '—'}s"
+    )
     storage = (health or {}).get("storage") or {}
     disk_line = (
         f"Disk: <b>{html.escape(str(storage.get('disk_status') or 'UNAVAILABLE'))}</b> · "
@@ -169,7 +181,7 @@ def render_system_status(
         f"Telegram: <b>ONLINE</b>\n{collector}\n"
         f"Product worker: <b>{html.escape(operational_state)}</b> · "
         f"heartbeat {operational_age if operational_age is not None else '—'}s\n"
-        f"{scanner_line}\n"
+        f"{scanner_line}\n{task_line}\n{forward_line}\n"
         f"LIVE: <b>{'ENABLED' if live else 'DISABLED'}</b>\n"
         "PAPER: <b>AVAILABLE</b>\n"
         "SHADOW: <b>READ-ONLY / ZERO AUTHORITY</b>\n"

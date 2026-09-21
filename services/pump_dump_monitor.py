@@ -25,6 +25,7 @@ from services.pump_dump_scanner import (
     classify_additional_alerts,
 )
 from services.user_watchlist import UserWatchlist
+from services.runtime_supervision import bounded_thread_call
 
 
 class BinanceFuturesBroadFeed:
@@ -91,8 +92,20 @@ class PumpDumpMonitor:
         self.universe_limit = max(5, min(100, int(os.getenv("PUMP_SCANNER_UNIVERSE_LIMIT", "40"))))
         self.concurrency = max(1, min(10, int(os.getenv("PUMP_SCANNER_CONCURRENCY", "5"))))
         self.enabled = os.getenv("PUMP_SCANNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self.cycle_timeout_seconds = max(
+            30, int(os.getenv("PUMP_SCANNER_CYCLE_TIMEOUT_SECONDS", "110")),
+        )
         self._stop = asyncio.Event()
         self.owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self.current_stage = "idle"
+        self.last_progress_monotonic = time.monotonic()
+        self.last_progress_at = datetime.now(timezone.utc).isoformat()
+        self.last_success_at: str | None = None
+
+    def _progress(self, stage: str) -> None:
+        self.current_stage = stage
+        self.last_progress_monotonic = time.monotonic()
+        self.last_progress_at = datetime.now(timezone.utc).isoformat()
 
     def stop(self) -> None:
         self._stop.set()
@@ -121,6 +134,17 @@ class PumpDumpMonitor:
         if not selected:
             return {}
         freshest = max(selected, key=lambda row: row.get("observed_at") or "")
+        try:
+            observed = datetime.fromisoformat(
+                str(freshest.get("observed_at") or "").replace("Z", "+00:00")
+            )
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            max_age = max(30, int(os.getenv("FORWARD_ENRICHMENT_MAX_AGE_SECONDS", "120")))
+            if (datetime.now(timezone.utc) - observed).total_seconds() > max_age:
+                return {}
+        except (TypeError, ValueError):
+            return {}
         snap = freshest.get("snapshot") or {}
         book = snap.get("book") or {}
         flow = ((snap.get("trade_flow") or {}).get("horizons_ms") or {}).get("60000") or {}
@@ -152,14 +176,17 @@ class PumpDumpMonitor:
         cycle_started = datetime.now(timezone.utc)
         cycle_timer = time.perf_counter()
         stages: dict[str, str] = {"cycle_started_at": cycle_started.isoformat()}
-        subscribers = self.repository.subscribers()
-        self.repository.close_inactive(
+        self._progress("loading_scanner_state")
+        subscribers = await bounded_thread_call(self.repository.subscribers)
+        await bounded_thread_call(
+            self.repository.close_inactive,
             older_than=datetime.now(timezone.utc) - timedelta(
                 seconds=max(300, self.interval_seconds * 3)
-            )
+            ),
         )
         if not self.enabled:
             return {"status": "disabled", **resource_budget()}
+        self._progress("discovering_universe")
         instruments = await self.feed.instruments()
         stages["universe_discovered_at"] = datetime.now(timezone.utc).isoformat()
         # The broad radar is an authoritative product data plane, not a
@@ -189,6 +216,7 @@ class PumpDumpMonitor:
                     logging.warning("Pump/dump snapshot failed for %s: %s", symbol, exc)
                     return symbol, None, f"{type(exc).__name__}: {str(exc)[:120]}"
 
+        self._progress("fetching_1m_history")
         fetched = await asyncio.gather(*(one(symbol) for symbol in universe))
         snapshots = [item for _, item, _ in fetched if item is not None]
         failed_symbols = {symbol: error for symbol, item, error in fetched if item is None}
@@ -215,9 +243,10 @@ class PumpDumpMonitor:
             ),
         ) for item in snapshots]
 
+        self._progress("advancing_outcomes")
         outcome_updates = {"updated": 0, "finalized": 0}
         for snapshot in snapshots:
-            advanced = self.repository.advance_outcomes(snapshot)
+            advanced = await bounded_thread_call(self.repository.advance_outcomes, snapshot)
             outcome_updates["updated"] += advanced["updated"]
             outcome_updates["finalized"] += advanced["finalized"]
 
@@ -228,11 +257,24 @@ class PumpDumpMonitor:
             for snapshot in snapshots:
                 if self.detector.detect(snapshot, settings):
                     shortlisted.add(snapshot.symbol)
-        deep_rows = self.forward.latest_states(tuple(sorted(shortlisted))) if shortlisted else []
-        enriched = {
-            item.symbol: replace(item, **self._enrichment(deep_rows, item.symbol))
-            for item in snapshots if item.symbol in shortlisted
-        }
+        self._progress("optional_forward_enrichment")
+        deep_rows: list[dict[str, Any]] = []
+        enrichment_error: str | None = None
+        if shortlisted:
+            try:
+                deep_rows = await bounded_thread_call(
+                    lambda: self.forward.latest_states(tuple(sorted(shortlisted)))
+                )
+            except Exception as exc:
+                enrichment_error = f"{type(exc).__name__}: {str(exc)[:180]}"
+                logging.warning("Forward enrichment unavailable: %s", enrichment_error)
+        enriched: dict[str, Any] = {}
+        for item in snapshots:
+            if item.symbol not in shortlisted:
+                continue
+            values = self._enrichment(deep_rows, item.symbol)
+            if values:
+                enriched[item.symbol] = replace(item, **values)
         stages["deep_enrichment_completed_at"] = datetime.now(timezone.utc).isoformat()
         delivered, admitted, global_events = 0, 0, 0
 
@@ -240,6 +282,7 @@ class PumpDumpMonitor:
         # settings below control personalization and delivery, not whether the
         # scanner itself exists.
         severity_rank = {"NORMAL": 0, "STRONG": 1, "EXTREME": 2}
+        self._progress("persisting_global_episodes")
         for broad_snapshot in snapshots:
             snapshot = enriched.get(broad_snapshot.symbol, broad_snapshot)
             candidates = sorted(
@@ -248,16 +291,22 @@ class PumpDumpMonitor:
                 reverse=True,
             )[:1]
             for candidate in candidates:
-                if self.repository.admit(candidate, global_settings, telegram_id=0):
+                if await bounded_thread_call(
+                    self.repository.admit, candidate, global_settings, telegram_id=0,
+                ):
                     global_events += 1
             for extra in classify_additional_alerts(snapshot):
-                if self.repository.record_auxiliary(snapshot, extra, telegram_id=0):
+                if await bounded_thread_call(
+                    self.repository.record_auxiliary, snapshot, extra, telegram_id=0,
+                ):
                     global_events += 1
 
+        self._progress("personalizing_and_delivering")
         for telegram_id, settings in subscribers:
             allowed = set(universe)
             if settings.market_scope == "WATCHLIST_ONLY":
-                allowed &= {str(row["symbol"]) for row in self.watchlist.list(telegram_id)}
+                watched = await bounded_thread_call(self.watchlist.list, telegram_id)
+                allowed &= {str(row["symbol"]) for row in watched}
             elif settings.market_scope == "CUSTOM":
                 allowed &= set(settings.custom_symbols)
             for snapshot in snapshots:
@@ -271,7 +320,9 @@ class PumpDumpMonitor:
                     reverse=True,
                 )[:1]
                 for candidate in candidates:
-                    alert = self.repository.admit(candidate, settings, telegram_id=telegram_id)
+                    alert = await bounded_thread_call(
+                        self.repository.admit, candidate, settings, telegram_id=telegram_id,
+                    )
                     if not alert:
                         continue
                     admitted += 1
@@ -295,7 +346,10 @@ class PumpDumpMonitor:
                         continue
                     if enabled_aux.get(extra["alert_type"], True) is False:
                         continue
-                    if self.repository.record_auxiliary(snapshot, extra, telegram_id=telegram_id):
+                    if await bounded_thread_call(
+                        self.repository.record_auxiliary, snapshot, extra,
+                        telegram_id=telegram_id,
+                    ):
                         new_auxiliary.append(extra["alert_type"])
                         admitted += 1
                 if (new_auxiliary and self.bot is not None and settings.notifications_enabled
@@ -312,9 +366,20 @@ class PumpDumpMonitor:
                     except Exception as exc:
                         logging.warning("Auxiliary alert delivery failed user=%s: %s", telegram_id, exc)
         stages["episode_engine_completed_at"] = datetime.now(timezone.utc).isoformat()
-        outcome_counts = self.repository.outcome_counters()
-        active_global = self.repository.home_stats(telegram_id=0)["active_episodes"]
+        self._progress("finalizing_cycle")
+        outcome_counts = await bounded_thread_call(self.repository.outcome_counters)
+        active_global = (await bounded_thread_call(
+            self.repository.home_stats, telegram_id=0,
+        ))["active_episodes"]
         cycle_duration = round(time.perf_counter() - cycle_timer, 3)
+        cycle_completed = datetime.now(timezone.utc).isoformat()
+        stages["cycle_completed_at"] = cycle_completed
+        enrichment_status = (
+            "NOT_REQUIRED" if not shortlisted else
+            "HEALTHY" if len(enriched) == len(shortlisted) else "DEGRADED"
+        )
+        self.last_success_at = cycle_completed
+        self._progress("idle")
         return {"status": "ok", "universe": len(universe),
                 "universe_target": self.universe_limit,
                 "universe_candidates": len(instruments),
@@ -326,12 +391,22 @@ class PumpDumpMonitor:
                 "baseline_required_minutes": 60,
                 "baseline_source": "241x1m provider REST backfill each cycle",
                 "shortlisted_symbols": len(shortlisted),
-                "deep_enrichment_symbols": len(shortlisted),
+                "enrichment_requested_symbols": len(shortlisted),
+                "deep_enrichment_symbols": len(enriched),
+                "enrichment_status": enrichment_status,
+                "forward_microstructure_state": (
+                    "AVAILABLE" if enrichment_status == "HEALTHY" else
+                    "NOT_REQUIRED" if enrichment_status == "NOT_REQUIRED" else "UNAVAILABLE"
+                ),
+                "enrichment_error": enrichment_error,
                 "global_events_created": global_events,
                 "personalized_events": admitted, "delivered": delivered,
                 "active_episodes": active_global,
                 "subscribers": len(subscribers),
                 "cycle_duration_seconds": cycle_duration,
+                "cycle_started_at": cycle_started.isoformat(),
+                "cycle_completed_at": cycle_completed,
+                "current_stage": "idle",
                 "pipeline_timestamps": stages,
                 "outcome_labels_updated": outcome_updates["updated"],
                 "outcome_labels_finalized": outcome_updates["finalized"],
@@ -340,32 +415,52 @@ class PumpDumpMonitor:
 
     async def check_once(self) -> dict[str, Any]:
         ttl = max(self.interval_seconds * 2, 180)
-        if not acquire_lease(self.worker_name, self.owner_id, ttl):
+        if not await bounded_thread_call(acquire_lease, self.worker_name, self.owner_id, ttl):
             return {"status": "skipped", "reason": "LEASE_BUSY", **resource_budget()}
-        runtime_started(self.worker_name)
+        await bounded_thread_call(runtime_started, self.worker_name)
         try:
             result = await self._check_once_owned()
-            runtime_finished(
+            await bounded_thread_call(
+                runtime_finished,
                 self.worker_name, processed=int(result.get("snapshots") or 0), errors=0,
                 details=result,
             )
             return result
         except Exception as exc:
-            runtime_finished(
+            details = {
+                "status": "failed", "current_stage": self.current_stage,
+                "cycle_started_at": self.last_progress_at,
+            }
+            await bounded_thread_call(
+                runtime_finished,
                 self.worker_name, processed=0, errors=1,
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {exc}", details=details,
             )
             raise
         finally:
-            release_lease(self.worker_name, self.owner_id)
+            await bounded_thread_call(release_lease, self.worker_name, self.owner_id)
 
     async def run_forever(self) -> None:
         try:
             while not self._stop.is_set():
                 try:
-                    await self.check_once()
+                    self._progress("cycle_starting")
+                    await asyncio.wait_for(
+                        self.check_once(), timeout=self.cycle_timeout_seconds,
+                    )
                 except asyncio.CancelledError:
                     raise
+                except asyncio.TimeoutError:
+                    error = f"SCANNER_CYCLE_TIMEOUT:{self.cycle_timeout_seconds}s stage={self.current_stage}"
+                    logging.error(error)
+                    await bounded_thread_call(
+                        runtime_finished, self.worker_name, processed=0, errors=1,
+                        error=error, details={
+                            "status": "timeout", "current_stage": self.current_stage,
+                            "cycle_timeout_seconds": self.cycle_timeout_seconds,
+                        },
+                    )
+                    self._progress("timeout_backoff")
                 except Exception:
                     logging.exception("Pump/dump monitor cycle failed")
                 try:

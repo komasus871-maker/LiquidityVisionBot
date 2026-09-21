@@ -199,6 +199,12 @@ async def scanner_health(message: Message) -> None:
         "🩺 <b>SCANNER DATA PLANE</b>", "",
         f"Operational scanner: <b>{html.escape(report['scanner_status'])}</b>",
         f"Reason: {html.escape(report['scanner_status_reason'])}",
+        f"Operational worker process/supervisor: <b>{report['operational_process_state']} / "
+        f"{report['operational_supervisor_state']}</b>",
+        f"Scanner task/stage: <b>{report['scanner_task_state']} / "
+        f"{html.escape(str(report['scanner_current_stage']))}</b>",
+        f"Scanner restarts: {report['scanner_restart_count']} · last reason: "
+        f"<code>{html.escape(str(report['scanner_last_restart_reason'] or 'none'))}</code>",
         f"Universe: <b>{report['monitored_symbols'] if report['monitored_symbols'] is not None else 'unavailable'}"
         f" / target {report['universe_target']}</b>",
         f"Fetched / failed: {report.get('successfully_fetched') or 0} / {report.get('failed_symbol_count') or 0}",
@@ -208,7 +214,10 @@ async def scanner_health(message: Message) -> None:
         f"Broad radar age: {report['broad_radar_age_seconds']}s",
         f"Episode-engine age: {report['episode_engine_age_seconds']}s",
         f"Cycle duration: {report['cycle_duration_seconds']}s",
-        f"Shortlist / enriched: {report['shortlisted_symbols']} / {report['deep_enrichment_symbols']}",
+        f"Last cycle / success: {report['cycle_completed_at'] or 'never'} / "
+        f"{report['scanner_last_success_age_seconds']}s ago",
+        f"Shortlist / enriched: {report['shortlisted_symbols']} / {report['deep_enrichment_symbols']} "
+        f"· {report['enrichment_status']}",
         f"Active / new 1h / escalations 1h: {report['active_episodes']} / "
         f"{report['new_anomalies_1h']} / {report['escalations_1h']}",
         f"Snapshots / pending labels / complete labels / sample-ready cohorts: "
@@ -216,6 +225,8 @@ async def scanner_health(message: Message) -> None:
         f"{report['labels_complete']} / {report['cohorts_sample_ready']}",
         f"Operational-worker heartbeat age: {report['operational_worker_heartbeat_age_seconds']}s",
         f"Forward-collector heartbeat age: {report['forward_collector_heartbeat_age_seconds']}s",
+        f"Forward worker process/supervisor: <b>{report['forward_process_state']} / "
+        f"{report['forward_supervisor_state']}</b> · restarts {report['forward_restart_count']}",
         f"Last error: <code>{html.escape(str(report['last_error'] or 'none'))}</code>",
         "", "<b>Venue health</b>", *venue_lines,
         "", "Diagnostics only · no trading authority.",

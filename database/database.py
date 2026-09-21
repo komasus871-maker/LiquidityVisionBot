@@ -103,12 +103,19 @@ class DBConnection:
 
 def connect(*, lock_timeout_ms: int | None = None) -> DBConnection:
     if USE_POSTGRES:
+        statement_timeout_ms = max(1, int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "15000")))
+        effective_lock_timeout_ms = max(
+            1, int(lock_timeout_ms if lock_timeout_ms is not None else os.getenv("DB_LOCK_TIMEOUT_MS", "10000")),
+        )
         kwargs: dict[str, Any] = {
             "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "15")),
             "application_name": "liquidity-vision-bot",
+            "options": (
+                f"-c statement_timeout={statement_timeout_ms}ms "
+                f"-c lock_timeout={effective_lock_timeout_ms}ms "
+                "-c idle_in_transaction_session_timeout=15000ms"
+            ),
         }
-        if lock_timeout_ms is not None:
-            kwargs["options"] = f"-c lock_timeout={max(1, int(lock_timeout_ms))}ms"
         # Most hosted PostgreSQL providers require TLS. If sslmode is already
         # embedded in the URL, psycopg2 safely accepts this explicit value too.
         kwargs["sslmode"] = os.getenv("PGSSLMODE", "require")
@@ -1743,7 +1750,7 @@ def runtime_finished(worker_name: str, *, processed: int, errors: int, details: 
                 last_error=excluded.last_error,
                 processed_count=excluded.processed_count,
                 error_count=excluded.error_count,
-                details_json=CASE WHEN excluded.last_error IS NULL
+                details_json=CASE WHEN excluded.last_error IS NULL OR excluded.details_json <> '{}'
                     THEN excluded.details_json ELSE runtime_state.details_json END
             """,
             (worker_name, now, None if error else now, error, processed, errors, details_json),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import signal
 import socket
@@ -21,6 +22,7 @@ from services.forward_public_collectors import (
     OKXPublicConnector,
 )
 from services.forward_runtime_state import ForwardRuntimeStateRepository, utc_now
+from services.runtime_supervision import PeriodicHeartbeatThread, bounded_thread_call
 
 
 CONNECTORS = {
@@ -29,6 +31,10 @@ CONNECTORS = {
     "BINGX": BingXPublicConnector,
 }
 LEASE_NAME = "forward-microstructure-production-v1"
+
+
+class LeaseLostError(RuntimeError):
+    pass
 
 
 def _storage_root() -> Path:
@@ -155,23 +161,33 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
         snapshot_sink=shared.publish_snapshot,
     )
 
-    async def heartbeat() -> None:
+    collector_runtime: dict[str, Any] = {
+        "task_state": "STARTING", "restart_count": 0,
+        "last_restart_reason": None, "last_progress_at": utc_now(),
+    }
+    storage_runtime: dict[str, Any] = {
+        "task_state": "DISABLED" if archive is None else "STARTING",
+        "restart_count": 0, "last_error": None, "last_success_at": None,
+    }
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def archive_maintenance() -> None:
         last_compaction = 0.0
         last_remote_audit = 0.0
-        while True:
-            if not acquire_lease(LEASE_NAME, instance_id, lease_seconds):
-                raise RuntimeError("authoritative forward collector lease was lost")
-            health = supervisor.health()
-            raw_health = store.raw_ledger.health() if store.raw_ledger else {}
-            archive_health: dict[str, Any] = {}
-            if archive and store.raw_ledger:
+        interval = max(15, int(os.getenv("FORWARD_ARCHIVE_INTERVAL_SECONDS", "30")))
+        while not shutdown_event.is_set() and archive and store.raw_ledger:
+            storage_runtime["task_state"] = "RUNNING"
+            try:
                 store.raw_ledger.seal_completed()
-                await asyncio.to_thread(archive.process_pending)
-                await asyncio.to_thread(archive.evict_verified, force_to_cache_limit=True)
+                await bounded_thread_call(archive.process_pending, timeout_seconds=120)
+                await bounded_thread_call(
+                    archive.evict_verified, force_to_cache_limit=True, timeout_seconds=120,
+                )
                 if time.monotonic() - last_remote_audit >= int(
                     os.getenv("FORWARD_REMOTE_AUDIT_INTERVAL_SECONDS", "3600")
                 ):
-                    await asyncio.to_thread(archive.audit_remote, limit=20)
+                    await bounded_thread_call(archive.audit_remote, limit=20, timeout_seconds=120)
                     last_remote_audit = time.monotonic()
                 archive_health = archive.health()
                 now_monotonic = time.monotonic()
@@ -184,81 +200,165 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 ):
                     retain_ms = int(os.getenv("FORWARD_METADATA_RETENTION_SECONDS", "7200")) * 1_000
-                    await asyncio.to_thread(
+                    await bounded_thread_call(
                         store.compact_rebuildable_metadata,
                         retain_after_ts_ms=time.time_ns() // 1_000_000 - retain_ms,
                         remote_verified_through_ts_ms=int(
                             archive_health["newest_evidence_ts_ms"] or 0
                         ),
+                        timeout_seconds=120,
                     )
                     last_compaction = now_monotonic
-            last_ms = raw_health.get("last_write_ts_ms")
-            shared.heartbeat(
-                instance_id=instance_id, state="RUNNING", started_at=started_at,
-                candidate_identity_hash=identity_hash, venues=health["venues"],
-                storage=raw_health | archive_health | {
+                storage_runtime.update({
+                    "last_success_at": utc_now(), "last_error": None,
+                    "health": archive_health,
+                })
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                storage_runtime["task_state"] = "DEGRADED"
+                storage_runtime["restart_count"] += 1
+                storage_runtime["last_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+                logging.exception("Forward archive maintenance failed")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    heartbeat_failed = asyncio.Event()
+    heartbeat_failure: list[BaseException] = []
+
+    def heartbeat_fatal(exc: BaseException) -> None:
+        heartbeat_failure.append(exc)
+        loop.call_soon_threadsafe(heartbeat_failed.set)
+
+    def heartbeat_tick() -> None:
+        if not acquire_lease(LEASE_NAME, instance_id, lease_seconds):
+            raise LeaseLostError("authoritative forward collector lease was lost")
+        health = supervisor.health()
+        raw_health = store.raw_ledger.health() if store.raw_ledger else {}
+        last_ms = raw_health.get("last_write_ts_ms")
+        healthy = any(
+            value.get("state") == "HEALTHY" for value in health["venues"].values()
+        )
+        publication_error = heartbeat_thread.last_error
+        shared.heartbeat(
+            instance_id=instance_id,
+            state="RUNNING" if healthy and not publication_error else "DEGRADED",
+            started_at=started_at,
+            candidate_identity_hash=identity_hash, venues=health["venues"],
+            storage=raw_health | (storage_runtime.get("health") or {}) | {
                     "metadata_database": str(Path(args.database)),
                     "metadata_database_bytes": (
                         Path(args.database).stat().st_size if Path(args.database).is_file() else 0
                     ),
+                    "supervisor": dict(collector_runtime),
+                    "archive_task": {
+                        key: value for key, value in storage_runtime.items() if key != "health"
+                    },
                 },
-                last_event_at=_iso_from_ms(last_ms) if last_ms else None,
-                migration_boundary_at=migration_boundary,
-            )
-            await asyncio.sleep(max(10, lease_seconds // 3))
+            last_event_at=_iso_from_ms(last_ms) if last_ms else None,
+            migration_boundary_at=migration_boundary,
+            last_error=publication_error,
+        )
 
-    collector_task = asyncio.create_task(
-        supervisor.run(duration_seconds=max(0, args.duration_seconds)), name="forward-collector"
+    heartbeat_thread = PeriodicHeartbeatThread(
+        heartbeat_tick,
+        interval_seconds=max(15, min(30, int(os.getenv("FORWARD_HEARTBEAT_SECONDS", "20")))),
+        fatal_exceptions=(LeaseLostError,), on_fatal=heartbeat_fatal,
+        name="forward-heartbeat",
     )
-    heartbeat_task = asyncio.create_task(heartbeat(), name="forward-heartbeat")
-    shutdown_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
+
+    async def collector_loop() -> dict[str, Any]:
+        backoff = 1.0
+        while not shutdown_event.is_set():
+            collector_runtime["task_state"] = "RUNNING"
+            collector_runtime["last_progress_at"] = utc_now()
+            try:
+                result = await supervisor.run(duration_seconds=max(0, args.duration_seconds))
+                if args.duration_seconds > 0:
+                    return result
+                reason = "COLLECTOR_TASK_EXITED"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                reason = f"{type(exc).__name__}: {exc}"[:1000]
+            collector_runtime["task_state"] = "RESTART_BACKOFF"
+            collector_runtime["restart_count"] += 1
+            collector_runtime["last_restart_reason"] = reason
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff)
+            except asyncio.TimeoutError:
+                pass
+            backoff = min(backoff * 2, 30)
+        return supervisor.health()
+
+    collector_task = asyncio.create_task(collector_loop(), name="forward-collector-supervisor")
+    archive_task = asyncio.create_task(archive_maintenance(), name="forward-archive-maintenance")
     for signum in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(signum, shutdown_event.set)
         except (NotImplementedError, RuntimeError):
             pass
     shutdown_task = asyncio.create_task(shutdown_event.wait(), name="forward-shutdown")
+    heartbeat_failure_task = asyncio.create_task(
+        heartbeat_failed.wait(), name="forward-heartbeat-failed",
+    )
     try:
+        heartbeat_thread.start()
         done, _ = await asyncio.wait(
-            {collector_task, heartbeat_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
+            {collector_task, heartbeat_failure_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
         if shutdown_task in done and shutdown_event.is_set():
             collector_task.cancel()
             await asyncio.gather(collector_task, return_exceptions=True)
-            shared.heartbeat(
+            await bounded_thread_call(
+                shared.heartbeat,
                 instance_id=instance_id, state="STOPPING", started_at=started_at,
                 candidate_identity_hash=identity_hash, venues=supervisor.health()["venues"],
                 storage=store.raw_ledger.health() if store.raw_ledger else {},
                 migration_boundary_at=migration_boundary,
+                timeout_seconds=20,
             )
             return supervisor.health()
-        if heartbeat_task in done:
-            exception = heartbeat_task.exception()
-            if exception:
-                raise exception
+        if heartbeat_failure_task in done and heartbeat_failed.is_set():
+            raise heartbeat_failure[-1] if heartbeat_failure else RuntimeError(
+                "forward heartbeat thread exited"
+            )
         return await collector_task
     except BaseException as exc:
         try:
-            shared.heartbeat(
+            await bounded_thread_call(
+                shared.heartbeat,
                 instance_id=instance_id, state="FAILED", started_at=started_at,
                 candidate_identity_hash=identity_hash, venues=supervisor.health()["venues"],
                 storage=store.raw_ledger.health() if store.raw_ledger else {},
                 migration_boundary_at=migration_boundary, last_error=str(exc)[:1000],
+                timeout_seconds=20,
             )
         except Exception:
             pass
         raise
     finally:
-        for task in (collector_task, heartbeat_task, shutdown_task):
+        shutdown_event.set()
+        heartbeat_thread.stop(timeout_seconds=20)
+        for task in (collector_task, heartbeat_failure_task, archive_task, shutdown_task):
             if not task.done():
                 task.cancel()
-        await asyncio.gather(collector_task, heartbeat_task, shutdown_task, return_exceptions=True)
+        await asyncio.gather(
+            collector_task, heartbeat_failure_task, archive_task, shutdown_task,
+            return_exceptions=True,
+        )
         store.close()
         if archive:
             try:
-                await asyncio.to_thread(archive.process_pending, force=True)
-                await asyncio.to_thread(archive.evict_verified, force_to_cache_limit=True)
+                await bounded_thread_call(
+                    archive.process_pending, force=True, timeout_seconds=120,
+                )
+                await bounded_thread_call(
+                    archive.evict_verified, force_to_cache_limit=True, timeout_seconds=120,
+                )
             except Exception:
                 # Sealed local partitions remain on disk for restart recovery.
                 pass

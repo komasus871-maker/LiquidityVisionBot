@@ -80,7 +80,9 @@ class OperationalHealthRepository:
         return value
 
 
-def child_runtime_states() -> dict[str, Any]:
+def child_runtime_states(
+    supervisor_states: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     allowed = set(OPERATIONAL_COMPONENTS)
     result: dict[str, Any] = {}
     for row in get_runtime_states():
@@ -102,6 +104,7 @@ def child_runtime_states() -> dict[str, Any]:
             "processed_count": int(item.get("processed_count") or 0),
             "error_count": int(item.get("error_count") or 0),
         }
+        child.update((supervisor_states or {}).get(normalized, {}))
         if normalized == "pump_dump_monitor":
             try:
                 details = json.loads(item.get("details_json") or "{}")
@@ -113,10 +116,15 @@ def child_runtime_states() -> dict[str, Any]:
                     "failed_symbol_count", "baseline_ready_symbols", "shortlisted_symbols",
                     "deep_enrichment_symbols", "global_events_created", "active_episodes",
                     "cycle_duration_seconds", "labels_pending", "labels_complete",
-                    "cohorts_sample_ready", "pipeline_timestamps",
+                    "cohorts_sample_ready", "pipeline_timestamps", "current_stage",
+                    "cycle_started_at", "cycle_completed_at", "enrichment_status",
+                    "forward_microstructure_state", "enrichment_requested_symbols",
                 )
             }
         result[normalized] = child
+    for name, state in (supervisor_states or {}).items():
+        if name in allowed and name not in result:
+            result[name] = dict(state)
     return result
 
 

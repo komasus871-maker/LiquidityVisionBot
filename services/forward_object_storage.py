@@ -88,12 +88,22 @@ class S3CompatibleObjectStorage(ForwardObjectStorage):
             )
         try:
             import boto3
+            from botocore.config import Config
         except ImportError as exc:
             raise ObjectStorageError("boto3 is required when forward object storage is enabled") from exc
         kwargs: dict[str, Any] = {
             "service_name": "s3",
             "aws_access_key_id": required["access_key"],
             "aws_secret_access_key": required["secret_key"],
+            "config": Config(
+                connect_timeout=max(1, int(os.getenv("FORWARD_OBJECT_CONNECT_TIMEOUT_SECONDS", "10"))),
+                read_timeout=max(1, int(os.getenv("FORWARD_OBJECT_READ_TIMEOUT_SECONDS", "30"))),
+                retries={
+                    "max_attempts": max(1, int(os.getenv("FORWARD_OBJECT_MAX_ATTEMPTS", "3"))),
+                    "mode": "standard",
+                },
+                tcp_keepalive=True,
+            ),
         }
         optional = {
             "endpoint_url": os.getenv("FORWARD_OBJECT_ENDPOINT_URL", "").strip(),
