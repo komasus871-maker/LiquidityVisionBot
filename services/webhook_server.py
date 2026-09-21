@@ -18,7 +18,13 @@ from aiogram.types import Update
 from database.database import database_backend, persistent_database
 from services.forward_runtime_state import ForwardRuntimeStateRepository
 from services.pump_dump_scanner import ScannerRepository, resource_budget
-from services.telegram_webapp import terminal_html, validate_init_data
+from services.telegram_webapp import (
+    WebAppAuthError,
+    issue_terminal_session,
+    terminal_html,
+    validate_init_data,
+    validate_terminal_session,
+)
 from database.database import connect
 
 _STARTED_AT = datetime.now(timezone.utc)
@@ -83,6 +89,9 @@ class WebhookServer:
         self.maintenance_token = os.getenv("MONITOR_CRON_SECRET", "").strip()
 
     def _webapp_identity(self, request: web.Request):
+        authorization = request.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            return validate_terminal_session(authorization[7:].strip(), self.bot.token)
         value = request.headers.get("X-Telegram-Init-Data", "") or request.query.get("initData", "")
         return validate_init_data(value, self.bot.token)
 
@@ -95,14 +104,56 @@ class WebhookServer:
     async def terminal_handler(self, _: web.Request) -> web.Response:
         return web.Response(text=terminal_html(), content_type="text/html")
 
+    async def terminal_auth_handler(self, request: web.Request) -> web.Response:
+        started = time.perf_counter()
+        logging.info("TERMINAL_AUTH_START")
+        try:
+            payload = await request.json()
+        except Exception:
+            logging.info("AUTH_RESPONSE status=400 code=AUTH_REJECTED latency_ms=%.2f",
+                         (time.perf_counter() - started) * 1000)
+            logging.warning("TERMINAL_AUTH_FAILED code=AUTH_REJECTED")
+            return self._json({"status": "error", "code": "AUTH_REJECTED"}, 400)
+        init_data = str(payload.get("init_data") or "") if isinstance(payload, dict) else ""
+        if isinstance(payload, dict) and payload.get("js_ready") is True:
+            logging.info("TELEGRAM_JS_READY")
+        if init_data:
+            logging.info("INIT_DATA_PRESENT")
+        logging.info("AUTH_REQUEST_SENT")
+        try:
+            identity = validate_init_data(init_data, self.bot.token)
+        except WebAppAuthError as exc:
+            status = 401 if exc.code == "AUTH_EXPIRED" else 403
+            logging.info("AUTH_RESPONSE status=%s code=%s latency_ms=%.2f", status, exc.code,
+                         (time.perf_counter() - started) * 1000)
+            logging.warning("TERMINAL_AUTH_FAILED code=%s", exc.code)
+            return self._json({"status": "error", "code": exc.code}, status)
+        token = issue_terminal_session(identity, self.bot.token)
+        logging.info("AUTH_RESPONSE status=200 code=AUTH_SUCCESS latency_ms=%.2f",
+                     (time.perf_counter() - started) * 1000)
+        logging.info("AUTH_SUCCESS telegram_id=%s", identity.telegram_id)
+        return self._json({
+            "status": "ok",
+            "session_token": token,
+            "expires_in_seconds": 900,
+            "user": {
+                "telegram_id": identity.telegram_id,
+                "first_name": identity.first_name,
+            },
+        })
+
     async def terminal_api_handler(self, request: web.Request) -> web.Response:
         try:
             identity = self._webapp_identity(request)
-        except ValueError as exc:
-            return self._json({"status": "forbidden", "detail": str(exc)}, 403)
+        except WebAppAuthError as exc:
+            logging.warning("TERMINAL_AUTH_FAILED code=%s", exc.code)
+            return self._json({"status": "forbidden", "code": exc.code}, 403)
         page = request.match_info["page"]
+        logging.info("TERMINAL_BOOTSTRAP_STARTED telegram_id=%s page=%s",
+                     identity.telegram_id, page)
         state = ForwardRuntimeStateRepository()
         rows = state.latest_states(("BTCUSDT", "ETHUSDT", "SOLUSDT"))
+        metadata = {}
         if page in {"overview", "markets"}:
             items = [{"symbol": row["symbol"], "venue": row["venue"],
                       "market_state": row["market_state"], "data_quality": row["data_quality"],
@@ -118,7 +169,17 @@ class WebhookServer:
                 items.append({"symbol": row["symbol"], "venue": row["venue"], **details,
                               "observed_at": row["observed_at"]})
         elif page == "scanner":
-            items = ScannerRepository.recent(50, telegram_id=identity.telegram_id)
+            from services.pump_dump_scanner import DISCOVERY_MODES
+            selected_view = request.query.get("view", "HOT_NOW").strip().upper().replace("-", "_")
+            if selected_view not in DISCOVERY_MODES:
+                return self._json({"status": "invalid_view", "code": "UNKNOWN_SCANNER_VIEW"}, 400)
+            items = ScannerRepository.recent(
+                50, telegram_id=identity.telegram_id, mode=selected_view,
+            )
+            metadata = {
+                "selected_view": selected_view,
+                "available_views": list(DISCOVERY_MODES),
+            }
         elif page == "signals":
             with connect() as connection:
                 records = connection.execute(
@@ -126,7 +187,25 @@ class WebhookServer:
                        FROM signals WHERE owner_telegram_id=? ORDER BY updated_at DESC LIMIT 50""",
                     (identity.telegram_id,),
                 ).fetchall()
-            items = [dict(record) for record in records]
+            scanner_rows = ScannerRepository.recent(200, telegram_id=identity.telegram_id)
+            scanner_context = {}
+            for scanner_row in scanner_rows:
+                normalized = str(scanner_row.get("symbol") or "").removesuffix("USDT")
+                scanner_context.setdefault(normalized, {
+                    "phase": scanner_row.get("phase"),
+                    "market_state": scanner_row.get("market_state"),
+                    "evidence_quality": scanner_row.get("evidence_quality"),
+                    "observed_at": scanner_row.get("observed_at"),
+                    "economic_authority": False,
+                })
+            items = []
+            for record in records:
+                item = dict(record)
+                item["scanner_context"] = scanner_context.get(
+                    str(item.get("symbol") or "").upper().removesuffix("USDT"),
+                    "UNAVAILABLE",
+                )
+                items.append(item)
         elif page == "paper":
             with connect() as connection:
                 records = connection.execute("""SELECT symbol,status,side,quantity,average_entry,
@@ -173,6 +252,9 @@ class WebhookServer:
             health = state.health() or {"state": "NOT_STARTED", "execution_authority": False}
             items = [{key: value for key, value in health.items()
                       if key not in {"candidate_ids_json"}}]
+        elif page == "economics":
+            from services.economic_value_dashboard import EconomicValueDashboard
+            items = [EconomicValueDashboard().report(identity.telegram_id)]
         elif page == "system":
             from services.operational_runtime import OperationalHealthRepository
             forward_health = state.health() or {"state": "NOT_STARTED"}
@@ -210,10 +292,14 @@ class WebhookServer:
                 ).strip().lower() in {"1", "true", "yes", "on"},
             }]
         else:
+            logging.warning("TERMINAL_BOOTSTRAP_FAILED telegram_id=%s page=%s code=NOT_FOUND",
+                            identity.telegram_id, page)
             return self._json({"status": "not_found"}, 404)
+        logging.info("TERMINAL_BOOTSTRAP_COMPLETE telegram_id=%s page=%s items=%s",
+                     identity.telegram_id, page, len(items))
         return self._json({"status": "ok", "page": page, "classification": "MARKET_INTELLIGENCE",
                            "economic_authority": False, "bounded": True, "resource_budget": resource_budget(),
-                           "items": items})
+                           "items": items, **metadata})
 
     def _remember_update(self, update_id: int) -> bool:
         """Return False when Telegram retries an update we already accepted."""
@@ -357,6 +443,7 @@ class WebhookServer:
             app.router.add_get("/health", self.health_handler)
             app.router.add_get("/healthz", self.health_handler)
             app.router.add_get("/terminal", self.terminal_handler)
+            app.router.add_post("/api/terminal/auth", self.terminal_auth_handler)
             app.router.add_get("/api/terminal/{page}", self.terminal_api_handler)
             app.router.add_post(self.path, self.webhook_handler)
             app.router.add_post("/internal/monitor", self.maintenance_handler)

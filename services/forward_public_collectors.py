@@ -5,6 +5,7 @@ import asyncio
 import gzip
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import replace
@@ -478,6 +479,8 @@ class ForwardCollectorSupervisor:
         self.last_feature_ms: dict[tuple[str, str], int] = {}
         self.last_checkpoint_ms: dict[tuple[str, str], int] = {}
         self.last_exchange_ts: dict[tuple[str, str, str], int] = {}
+        self.last_event_ms_by_venue: dict[str, int] = {}
+        self.started_ms = now_ms()
         self.resync_inflight: set[tuple[str, str]] = set()
         self.events_received = 0
         self.duplicates = 0
@@ -485,6 +488,9 @@ class ForwardCollectorSupervisor:
         self.shadow_decisions = 0
 
     async def emit(self, event: RawMarketEvent) -> None:
+        self.last_event_ms_by_venue[event.venue.value] = max(
+            event.receive_ts_ms, self.last_event_ms_by_venue.get(event.venue.value, 0),
+        )
         clock_key = event.venue.value, event.symbol, event.event_type.value
         previous = self.last_exchange_ts.get(clock_key)
         if previous is not None and event.exchange_ts_ms < previous:
@@ -565,16 +571,42 @@ class ForwardCollectorSupervisor:
         return self.health()
 
     def health(self) -> dict[str, Any]:
+        current_ms = now_ms()
+        warmup_ms = max(10_000, int(os.getenv("FORWARD_VENUE_WARMUP_SECONDS", "120")) * 1000)
+        stale_ms = max(5_000, int(os.getenv("FORWARD_VENUE_STALE_SECONDS", "60")) * 1000)
+
+        def venue_health(connector: PublicConnector) -> dict[str, Any]:
+            last_event_ms = self.last_event_ms_by_venue.get(connector.venue.value)
+            age_ms = max(0, current_ms - last_event_ms) if last_event_ms else None
+            uptime_ms = max(0, current_ms - self.started_ms)
+            if connector.last_error:
+                state = "DEGRADED" if connector.connection_count > 0 or last_event_ms else "DISCONNECTED"
+            elif last_event_ms and age_ms is not None and age_ms <= stale_ms:
+                state = "HEALTHY"
+            elif last_event_ms:
+                state = "STALE"
+            elif connector.connection_count > 0 and uptime_ms <= warmup_ms:
+                state = "CONNECTED"
+            elif uptime_ms <= warmup_ms:
+                state = "WARMING"
+            else:
+                state = "DISCONNECTED"
+            return {
+                "state": state,
+                "connection_count": connector.connection_count,
+                "last_event_at_ms": last_event_ms,
+                "event_age_ms": age_ms,
+                "last_error": connector.last_error,
+                "capabilities": connector.capabilities,
+            }
+
         return {
             "events_received": self.events_received, "duplicates": self.duplicates,
             "book_gaps": self.gaps, "shadow_decisions": self.shadow_decisions,
             "store_counts": self.store.counts(),
             "venues": {
-                name: {
-                    "connection_count": connector.connection_count,
-                    "last_error": connector.last_error,
-                    "capabilities": connector.capabilities,
-                } for name, connector in sorted(self.connectors.items())
+                name: venue_health(connector)
+                for name, connector in sorted(self.connectors.items())
             },
             "execution_authority": False,
         }

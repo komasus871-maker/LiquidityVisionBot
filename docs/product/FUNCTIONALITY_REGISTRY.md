@@ -144,8 +144,8 @@ work even though they are not all shown as first-level reply buttons.
 
 `services.functionality_audit.full_functionality_matrix()` expands this
 registry into the release-time ownership audit. The current matrix contains
-253 unique rows: all 189 normalized commands/callbacks, 13 reply controls, 12
-Terminal pages, 15 scanner discovery modes, 14 configurable scanner alert
+256 unique rows: all 189 normalized commands/callbacks, 13 reply controls, 13
+Terminal pages, 17 scanner discovery modes, 14 configurable scanner alert
 categories, and 10 continuous/maintenance/migration components. Each row
 records its concrete handler, service dependencies, data source, state owner,
 background dependency, tables, output contract, failure/degradation path,

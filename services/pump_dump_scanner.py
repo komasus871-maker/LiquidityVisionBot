@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,8 @@ from database.database import connect
 
 
 WINDOW_MINUTES = (1, 3, 5, 15, 30, 60)
+OUTCOME_HORIZON_MINUTES = (1, 3, 5, 15, 30, 60, 240)
+SCANNER_OUTCOME_COST_MODEL = "scanner-cycle-cost-model-v1"
 DISCOVERY_MODES: dict[str, tuple[str, ...]] = {
     "HOT_NOW": (),
     "EARLY_BUILDUP": ("BUILDUP", "EARLY_ANOMALY"),
@@ -28,6 +31,8 @@ DISCOVERY_MODES: dict[str, tuple[str, ...]] = {
     "OI_BUILDUP": ("BUILDUP", "LEVERAGED_BREAKOUT"),
     "OI_SHOCK": ("OI_SHOCK",),
     "SQUEEZES": ("SHORT_SQUEEZE", "LONG_SQUEEZE"),
+    "SHORT_SQUEEZES": ("SHORT_SQUEEZE",),
+    "LONG_SQUEEZES": ("LONG_SQUEEZE",),
     "LIQUIDATION_CASCADES": ("LIQUIDATION_CASCADE",),
     "LIQUIDITY_VACUUM": ("LIQUIDITY_VACUUM_MOVE",),
     "CVD_DIVERGENCES": ("CVD_DIVERGENCE", "ABSORPTION"),
@@ -489,6 +494,209 @@ class ScannerRepository:
     """Persistent settings, episodes and bounded alert history."""
 
     @staticmethod
+    def _outcome_costs(horizon_minutes: int) -> tuple[float, float, float]:
+        """Return explicit round-trip modeled costs for research labels only."""
+        fee = max(0.0, float(os.getenv("SCANNER_OUTCOME_FEE_PCT", "0.10")))
+        slippage = max(0.0, float(os.getenv("SCANNER_OUTCOME_SLIPPAGE_PCT", "0.08")))
+        funding_8h = max(0.0, float(os.getenv("SCANNER_OUTCOME_FUNDING_8H_PCT", "0.01")))
+        funding = funding_8h * min(1.0, max(0, horizon_minutes) / 480.0)
+        return fee, slippage, funding
+
+    @staticmethod
+    def _schedule_outcomes(
+        conn: Any, *, event_id: str, symbol: str, direction: str,
+        decision_at: datetime, entry_price: float,
+    ) -> None:
+        created_at = datetime.now(timezone.utc).isoformat()
+        decision_text = decision_at.isoformat()
+        for horizon in OUTCOME_HORIZON_MINUTES:
+            fee, slippage, funding = ScannerRepository._outcome_costs(horizon)
+            due_at = (decision_at + timedelta(minutes=horizon)).isoformat()
+            conn.execute("""INSERT INTO scanner_outcome_labels(
+                event_id,symbol,direction,horizon_minutes,decision_at,due_at,
+                entry_price,last_price,max_price,min_price,max_price_at,min_price_at,
+                fee_pct,slippage_pct,funding_pct,observation_count,
+                observation_resolution,cost_model_version,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(event_id,horizon_minutes) DO NOTHING""", (
+                event_id, symbol, direction, horizon, decision_text, due_at,
+                entry_price, entry_price, entry_price, entry_price, decision_text, decision_text,
+                fee, slippage, funding, 0, "SCANNER_CYCLE_SAMPLE",
+                SCANNER_OUTCOME_COST_MODEL, "PENDING", created_at, created_at,
+            ))
+
+    @staticmethod
+    def advance_outcomes(snapshot: SymbolSnapshot) -> dict[str, int]:
+        """Causally advance pending labels from a later broad-radar observation.
+
+        Extrema are sampled at the scanner cycle resolution; no later feature is
+        written back into the immutable decision-time anomaly snapshot.
+        """
+        now = snapshot.observed_at
+        now_text = now.isoformat()
+        pending_limit = max(100, min(10_000, int(os.getenv(
+            "SCANNER_OUTCOME_ADVANCE_LIMIT", "2000",
+        ))))
+        updated = finalized = 0
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute(
+                """SELECT * FROM scanner_outcome_labels
+                   WHERE symbol=? AND status='PENDING' AND decision_at<?
+                   ORDER BY due_at,event_id LIMIT ?""",
+                (snapshot.symbol, now_text, pending_limit),
+            ).fetchall()]
+            for row in rows:
+                entry = float(row["entry_price"])
+                price = float(snapshot.price)
+                max_price, min_price = float(row["max_price"]), float(row["min_price"])
+                max_at, min_at = str(row["max_price_at"]), str(row["min_price_at"])
+                if price > max_price:
+                    max_price, max_at = price, now_text
+                if price < min_price:
+                    min_price, min_at = price, now_text
+                is_final = now >= datetime.fromisoformat(str(row["due_at"]).replace("Z", "+00:00"))
+                values: dict[str, Any] = {
+                    "last_price": price, "max_price": max_price, "min_price": min_price,
+                    "max_price_at": max_at, "min_price_at": min_at,
+                    "observation_count": int(row["observation_count"]) + 1,
+                    "updated_at": now_text,
+                }
+                if is_final:
+                    raw_return = percent_change(entry, price)
+                    sign = 1.0 if str(row["direction"]) == "PUMP" else -1.0
+                    directional = raw_return * sign
+                    if sign > 0:
+                        mfe = max(0.0, percent_change(entry, max_price))
+                        mae = max(0.0, -percent_change(entry, min_price))
+                        mfe_at, mae_at = max_at, min_at
+                    else:
+                        mfe = max(0.0, -percent_change(entry, min_price))
+                        mae = max(0.0, percent_change(entry, max_price))
+                        mfe_at, mae_at = min_at, max_at
+                    decision = datetime.fromisoformat(str(row["decision_at"]).replace("Z", "+00:00"))
+                    total_cost = sum(float(row[key]) for key in (
+                        "fee_pct", "slippage_pct", "funding_pct",
+                    ))
+                    values.update({
+                        "exit_price": price,
+                        "forward_return_pct": raw_return,
+                        "directional_return_pct": directional,
+                        "mfe_pct": mfe,
+                        "mae_pct": mae,
+                        "time_to_mfe_seconds": max(0, int((datetime.fromisoformat(mfe_at.replace("Z", "+00:00")) - decision).total_seconds())),
+                        "time_to_mae_seconds": max(0, int((datetime.fromisoformat(mae_at.replace("Z", "+00:00")) - decision).total_seconds())),
+                        "max_extension_pct": mfe,
+                        "retracement_pct": max(0.0, mfe - directional),
+                        "net_directional_return_pct": directional - total_cost,
+                        "status": "LABELED", "labeled_at": now_text,
+                    })
+                assignments = ",".join(f"{key}=?" for key in values)
+                conn.execute(
+                    f"UPDATE scanner_outcome_labels SET {assignments} WHERE id=?",
+                    (*values.values(), row["id"]),
+                )
+                updated += 1
+                finalized += int(is_final)
+        return {"updated": updated, "finalized": finalized}
+
+    @staticmethod
+    def outcome_attribution(
+        *, horizon_minutes: int = 15, market_state: str | None = None,
+        phase: str | None = None, minimum_samples: int = 30,
+    ) -> dict[str, Any]:
+        """Descriptive, cost-aware scanner cohort evidence with sample gating."""
+        clauses = ["o.status='LABELED'", "o.horizon_minutes=?"]
+        params: list[Any] = [int(horizon_minutes)]
+        if market_state:
+            clauses.append("e.market_state=?")
+            params.append(market_state)
+        if phase:
+            clauses.append("e.phase=?")
+            params.append(phase)
+        row_limit = max(100, min(20_000, int(os.getenv(
+            "SCANNER_ATTRIBUTION_MAX_ROWS", "5000",
+        ))))
+        params.append(row_limit + 1)
+        with connect() as conn:
+            rows = [dict(row) for row in conn.execute(f"""SELECT
+                o.net_directional_return_pct,o.directional_return_pct,o.mfe_pct,o.mae_pct,
+                o.fee_pct,o.slippage_pct,o.funding_pct,o.labeled_at,
+                e.symbol,e.market_state,e.phase
+                FROM scanner_outcome_labels o JOIN market_anomaly_events e ON e.event_id=o.event_id
+                WHERE {' AND '.join(clauses)} ORDER BY o.labeled_at DESC LIMIT ?""",
+                tuple(params),
+            ).fetchall()]
+        truncated = len(rows) > row_limit
+        rows = rows[:row_limit]
+        values = [float(row["net_directional_return_pct"]) for row in rows]
+        adequate = len(values) >= max(1, int(minimum_samples))
+        result: dict[str, Any] = {
+            "classification": "RESEARCH_SHADOW_EVIDENCE",
+            "economic_authority": False,
+            "horizon_minutes": int(horizon_minutes),
+            "market_state": market_state,
+            "phase": phase,
+            "sample_size": len(values),
+            "minimum_samples": max(1, int(minimum_samples)),
+            "sample_adequate": adequate,
+            "bounded": True,
+            "row_limit": row_limit,
+            "truncated": truncated,
+            "win_definition": "net directional return after modeled costs > 0",
+            "observation_resolution": "SCANNER_CYCLE_SAMPLE",
+            "conclusion_status": "DESCRIPTIVE_ONLY" if adequate else "INSUFFICIENT_SAMPLE",
+            "predictive_probability": None,
+        }
+        if not adequate:
+            return result
+        wins = [value for value in values if value > 0]
+        losses = [value for value in values if value < 0]
+        gross_profit, gross_loss = sum(wins), abs(sum(losses))
+        seed = int(hashlib.sha256(
+            f"{horizon_minutes}|{market_state}|{phase}|{len(values)}".encode()
+        ).hexdigest()[:16], 16)
+        rng = random.Random(seed)
+        bootstrap = [statistics.mean(rng.choices(values, k=len(values))) for _ in range(500)]
+        bootstrap.sort()
+        by_symbol: dict[str, int] = {}
+        by_month: dict[str, list[float]] = {}
+        for row, value in zip(rows, values):
+            symbol = str(row["symbol"])
+            by_symbol[symbol] = by_symbol.get(symbol, 0) + 1
+            month = str(row["labeled_at"])[:7]
+            by_month.setdefault(month, []).append(value)
+        total_costs = [sum(float(row[key]) for key in ("fee_pct", "slippage_pct", "funding_pct"))
+                       for row in rows]
+        gross_directional = [float(row["directional_return_pct"]) for row in rows]
+        result.update({
+            "mean_net_return_pct": statistics.mean(values),
+            "median_net_return_pct": statistics.median(values),
+            "win_rate": len(wins) / len(values),
+            "false_positive_rate": sum(value <= 0 for value in values) / len(values),
+            "false_positive_definition": "net directional return after modeled costs <= 0",
+            "profit_factor": gross_profit / gross_loss if gross_loss else None,
+            "mean_mfe_pct": statistics.mean(float(row["mfe_pct"]) for row in rows),
+            "mean_mae_pct": statistics.mean(float(row["mae_pct"]) for row in rows),
+            "bootstrap_mean_95pct_ci": [
+                bootstrap[int(len(bootstrap) * .025)], bootstrap[int(len(bootstrap) * .975) - 1],
+            ],
+            "temporal_stability": {
+                key: {"samples": len(items), "mean_net_return_pct": statistics.mean(items)}
+                for key, items in by_month.items()
+            },
+            "symbol_concentration": {
+                "largest_symbol_share": max(by_symbol.values()) / len(values),
+                "counts": dict(sorted(by_symbol.items())),
+            },
+            "cost_sensitivity": {
+                f"{multiple:g}x": statistics.mean(
+                    gross - cost * multiple for gross, cost in zip(gross_directional, total_costs)
+                ) for multiple in (.5, 1.0, 2.0)
+            },
+        })
+        return result
+
+    @staticmethod
     def settings(telegram_id: int) -> ScannerSettings:
         with connect() as conn:
             row = conn.execute(
@@ -585,6 +793,61 @@ class ScannerRepository:
         return result[:bounded]
 
     @staticmethod
+    def event(record_id: int, *, telegram_id: int) -> dict[str, Any] | None:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM market_anomaly_events WHERE id=? AND telegram_id=?",
+                (record_id, telegram_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def home_stats(*, telegram_id: int, now: datetime | None = None) -> dict[str, Any]:
+        current = now or datetime.now(timezone.utc)
+        cutoff = (current - timedelta(hours=1)).isoformat()
+        with connect() as conn:
+            active = conn.execute(
+                "SELECT COUNT(*) FROM scanner_episode_state WHERE telegram_id=? AND active=1",
+                (telegram_id,),
+            ).fetchone()
+            new_events = conn.execute(
+                "SELECT COUNT(*) FROM market_anomaly_events WHERE telegram_id=? AND observed_at>=?",
+                (telegram_id, cutoff),
+            ).fetchone()
+            escalations = conn.execute(
+                "SELECT COUNT(*) FROM scanner_episode_state "
+                "WHERE telegram_id=? AND last_escalation_at>=?",
+                (telegram_id, cutoff),
+            ).fetchone()
+            runtime = conn.execute(
+                "SELECT last_success_at,details_json FROM runtime_state WHERE worker_name=?",
+                ("pump-dump-market-alert-monitor",),
+            ).fetchone()
+        details: dict[str, Any] = {}
+        if runtime:
+            try:
+                details = json.loads(runtime[1] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details = {}
+        freshness = None
+        if runtime and runtime[0]:
+            try:
+                seen = datetime.fromisoformat(str(runtime[0]).replace("Z", "+00:00"))
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                freshness = max(0, int((current - seen).total_seconds()))
+            except ValueError:
+                freshness = None
+        return {
+            "monitored_symbols": details.get("universe"),
+            "active_episodes": int(active[0]) if active else 0,
+            "new_anomalies_1h": int(new_events[0]) if new_events else 0,
+            "escalations_1h": int(escalations[0]) if escalations else 0,
+            "collector_freshness_seconds": freshness,
+            "collector_state": str(details.get("status") or ("NOT_STARTED" if not runtime else "UNKNOWN")),
+        }
+
+    @staticmethod
     def historical_context(symbol: str, market_state: str, *, minimum_samples: int = 10) -> dict[str, Any]:
         with connect() as conn:
             rows = [dict(row) for row in conn.execute(
@@ -662,6 +925,11 @@ class ScannerRepository:
                  snapshot.price, snapshot.relative_volume, snapshot.normalized_moves.get(5), 1,
                  json.dumps(snapshot.public_dict(), sort_keys=True), "MARKET_ALERT", 0,
                  snapshot.observed_at.isoformat(), datetime.now(timezone.utc).isoformat()))
+            if result.rowcount > 0:
+                ScannerRepository._schedule_outcomes(
+                    conn, event_id=event_id, symbol=snapshot.symbol, direction=direction,
+                    decision_at=snapshot.observed_at, entry_price=snapshot.price,
+                )
         return result.rowcount > 0
 
     @staticmethod
@@ -748,6 +1016,10 @@ class ScannerRepository:
                  event["phase"], event["market_state"], event["evidence_quality"],
                  json.dumps(event["reasons"]), json.dumps(event["risk_flags"]),
                  now.isoformat(), datetime.now(timezone.utc).isoformat()))
+            self._schedule_outcomes(
+                conn, event_id=event_id, symbol=event["symbol"], direction=event["direction"],
+                decision_at=now, entry_price=snapshot.price,
+            )
         return MarketAlert(
             event_id=event_id, episode_id=episode_id, symbol=event["symbol"],
             venue=event["venue"], direction=event["direction"], severity=event["severity"],

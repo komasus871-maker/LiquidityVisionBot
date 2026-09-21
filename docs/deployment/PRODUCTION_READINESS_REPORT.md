@@ -7,10 +7,10 @@ historical-result change was performed.
 ## 1. Full functionality matrix
 
 `services.functionality_audit.full_functionality_matrix()` is the executable
-authority. It currently returns 253 unique traced records: 229 interactive,
+authority. It currently returns 256 unique traced records: 232 interactive,
 21 continuous-product, one periodic-maintenance, one forward-research, and one
 one-time-migration record. It includes every normalized command/callback, all
-13 reply controls, 12 Terminal pages, 15 scanner views, 14 alert categories,
+13 reply controls, 13 Terminal pages, 17 scanner modes, 14 alert categories,
 and 10 background/maintenance/migration components. Every record has entry
 point, handler, service layer, data source, state owner, persistent dependency,
 tables, output, failure mode, fallback, class, owner, permissions, and economic
@@ -44,16 +44,21 @@ delivery still requires post-deploy smoke testing with the real token.
 
 ## 5. Terminal root cause
 
-The Terminal HTML referenced `window.Telegram.WebApp` without loading Telegram's
-official WebApp JavaScript, so launch context and `initData` were unavailable.
+The generated HTML used a normal Python triple-quoted string containing the
+JavaScript expression `.join("\\n")`. Python converted that escape into a
+literal newline inside a JavaScript string, producing a parse error before the
+Telegram bridge or authentication code could execute. The static
+`Authenticating…` text therefore remained forever even though the page loaded.
 
 ## 6. Terminal fix
 
-The page loads `https://telegram.org/js/telegram-web-app.js`; requires a valid
-HTTPS public URL; validates HMAC-signed, unexpired `initData`; scopes user data;
-and returns HTTP 403 for missing/invalid auth. Twelve pages now read bounded real
-state. Direct-browser/API failure states are explicit and provide a Telegram
-reopen fallback. No secret or order control is client-side.
+The HTML is now a raw Python string, loads the official Telegram bridge with a
+bounded timeout, calls `ready()`/`expand()`, exchanges HMAC-validated unexpired
+`initData` for a short-lived signed bearer session, and bootstraps only after
+authentication succeeds. Auth and page requests have abort timeouts. Every
+failure reaches a safe reason code plus Retry and Close/Back; no raw init data,
+token, hash, or secret is logged. Thirteen pages read bounded authoritative
+state, including a read-only economic dashboard. No order control is client-side.
 
 ## 7. Scanner architecture
 
@@ -74,13 +79,25 @@ quality. All output is descriptive `MARKET_ALERT` with
 
 ## 9. Scanner current functionality
 
+The visible `⚡ Scanner` label and bare `/scanner` are now explicit home-entry
+routes and can no longer be interpreted as internal view names. Scanner Home
+shows the canonical 16 product views, actual current episode/cycle statistics,
+freshness and normalized venue health. Every ranked row is ownership-scoped and
+has an explicit WHY path. The same discovery-mode roster is selectable in the
+Terminal Scanner API/UI.
+
 Persistent PostgreSQL episodes track current/previous phase, market state,
 peak move/severity, data quality, escalation and end state. Alerts fire on new
 episodes, information-changing transitions/escalations/extensions, or cooldown.
 Fifteen discovery modes and fourteen per-user alert categories are supported,
 along with scope, whitelist/blacklist, windows, severity, cooldown, quiet mode,
 and notification enablement. Historical context discloses sample size and never
-emits probability; summary statistics require at least ten episodes.
+emits probability. Each admitted event now schedules immutable, causal 1m, 3m,
+5m, 15m, 30m, 1h and 4h research labels. Later scanner-cycle observations mature
+forward return, MFE/MAE, extrema timing, extension, retracement and explicit
+fee/slippage/funding-adjusted outcomes without mutating the decision snapshot.
+Cohort attribution is sample-gated at 30 and reports descriptive bootstrap,
+temporal, concentration and cost-stress evidence with zero economic authority.
 
 ## 10. Signals and watchlists
 

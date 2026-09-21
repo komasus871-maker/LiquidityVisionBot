@@ -214,6 +214,35 @@ def test_cross_venue_state_requires_fresh_independent_venues():
     assert result["dispersion_bps"] == pytest.approx(10.0)
 
 
+def test_forward_venue_health_has_explicit_warm_connected_healthy_stale_states(
+    tmp_path, monkeypatch,
+):
+    import services.forward_public_collectors as collectors
+    from services.forward_public_collectors import ForwardCollectorSupervisor
+
+    class Connector:
+        venue = Venue.BINANCE
+        connection_count = 0
+        last_error = None
+        capabilities = {"trade": True}
+
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(collectors, "now_ms", lambda: clock["now"])
+    supervisor = ForwardCollectorSupervisor(
+        store=AppendOnlyEventStore(tmp_path / "venue-health.sqlite3"),
+        connectors=[Connector()],
+    )
+    assert supervisor.health()["venues"]["BINANCE"]["state"] == "WARMING"
+    supervisor.connectors["BINANCE"].connection_count = 1
+    assert supervisor.health()["venues"]["BINANCE"]["state"] == "CONNECTED"
+    supervisor.last_event_ms_by_venue["BINANCE"] = clock["now"]
+    assert supervisor.health()["venues"]["BINANCE"]["state"] == "HEALTHY"
+    clock["now"] += 61_000
+    assert supervisor.health()["venues"]["BINANCE"]["state"] == "STALE"
+    supervisor.connectors["BINANCE"].last_error = "synthetic"
+    assert supervisor.health()["venues"]["BINANCE"]["state"] == "DEGRADED"
+
+
 def test_shadow_fill_is_conservative_and_has_zero_authority():
     result = ShadowExecutionEngine.simulate_market(
         _valid_snapshot()["book"], direction="LONG", latency_ms=250,

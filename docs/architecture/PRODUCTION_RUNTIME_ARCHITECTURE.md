@@ -85,7 +85,7 @@ size/SHA-256, merges original ingest order, and removes only the temporary cache
 
 `services.functionality_audit.full_functionality_matrix()` is the executable
 full inventory. It covers every normalized slash command and callback in
-`FUNCTION_REGISTRY`, all 13 reply-keyboard controls, and all 12 Terminal pages.
+`FUNCTION_REGISTRY`, all 13 reply-keyboard controls, and all 13 Terminal pages.
 Each record includes the entry point, concrete handler, imported service layer,
 state owner, background dependency, database tables, expected output, failure
 mode, fallback, runtime class, runtime owner, permission and economic authority.

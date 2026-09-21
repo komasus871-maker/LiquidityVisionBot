@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from services.pump_dump_scanner import (
     DISCOVERY_MODES, SCANNER_ALERT_TYPES, ScannerRepository, Severity, resource_budget,
@@ -14,6 +15,117 @@ from services.pump_dump_scanner import (
 
 router = Router()
 repository = ScannerRepository()
+
+SCANNER_ENTRY_LABELS = frozenset({"⚡ Scanner", "⚡ Pump / Dump"})
+SCANNER_VIEW_LABELS = {
+    "HOT_NOW": "🔥 Hot Now",
+    "EARLY_BUILDUP": "🌱 Early Buildup",
+    "NEW_ANOMALIES": "⚡ New Anomalies",
+    "STRONGEST_FLOW": "📈 Strongest Flow",
+    "OI_BUILDUP": "🏗 OI Buildup",
+    "OI_SHOCK": "💥 OI Shock",
+    "SHORT_SQUEEZES": "🧨 Short Squeezes",
+    "LONG_SQUEEZES": "🩸 Long Squeezes",
+    "LIQUIDATION_CASCADES": "💣 Liquidation Cascades",
+    "LIQUIDITY_VACUUM": "🌊 Liquidity Vacuum",
+    "CVD_DIVERGENCES": "↔ CVD Divergences",
+    "CROSS_VENUE": "🌐 Cross-Venue",
+    "EXHAUSTION_WATCH": "⚠ Exhaustion Watch",
+    "VOLUME_EXPLOSION": "📊 Volume Explosion",
+    "VOLATILITY_COMPRESSION": "🧊 Volatility Compression",
+    "BREAKOUT_IGNITION": "🚀 Breakout Ignition",
+}
+
+
+def _scanner_home_keyboard() -> InlineKeyboardMarkup:
+    entries = list(SCANNER_VIEW_LABELS.items())
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"scanview:{mode}")
+             for mode, label in entries[index:index + 2]]
+            for index in range(0, len(entries), 2)]
+    rows.append([InlineKeyboardButton(text="⚙ Scanner Settings", callback_data="pdsettings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _scanner_view_keyboard(mode: str, rows: list[dict]) -> InlineKeyboardMarkup:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if rows:
+        first = rows[0]
+        symbol = str(first["symbol"])
+        for row in rows[:6]:
+            keyboard.append([InlineKeyboardButton(
+                text=f"Why {str(row['symbol'])}?",
+                callback_data=f"scanwhy:{row['id']}",
+            )])
+        keyboard.append([
+            InlineKeyboardButton(text="🌊 Order Flow", callback_data=f"flow:{symbol}"),
+            InlineKeyboardButton(text="⭐ Watch", callback_data=f"watch:{symbol.removesuffix('USDT')}:1h"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton(text="↻ Refresh", callback_data=f"scanview:{mode}"),
+        ])
+    keyboard.append([InlineKeyboardButton(text="← Scanner Home", callback_data="scanhome")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _scanner_home_text(user_id: int) -> str:
+    from services.forward_runtime_state import ForwardRuntimeStateRepository
+
+    stats = repository.home_stats(telegram_id=user_id)
+    forward = ForwardRuntimeStateRepository().health() or {}
+    venues = forward.get("venues") or {}
+    healthy = sum(1 for value in venues.values() if value.get("state") == "HEALTHY")
+    degraded = max(0, len(venues) - healthy)
+    monitored = stats["monitored_symbols"]
+    freshness = stats["collector_freshness_seconds"]
+    venue_text = f"{healthy} healthy / {degraded} degraded" if venues else "unavailable"
+    return (
+        "⚡ <b>LIQUIDITY VISION SCANNER</b>\n\n"
+        "Real-time anomaly &amp; opportunity intelligence.\n"
+        "<i>MARKET ALERT ≠ TRADE SIGNAL ≠ execution authority</i>\n\n"
+        f"Monitored symbols: <b>{monitored if monitored is not None else '—'}</b>\n"
+        f"Active episodes: <b>{stats['active_episodes']}</b>\n"
+        f"New anomalies 1h: <b>{stats['new_anomalies_1h']}</b>\n"
+        f"Escalations 1h: <b>{stats['escalations_1h']}</b>\n"
+        f"Collector freshness: <b>{f'{freshness}s' if freshness is not None else 'unavailable'}</b>\n"
+        f"Venues: <b>{venue_text}</b>"
+    )
+
+
+def _scanner_view_text(user_id: int, mode: str) -> tuple[str, list[dict]]:
+    rows = repository.recent(12, telegram_id=user_id, mode=mode)
+    severity = {"NORMAL": 0, "STRONG": 1, "EXTREME": 2}
+    rows.sort(key=lambda row: (
+        severity.get(str(row.get("severity")), 0),
+        abs(float(row.get("move_pct") or 0)),
+        str(row.get("observed_at") or ""),
+    ), reverse=True)
+    stats = repository.stats_24h(telegram_id=user_id)
+    lines = [f"{escape(SCANNER_VIEW_LABELS[mode])}",
+             "<i>Ranked descriptive anomalies · never trade authority</i>", ""]
+    if not rows:
+        lines.append("No qualifying anomaly episodes are currently available.")
+    for row in rows:
+        icon = "🟢" if row["direction"] == "PUMP" else "🔴"
+        try:
+            snapshot = json.loads(row.get("snapshot_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            snapshot = {}
+        percentile = (snapshot.get("historical_percentile") or {}).get(str(row["window_minutes"]))
+        freshness = snapshot.get("freshness_seconds")
+        lines.append(
+            f"{icon} <b>{escape(str(row['symbol']))}</b> · "
+            f"<b>{escape(str(row.get('phase') or 'EARLY_ANOMALY').replace('_', ' '))}</b>\n"
+            f"{float(row['move_pct']):+.2f}% / {row['window_minutes']}m · "
+            f"{escape(str(row.get('market_state') or 'UNKNOWN_MIXED').replace('_', ' '))}\n"
+            f"Severity / evidence: {escape(str(row['severity']))} / "
+            f"{escape(str(row.get('evidence_quality') or 'BASIC'))} · "
+            f"Abnormality: {f'{float(percentile):.1f}th pct' if percentile is not None else 'unavailable'} · "
+            f"Freshness: {f'{float(freshness):.0f}s' if freshness is not None else 'unavailable'}"
+        )
+    budget = resource_budget()
+    lines += ["", f"24h episodes: {stats['signals']} · universe cap: {budget['universe_limit']} · "
+                     f"cycle: {budget['scan_interval_seconds']}s"]
+    return "\n\n".join(lines), rows
 
 
 def _settings_text(user_id: int) -> str:
@@ -51,11 +163,19 @@ def _settings_text(user_id: int) -> str:
     )
 
 
+@router.message(Command("scanner"))
 @router.message(Command("pump_scan"))
 @router.message(F.text == "⚡ Pump / Dump")
 @router.message(F.text == "⚡ Scanner")
 async def pump_scan(message: Message) -> None:
+    raw_text = (message.text or "").strip()
     parts = (message.text or "").split(maxsplit=1)
+    if raw_text in SCANNER_ENTRY_LABELS or len(parts) == 1:
+        await message.answer(
+            _scanner_home_text(message.from_user.id), parse_mode="HTML",
+            reply_markup=_scanner_home_keyboard(),
+        )
+        return
     mode = (parts[1] if len(parts) == 2 else "HOT_NOW").upper().replace(" ", "_").replace("-", "_")
     if mode not in DISCOVERY_MODES:
         await message.answer(
@@ -66,28 +186,59 @@ async def pump_scan(message: Message) -> None:
             "<code>exhaustion_watch</code>.", parse_mode="HTML",
         )
         return
-    rows = repository.recent(12, telegram_id=message.from_user.id, mode=mode)
-    stats = repository.stats_24h(telegram_id=message.from_user.id)
-    lines = [f"⚡ <b>{escape(mode.replace('_', ' '))}</b>", "<i>Market anomalies · not trade signals</i>", ""]
-    if not rows:
-        lines.append("No anomaly episodes have been recorded yet.")
-    for row in rows:
-        icon = "🟢" if row["direction"] == "PUMP" else "🔴"
-        lines.append(
-            f"{icon} <b>{escape(str(row['symbol']))}</b> · {float(row['move_pct']):+.2f}% / "
-            f"{row['window_minutes']}m · {escape(str(row.get('phase') or 'EARLY_ANOMALY'))} · "
-            f"{escape(str(row.get('market_state') or 'UNKNOWN_MIXED'))} · "
-            f"{escape(str(row['severity']))}"
-        )
-    budget = resource_budget()
-    lines += ["", f"24h: {stats['pump_events']} pumps · {stats['dump_events']} dumps · "
-                   f"{stats['signals']} total episodes",
-              f"Universe cap: {budget['universe_limit']} liquid USDT perpetuals · "
-                   f"cycle {budget['scan_interval_seconds']}s",
-              "Settings: <code>/scanner_settings</code>"]
-    lines.append("Views: <code>/pump_scan early_buildup</code> · <code>/pump_scan squeezes</code> · "
-                 "<code>/pump_scan exhaustion_watch</code>")
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    text, rows = _scanner_view_text(message.from_user.id, mode)
+    await message.answer(text[:4090], parse_mode="HTML",
+                         reply_markup=_scanner_view_keyboard(mode, rows))
+
+
+@router.callback_query(F.data == "scanhome")
+async def scanner_home_callback(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.edit_text(
+        _scanner_home_text(callback.from_user.id), parse_mode="HTML",
+        reply_markup=_scanner_home_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("scanview:"))
+async def scanner_view_callback(callback: CallbackQuery) -> None:
+    mode = callback.data.split(":", 1)[1]
+    if mode not in SCANNER_VIEW_LABELS:
+        await callback.answer("Unknown scanner view", show_alert=True)
+        return
+    text, rows = _scanner_view_text(callback.from_user.id, mode)
+    await callback.answer()
+    await callback.message.edit_text(
+        text[:4090], parse_mode="HTML", reply_markup=_scanner_view_keyboard(mode, rows),
+    )
+
+
+@router.callback_query(F.data.startswith("scanwhy:"))
+async def scanner_why_callback(callback: CallbackQuery) -> None:
+    try:
+        record_id = int(callback.data.split(":", 1)[1])
+    except (TypeError, ValueError):
+        await callback.answer("Invalid scanner record", show_alert=True)
+        return
+    row = repository.event(record_id, telegram_id=callback.from_user.id)
+    if not row:
+        await callback.answer("Scanner record is no longer available", show_alert=True)
+        return
+    try:
+        reasons = json.loads(row.get("reasons_json") or "[]")
+        risks = json.loads(row.get("risk_flags_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        reasons, risks = [], []
+    lines = [f"🔎 <b>WHY {escape(str(row['symbol']))} IS RANKED</b>", ""]
+    lines.extend(f"✓ {escape(str(reason))}" for reason in reasons)
+    if not reasons:
+        lines.append("Evidence explanation unavailable for this older record.")
+    if risks:
+        lines += ["", "<b>Warnings</b>", *[f"⚠ {escape(str(risk))}" for risk in risks]]
+    lines += ["", f"Evidence: <b>{escape(str(row.get('evidence_quality') or 'BASIC'))}</b>",
+              "Market intelligence only — no execution authority."]
+    await callback.answer()
+    await callback.message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("scanner_settings"))

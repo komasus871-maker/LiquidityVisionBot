@@ -76,6 +76,16 @@ PUMP_SCANNER_CONCURRENCY=5
 Scanner settings and episodes are persisted in PostgreSQL. No scanner event is
 a trade signal or input to production execution.
 
+The Terminal Economics page accepts these non-secret operator cost inputs on
+the web service. Omit an unknown value rather than inventing it; the dashboard
+then reports `PARTIAL_UNCONFIGURED` and withholds the total/net comparison:
+
+- `INFRA_RENDER_COMPUTE_USD_MONTH`
+- `INFRA_RENDER_DISK_USD_MONTH`
+- `INFRA_DATABASE_USD_MONTH`
+- `INFRA_R2_STORAGE_USD_PER_GB_MONTH`
+- `INFRA_R2_OPERATIONS_USD_MONTH`
+
 ## Forward evidence migration boundary
 
 The preserved local ledger ends at exactly
@@ -145,8 +155,10 @@ location, checksum, state and retention metadata—never raw payloads.
 - In Telegram, run `/start`, `/market_now`, `/orderflow BTCUSDT`, `/pump_scan`,
   `/scanner_settings`, `/deep_analyze BTC 1h`, `/terminal`, `/shadow_status`,
   `/terminal_health`, `/analyze BTC 1h`, `/copy`, and `/positions`.
-- Open the Mini App only from Telegram. Its API must reject absent, tampered,
-  or expired Telegram `initData` with HTTP 403.
+- Open the Mini App only from Telegram. The auth exchange must reject absent,
+  tampered, or expired Telegram `initData`; authenticated page APIs then require
+  the short-lived signed bearer session. Verify Retry and Close/Back appear for
+  every bounded failure state and that bootstrap reaches `Terminal loaded`.
 - `/shadow_status` must show a fresh heartbeat and exactly ten frozen Shadow
   candidates without WR, PF, expectancy or PnL.
 - Operational logs must show one master lease and advancing product cycles.

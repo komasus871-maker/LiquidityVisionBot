@@ -19,12 +19,13 @@ REPLY_CONTROLS = {
 
 TERMINAL_PAGES = (
     "overview", "markets", "scanner", "signals", "order-flow", "derivatives",
-    "paper", "portfolio", "risk", "alerts", "shadow", "system",
+    "paper", "portfolio", "risk", "alerts", "shadow", "economics", "system",
 )
 
 CATEGORY_TABLES = {
     "market": ("forward_market_state", "market_intelligence_snapshots", "signals"),
-    "scanner": ("scanner_user_settings", "scanner_episode_state", "market_anomaly_events"),
+    "scanner": ("scanner_user_settings", "scanner_episode_state", "market_anomaly_events",
+                "scanner_outcome_labels"),
     "watchlist": ("user_watchlist", "watch_states", "watch_events"),
     "alerts": ("user_preferences", "intelligence_alert_events", "market_anomaly_events"),
     "trading": ("signals", "signal_events", "trade_memories"),

@@ -1243,6 +1243,35 @@ def create_tables(*, lock_timeout_ms: int | None = None) -> None:
             )
         """)
         conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS scanner_outcome_labels(
+                id {id_col}, event_id TEXT NOT NULL,
+                symbol TEXT NOT NULL, direction TEXT NOT NULL,
+                horizon_minutes INTEGER NOT NULL,
+                decision_at TEXT NOT NULL, due_at TEXT NOT NULL,
+                entry_price NUMERIC(30,12) NOT NULL,
+                last_price NUMERIC(30,12) NOT NULL,
+                max_price NUMERIC(30,12) NOT NULL,
+                min_price NUMERIC(30,12) NOT NULL,
+                max_price_at TEXT NOT NULL, min_price_at TEXT NOT NULL,
+                exit_price NUMERIC(30,12),
+                forward_return_pct NUMERIC(18,8),
+                directional_return_pct NUMERIC(18,8),
+                mfe_pct NUMERIC(18,8), mae_pct NUMERIC(18,8),
+                time_to_mfe_seconds INTEGER, time_to_mae_seconds INTEGER,
+                max_extension_pct NUMERIC(18,8), retracement_pct NUMERIC(18,8),
+                fee_pct NUMERIC(18,8) NOT NULL,
+                slippage_pct NUMERIC(18,8) NOT NULL,
+                funding_pct NUMERIC(18,8) NOT NULL,
+                net_directional_return_pct NUMERIC(18,8),
+                observation_count INTEGER NOT NULL DEFAULT 0,
+                observation_resolution TEXT NOT NULL DEFAULT 'SCANNER_CYCLE_SAMPLE',
+                cost_model_version TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                labeled_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(event_id,horizon_minutes)
+            )
+        """)
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS feature_usage_events(
                 id {id_col}, event_key TEXT NOT NULL UNIQUE, telegram_id BIGINT,
                 capability TEXT NOT NULL, plan_key TEXT NOT NULL, outcome TEXT NOT NULL,
@@ -1270,7 +1299,7 @@ def create_tables(*, lock_timeout_ms: int | None = None) -> None:
                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
             )
         """)
-        schema_version = int(os.getenv("SCHEMA_VERSION", "1"))
+        schema_version = int(os.getenv("SCHEMA_VERSION", "2"))
         conn.execute(
             "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?) ON CONFLICT(version) DO NOTHING",
             (schema_version, f"baseline_v{schema_version}", datetime.now(timezone.utc).isoformat()),
@@ -1627,6 +1656,8 @@ def create_tables(*, lock_timeout_ms: int | None = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_market_anomaly_type_time ON market_anomaly_events(alert_type,observed_at)",
             "CREATE INDEX IF NOT EXISTS idx_market_anomaly_state_time ON market_anomaly_events(market_state,observed_at)",
             "CREATE INDEX IF NOT EXISTS idx_scanner_episode_active ON scanner_episode_state(active,last_seen_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scanner_outcome_pending ON scanner_outcome_labels(symbol,status,due_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scanner_outcome_event ON scanner_outcome_labels(event_id,horizon_minutes)",
             "CREATE INDEX IF NOT EXISTS idx_feature_usage_user_cap_time ON feature_usage_events(telegram_id,capability,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_ai_cost_period ON ai_cost_reconciliations(provider,period_start,period_end)",
             "CREATE INDEX IF NOT EXISTS idx_user_watchlist_owner ON user_watchlist(telegram_id)",

@@ -1,5 +1,24 @@
 # Test Baseline
 
+## Master product + edge + execution sprint (2026-09-21)
+
+The repository plus `.codex-test-deps` remained on `PYTHONPATH` and used a
+syntactically valid local dummy Telegram token. No exchange credential, public
+network collection, candidate-outcome inspection, real order, commit, push, or
+deployment occurred.
+
+- Product/auth/scanner/schema/provider focused verification: **63 passed**.
+- Broad runtime, forward, archive, migration, PAPER, copy, risk, exchange,
+  lifecycle and recovery verification: **225 passed**.
+- Full suite: **673 passed, 6 failed in 103.43 seconds**.
+- Static compilation: passed.
+- `git diff --check`: passed.
+
+The six failures are the exact established `PRE_EXISTING` node IDs listed
+below: four stale version-contract assertions, the intentionally hardened LIVE
+readiness fixture missing balance/risk state, and the older reversal-state
+expectation. This sprint introduced **0 NEW_REGRESSION**.
+
 ## Pre-change baseline
 
 Command environment: bundled Python, repository plus `.codex-test-deps` on `PYTHONPATH`, and a syntactically valid dummy bot token. No exchange credentials or real network calls were used.

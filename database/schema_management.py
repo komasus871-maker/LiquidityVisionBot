@@ -23,6 +23,7 @@ REQUIRED_SCHEMA_TABLES = frozenset({
     "distributed_leases",
     "forward_worker_health",
     "operational_worker_health",
+    "scanner_outcome_labels",
 })
 RETRYABLE_POSTGRES_CODES = frozenset({"40001", "40P01", "55P03", "57014"})
 _LOCAL_MIGRATION_LOCK = threading.Lock()
@@ -47,7 +48,7 @@ class SchemaStatus:
 
 
 def expected_schema_version() -> int:
-    return max(1, int(os.getenv("SCHEMA_VERSION", "1")))
+    return max(1, int(os.getenv("SCHEMA_VERSION", "2")))
 
 
 def _positive_float(name: str, default: float, *, minimum: float = 0.01) -> float:

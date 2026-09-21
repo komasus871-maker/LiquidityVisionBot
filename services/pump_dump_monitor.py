@@ -192,6 +192,12 @@ class PumpDumpMonitor:
             ),
         ) for item in snapshots]
 
+        outcome_updates = {"updated": 0, "finalized": 0}
+        for snapshot in snapshots:
+            advanced = self.repository.advance_outcomes(snapshot)
+            outcome_updates["updated"] += advanced["updated"]
+            outcome_updates["finalized"] += advanced["finalized"]
+
         # Stage 1 is candle/ticker-only. Only symbols that trip an adaptive
         # anomaly gate are promoted into the bounded shared microstructure state.
         shortlisted: set[str] = set()
@@ -265,7 +271,10 @@ class PumpDumpMonitor:
                         logging.warning("Auxiliary alert delivery failed user=%s: %s", telegram_id, exc)
         return {"status": "ok", "universe": len(universe), "snapshots": len(snapshots),
                 "deep_enrichment_symbols": len(shortlisted),
-                "events": admitted, "delivered": delivered, **resource_budget()}
+                "events": admitted, "delivered": delivered,
+                "outcome_labels_updated": outcome_updates["updated"],
+                "outcome_labels_finalized": outcome_updates["finalized"],
+                **resource_budget()}
 
     async def check_once(self) -> dict[str, Any]:
         ttl = max(self.interval_seconds * 2, 180)

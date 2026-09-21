@@ -105,7 +105,7 @@ async def test_terminal_routes_auth_and_all_real_state_pages(monkeypatch, tmp_pa
         headers = {"X-Telegram-Init-Data": _signed_init_data(token, now)}
         for name in (
             "overview", "markets", "scanner", "signals", "order-flow", "derivatives",
-            "paper", "portfolio", "risk", "alerts", "shadow", "system",
+            "paper", "portfolio", "risk", "alerts", "shadow", "economics", "system",
         ):
             response = await client.get(f"/api/terminal/{name}", headers=headers)
             assert response.status == 200, name

@@ -208,7 +208,7 @@ def test_sequential_migration_is_idempotent(monkeypatch, tmp_path: Path) -> None
     second = schema.migrate_schema(database.create_tables)
 
     assert first.ready and second.ready
-    assert first.applied_version == second.applied_version == 1
+    assert first.applied_version == second.applied_version == 2
 
 
 def test_render_and_runtime_sources_have_one_ddl_authority() -> None:

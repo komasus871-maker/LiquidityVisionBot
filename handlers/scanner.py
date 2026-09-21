@@ -1,7 +1,6 @@
 from html import escape
 
 from aiogram import F, Router
-from aiogram.filters import Command
 from aiogram.types import Message
 
 from services.scanner import Scanner
@@ -49,7 +48,6 @@ def _ranked(results: list[dict], limit: int = 8, *, language: str = "en") -> str
     return "\n\n".join(lines)
 
 
-@router.message(Command("scanner"))
 @router.message(F.text == "🔥 Scanner")
 async def scanner_menu(message: Message):
     parts = (message.text or "").split()
