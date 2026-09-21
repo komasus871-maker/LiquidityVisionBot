@@ -16,7 +16,6 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 
 from database.database import database_backend, persistent_database
-from services.runtime_diagnostics import collect_runtime_diagnostics
 from services.forward_runtime_state import ForwardRuntimeStateRepository
 from services.pump_dump_scanner import ScannerRepository, resource_budget
 from services.telegram_webapp import terminal_html, validate_init_data
@@ -77,6 +76,8 @@ class WebhookServer:
         self._update_latencies_ms: deque[float] = deque(maxlen=500)
         self._update_errors = 0
         self._updates_processed = 0
+        self._web_ready = False
+        self._web_health_reason = "WEB_INITIALIZATION_INCOMPLETE"
         self.maintenance_callback = maintenance_callback
         self._maintenance_lock = asyncio.Lock()
         self.maintenance_token = os.getenv("MONITOR_CRON_SECRET", "").strip()
@@ -303,37 +304,40 @@ class WebhookServer:
                 return web.json_response({"status": "error", "detail": str(exc)}, status=500)
 
     async def health_handler(self, _: web.Request) -> web.Response:
-        try:
-            report = await asyncio.to_thread(collect_runtime_diagnostics)
-            info = await self.bot.get_webhook_info()
-            report.update({
-                "mode": "webhook",
-                "webhook_url": info.url,
-                "pending_update_count": info.pending_update_count,
-                "last_error_message": info.last_error_message,
-                "active_update_tasks": len(self._tasks),
-                "telegram_updates_processed": self._updates_processed,
-                "telegram_update_errors": self._update_errors,
-                "telegram_update_latency_ms_avg": (
-                    round(sum(self._update_latencies_ms) / len(self._update_latencies_ms), 2)
-                    if self._update_latencies_ms else None
-                ),
-                "telegram_update_latency_ms_max": (
-                    round(max(self._update_latencies_ms), 2)
-                    if self._update_latencies_ms else None
-                ),
-            })
-            http_status = 503 if report["status"] == "degraded" else 200
-            return web.json_response(report, status=http_status)
-        except Exception as exc:
-            logging.exception("Health diagnostics failed")
-            return web.json_response({
-                "status": "degraded",
-                "service": "Liquidity Vision Intelligence",
-                "database_backend": database_backend(),
-                "persistent_database": persistent_database(),
-                "error": str(exc),
-            }, status=503)
+        """Return the bounded web-process readiness contract used by Render.
+
+        Distributed subsystem diagnostics deliberately remain on the Terminal
+        System surfaces. A worker, archive, provider, or research degradation
+        must not prevent an otherwise serviceable Telegram web process from
+        being promoted during a rolling deploy.
+        """
+        started = time.perf_counter()
+        ready = self._web_ready
+        status = 200 if ready else 503
+        reason = self._web_health_reason
+        now = datetime.now(timezone.utc)
+        payload = {
+            "status": "ok" if ready else "unavailable",
+            "service": "Liquidity Vision Intelligence Telegram web",
+            "mode": "webhook",
+            "ready": ready,
+            "reason": reason,
+            "checks": {
+                "http_event_loop": "operational",
+                "telegram_webhook_handler": "ready" if ready else "not_ready",
+                "web_local_initialization": "complete" if ready else "incomplete",
+            },
+            "uptime_seconds": max(0, int((now - _STARTED_AT).total_seconds())),
+            "timestamp": now.isoformat(),
+        }
+        latency_ms = (time.perf_counter() - started) * 1000
+        logging.info(
+            "Render health check status=%s reason=%s latency_ms=%.2f",
+            status,
+            reason,
+            latency_ms,
+        )
+        return web.json_response(payload, status=status)
 
     async def root_handler(self, _: web.Request) -> web.Response:
         return web.Response(text="Liquidity Vision Intelligence webhook is online.")
@@ -345,41 +349,52 @@ class WebhookServer:
         except ValueError as exc:
             raise RuntimeError("PORT must be an integer") from exc
 
-        app = web.Application(client_max_size=2 * 1024 * 1024)
-        app.router.add_get("/", self.root_handler)
-        app.router.add_get("/health", self.health_handler)
-        app.router.add_get("/healthz", self.health_handler)
-        app.router.add_get("/terminal", self.terminal_handler)
-        app.router.add_get("/api/terminal/{page}", self.terminal_api_handler)
-        app.router.add_post(self.path, self.webhook_handler)
-        app.router.add_post("/internal/monitor", self.maintenance_handler)
-        app.router.add_get("/internal/monitor", self.maintenance_handler)
+        self._web_ready = False
+        self._web_health_reason = "WEB_INITIALIZATION_IN_PROGRESS"
+        try:
+            app = web.Application(client_max_size=2 * 1024 * 1024)
+            app.router.add_get("/", self.root_handler)
+            app.router.add_get("/health", self.health_handler)
+            app.router.add_get("/healthz", self.health_handler)
+            app.router.add_get("/terminal", self.terminal_handler)
+            app.router.add_get("/api/terminal/{page}", self.terminal_api_handler)
+            app.router.add_post(self.path, self.webhook_handler)
+            app.router.add_post("/internal/monitor", self.maintenance_handler)
+            app.router.add_get("/internal/monitor", self.maintenance_handler)
 
-        self.runner = web.AppRunner(app, access_log=None)
-        await self.runner.setup()
-        await web.TCPSite(self.runner, host=host, port=port).start()
-        logging.info("HTTP server listening on http://%s:%s", host, port)
+            self.runner = web.AppRunner(app, access_log=None)
+            await self.runner.setup()
+            await web.TCPSite(self.runner, host=host, port=port).start()
+            logging.info("HTTP server listening on http://%s:%s", host, port)
 
-        await self.bot.set_webhook(
-            url=self.url,
-            secret_token=self.secret,
-            allowed_updates=self.dispatcher.resolve_used_update_types(),
-            drop_pending_updates=False,
-            max_connections=20,
-        )
-        info = await self.bot.get_webhook_info()
-        logging.info(
-            "Webhook active: %s (pending=%s, last_error=%r)",
-            info.url,
-            info.pending_update_count,
-            info.last_error_message,
-        )
-        if info.url != self.url:
-            raise RuntimeError(f"Telegram webhook mismatch: expected {self.url}, got {info.url}")
+            await self.bot.set_webhook(
+                url=self.url,
+                secret_token=self.secret,
+                allowed_updates=self.dispatcher.resolve_used_update_types(),
+                drop_pending_updates=False,
+                max_connections=20,
+            )
+            info = await self.bot.get_webhook_info()
+            logging.info(
+                "Webhook active: %s (pending=%s, last_error=%r)",
+                info.url,
+                info.pending_update_count,
+                info.last_error_message,
+            )
+            if info.url != self.url:
+                raise RuntimeError(f"Telegram webhook mismatch: expected {self.url}, got {info.url}")
+        except Exception:
+            self._web_ready = False
+            self._web_health_reason = "WEB_INITIALIZATION_FAILED"
+            raise
+        self._web_ready = True
+        self._web_health_reason = "WEB_SERVICEABLE"
 
     async def stop(self) -> None:
         # Do not delete the webhook on rolling deploy shutdown. The next
         # Render instance uses the same URL and remains reachable.
+        self._web_ready = False
+        self._web_health_reason = "WEB_SHUTTING_DOWN"
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
