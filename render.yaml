@@ -395,7 +395,6 @@ services:
     runtime: python
     plan: 1c-2g
     numInstances: 1
-    maxShutdownDelaySeconds: 120
     buildCommand: pip install -r requirements.txt
     startCommand: python -m tools.run_forward_microstructure_collector
     autoDeploy: true
