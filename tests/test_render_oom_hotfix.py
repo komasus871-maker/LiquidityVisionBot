@@ -69,7 +69,7 @@ def test_forward_worker_still_owns_collection_without_execution_authority() -> N
 def test_render_blueprint_enforces_light_web_and_dedicated_worker() -> None:
     text = Path("render.yaml").read_text(encoding="utf-8")
     web, worker = text.split("  - type: worker", 1)
-    assert "name: liquidityvisionbot-1" in web
+    assert "name: LiquidityVisionBot-1" in web
     assert "startCommand: python bot.py" in web
     assert "WEB_BACKGROUND_JOBS_ENABLED\n        value: \"false\"" in web
     assert "MICROSTRUCTURE_COLLECTION_ENABLED\n        value: \"false\"" in web
