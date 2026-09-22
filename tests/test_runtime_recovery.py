@@ -15,6 +15,8 @@ from services.forward_public_collectors import (
     BinancePublicConnector, BingXPublicConnector, ForwardCollectorSupervisor,
     OKXPublicConnector, PublicConnector,
 )
+from services.forward_runtime_state import ForwardRuntimeStateRepository
+from services.market_terminal import render_system_status
 from services.pump_dump_monitor import (
     BinanceFuturesBroadFeed, OKXFuturesBroadFeed, ProviderFailoverBroadFeed,
     PumpDumpMonitor,
@@ -297,11 +299,14 @@ class _ScannerFeed:
 class _ScannerProviderFeed:
     def __init__(
         self, name: str, *, blocked: bool = False, degraded: bool = False,
+        instrument_count: int = 5, failing_symbols: set[str] | None = None,
     ) -> None:
         self.provider_name = name
         self.venue = name
         self.blocked = blocked
         self.degraded = degraded
+        self.instrument_count = instrument_count
+        self.failing_symbols = failing_symbols or set()
         self.instrument_calls = 0
         self.candle_calls = 0
         self.candle_symbols: list[str] = []
@@ -318,11 +323,13 @@ class _ScannerProviderFeed:
             "symbol": f"R{index}-USDT", "status": "TRADING",
             "contract_type": "PERPETUAL", "quote_volume": 100_000_000 - index,
             "change_24h_pct": 8 if index == 0 else 0,
-        } for index in range(5)]
+        } for index in range(self.instrument_count)]
 
     async def candles(self, symbol: str):
         self.candle_calls += 1
         self.candle_symbols.append(symbol)
+        if symbol in self.failing_symbols:
+            raise ConnectionResetError(f"{self.provider_name} history reset for {symbol}")
         return await self._candles.candles(symbol)
 
     async def close(self):
@@ -357,6 +364,10 @@ async def test_scanner_binance_451_uses_healthy_okx_universe_and_baseline(
     )
     health = monitor.repository.home_stats(telegram_id=0)
     assert health["scanner_status"] == "DEGRADED"
+    assert health["scanner_status_reason"] == (
+        "Broad Scanner is current and running with partial provider coverage."
+    )
+    assert "No viable" not in health["scanner_status_reason"]
     assert health["provider_operability"] == "RUNNING_PARTIAL"
 
 
@@ -378,6 +389,99 @@ async def test_scanner_okx_progresses_when_binance_blocked_and_bingx_degraded(
     assert result["providers"]["BINANCE"]["state"] == "REGION_BLOCKED"
     assert result["providers"]["BINGX"]["state"] == "DEGRADED"
     assert result["providers"]["OKX"]["state"] == "HEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_partial_okx_history_success_remains_viable_when_ten_symbols_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    binance = _ScannerProviderFeed("BINANCE", blocked=True, instrument_count=40)
+    failures = {f"R{index}USDT" for index in range(30, 40)}
+    okx = _ScannerProviderFeed(
+        "OKX", instrument_count=40, failing_symbols=failures,
+    )
+    monitor = PumpDumpMonitor(feed=ProviderFailoverBroadFeed((binance, okx)))
+    monitor.universe_limit = 40
+
+    result = await monitor.check_once()
+
+    assert result["status"] == "ok" and result["reason"] is None
+    assert result["universe"] == 40
+    assert result["successfully_fetched"] == result["baseline_ready_symbols"] == 30
+    assert result["failed_symbol_count"] == 10
+    assert result["provider_coverage"] == "PARTIAL"
+    assert result["viable_provider_count"] == 1
+    assert result["providers"]["BINANCE"]["state"] == "REGION_BLOCKED"
+    assert result["providers"]["OKX"]["state"] == "DEGRADED"
+    assert result["providers"]["OKX"]["scanner_rest_viable"] is True
+    assert result["providers"]["OKX"]["history_success_count"] == 30
+    assert result["providers"]["OKX"]["history_failure_count"] == 10
+    assert monitor.last_success_at is not None and monitor.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_health_uses_successful_scanner_rest_cycle_not_stream_or_stale_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    binance = _ScannerProviderFeed("BINANCE", blocked=True)
+    okx = _ScannerProviderFeed("OKX")
+    monitor = PumpDumpMonitor(feed=ProviderFailoverBroadFeed((binance, okx)))
+    monitor.universe_limit = 5
+    result = await monitor.check_once()
+    assert result["status"] == "ok"
+
+    # Reproduce the contradictory production checkpoint left by the old
+    # aggregate calculation while retaining proof of a successful cycle.
+    stale_details = {
+        **result,
+        "provider_coverage": "UNAVAILABLE",
+        "viable_provider_count": 0,
+        "current_stage": "provider_region_blocked",
+    }
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE runtime_state SET details_json=?,last_error=NULL WHERE worker_name=?",
+            (json.dumps(stale_details), monitor.worker_name),
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    from services.operational_runtime import OperationalHealthRepository
+    operational = OperationalHealthRepository()
+    operational.heartbeat(
+        instance_id="test", state="RUNNING", started_at=now,
+        child_states={
+            "pump_dump_monitor": {
+                "task_state": "RUNNING", "current_stage": "idle",
+                "scanner": {"current_stage": "provider_region_blocked"},
+            },
+        },
+    )
+    forward = ForwardRuntimeStateRepository()
+    forward.heartbeat(
+        instance_id="forward", state="RUNNING", started_at=now,
+        candidate_identity_hash="test", storage={}, last_event_at=now,
+        venues={
+            "OKX": {"state": "DEGRADED", "reason": "trades stale"},
+            "BINGX": {"state": "HEALTHY", "reason": "all critical channels current"},
+        },
+    )
+
+    health = monitor.repository.home_stats(telegram_id=0)
+
+    assert health["scanner_status"] == "DEGRADED"
+    assert health["provider_coverage"] == "PARTIAL"
+    assert health["provider_operability"] == "RUNNING_PARTIAL"
+    assert health["viable_provider_count"] == 1
+    assert health["scanner_last_success_age_seconds"] < 2
+    assert health["scanner_current_stage"] == "idle"
+    assert health["scanner_providers"]["BINANCE"]["state"] == "REGION_BLOCKED"
+    assert health["scanner_providers"]["OKX"]["capability"] == "SCANNER_REST_HISTORY"
+    assert health["venues"]["OKX"]["state"] == "DEGRADED"
+    assert "Scanner: <b>DEGRADED</b>" in render_system_status(
+        forward.health(), operational.health(), health,
+    )
 
 
 @pytest.mark.asyncio

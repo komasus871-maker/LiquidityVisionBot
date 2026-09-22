@@ -927,6 +927,9 @@ class ScannerRepository:
         monitored = details.get("universe")
         baseline_ready = int(details.get("baseline_ready_symbols") or 0)
         failed_count = int(details.get("failed_symbol_count") or 0)
+        successfully_fetched = int(
+            details.get("successfully_fetched") or details.get("snapshots") or 0
+        )
         estimated_readiness = (
             0 if monitored is not None and baseline_ready >= int(monitored)
             else max(1, math.ceil(interval / 60))
@@ -938,6 +941,17 @@ class ScannerRepository:
         enrichment_status = str(details.get("enrichment_status") or "UNKNOWN").upper()
         provider_coverage = str(details.get("provider_coverage") or "UNKNOWN").upper()
         scanner_providers = details.get("providers") or {}
+        cycle_has_progress = (
+            runtime_status == "OK"
+            and successfully_fetched > 0
+            and baseline_ready > 0
+            and not (runtime["last_error"] if runtime else None)
+        )
+        # A completed cycle with usable histories is authoritative evidence of
+        # scanner capability. Preserve provider-local degradation, but never
+        # project the contradictory aggregate state UNAVAILABLE.
+        if cycle_has_progress and provider_coverage == "UNAVAILABLE":
+            provider_coverage = "PARTIAL"
         if runtime_status == "DISABLED":
             status, reason = "FAILED", "Scanner is disabled in the operational worker."
         elif not runtime:
@@ -958,6 +972,9 @@ class ScannerRepository:
         elif provider_coverage == "PARTIAL":
             status = "DEGRADED"
             reason = "Broad Scanner is current and running with partial provider coverage."
+        elif successfully_fetched > 0 and failed_count > 0:
+            status = "DEGRADED"
+            reason = "Broad Scanner completed with partial symbol coverage."
         elif monitored is not None and baseline_ready < int(monitored):
             status, reason = "WARMING", "Some symbols lack the required 1-minute history backfill."
         elif enrichment_status == "DEGRADED":
@@ -985,7 +1002,7 @@ class ScannerRepository:
             "universe_target": target,
             "universe_candidates": details.get("universe_candidates"),
             "eligible_liquid_symbols": details.get("eligible_liquid_symbols"),
-            "successfully_fetched": details.get("successfully_fetched"),
+            "successfully_fetched": successfully_fetched,
             "failed_symbol_count": failed_count,
             "failed_symbols": details.get("failed_symbols") or {},
             "provider_coverage": provider_coverage,
@@ -995,7 +1012,10 @@ class ScannerRepository:
                 else "RUNNING_FULL" if provider_coverage == "FULL"
                 else "UNKNOWN"
             ),
-            "viable_provider_count": int(details.get("viable_provider_count") or 0),
+            "viable_provider_count": max(
+                1 if cycle_has_progress else 0,
+                int(details.get("viable_provider_count") or 0),
+            ),
             "scanner_providers": scanner_providers,
             "baseline_ready_symbols": baseline_ready,
             "baseline_required_minutes": int(details.get("baseline_required_minutes") or 60),
@@ -1018,9 +1038,12 @@ class ScannerRepository:
             "cycle_started_at": details.get("cycle_started_at") or runtime["last_started_at"] if runtime else None,
             "cycle_completed_at": details.get("cycle_completed_at") or runtime["last_finished_at"] if runtime else None,
             "scanner_task_state": scanner_task.get("task_state") or "UNKNOWN",
+            # The supervisor stage is the live source. The persisted successful
+            # cycle is newer authority than a nested child checkpoint retained
+            # by an earlier heartbeat.
             "scanner_current_stage": (
-                (scanner_task.get("scanner") or {}).get("current_stage")
-                or scanner_task.get("current_stage") or details.get("current_stage") or "UNKNOWN"
+                scanner_task.get("current_stage") or details.get("current_stage")
+                or (scanner_task.get("scanner") or {}).get("current_stage") or "UNKNOWN"
             ),
             "scanner_restart_count": int(scanner_task.get("restart_count") or 0),
             "scanner_last_restart_reason": scanner_task.get("last_restart_reason"),

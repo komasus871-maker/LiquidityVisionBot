@@ -192,11 +192,29 @@ class ProviderFailoverBroadFeed:
     def provider_health(self) -> dict[str, dict[str, Any]]:
         return {name: dict(state) for name, state in self._provider_states.items()}
 
+    @staticmethod
+    def _is_scanner_viable(state: dict[str, Any]) -> bool:
+        history_successes = int(state.get("history_success_count") or 0)
+        history_failures = int(state.get("history_failure_count") or 0)
+        if history_successes:
+            return True
+        if history_failures:
+            return False
+        return bool(state.get("instrument_count")) and state.get("state") == "HEALTHY"
+
+    def viable_provider_count(self) -> int:
+        return sum(self._is_scanner_viable(state) for state in self._provider_states.values())
+
     def coverage(self) -> str:
-        healthy = sum(state.get("state") == "HEALTHY" for state in self._provider_states.values())
-        if healthy == 0:
+        viable = self.viable_provider_count()
+        if viable == 0:
             return "UNAVAILABLE"
-        return "FULL" if healthy == len(self.feeds) else "PARTIAL"
+        fully_healthy = all(
+            state.get("state") == "HEALTHY"
+            and int(state.get("history_failure_count") or 0) == 0
+            for state in self._provider_states.values()
+        )
+        return "FULL" if viable == len(self.feeds) and fully_healthy else "PARTIAL"
 
     async def instruments(self) -> list[dict[str, Any]]:
         results = await asyncio.gather(
@@ -212,17 +230,23 @@ class ProviderFailoverBroadFeed:
             if isinstance(result, ProviderRegionBlockedError):
                 self._provider_states[name] = {
                     "state": "REGION_BLOCKED",
+                    "capability": "SCANNER_REST_HISTORY",
                     "last_error": str(result),
                     "retry_at": getattr(feed, "region_blocked_until_at", None),
                     "instrument_count": 0,
+                    "history_success_count": 0, "history_failure_count": 0,
+                    "scanner_rest_viable": False,
                 }
                 continue
             if isinstance(result, Exception):
                 self._provider_states[name] = {
                     "state": "DEGRADED",
+                    "capability": "SCANNER_REST_HISTORY",
                     "last_error": f"{type(result).__name__}: {str(result)[:180]}",
                     "retry_at": None,
                     "instrument_count": 0,
+                    "history_success_count": 0, "history_failure_count": 0,
+                    "scanner_rest_viable": False,
                 }
                 continue
             normalized_rows: list[dict[str, Any]] = []
@@ -237,9 +261,12 @@ class ProviderFailoverBroadFeed:
             state = "HEALTHY" if normalized_rows else "DEGRADED"
             self._provider_states[name] = {
                 "state": state,
+                "capability": "SCANNER_REST_HISTORY",
                 "last_error": None if normalized_rows else "NO_USABLE_INSTRUMENTS",
                 "retry_at": None,
                 "instrument_count": len(normalized_rows),
+                "history_success_count": 0, "history_failure_count": 0,
+                "scanner_rest_viable": bool(normalized_rows),
             }
         if not chosen:
             raise ScannerProviderCoverageError(self.provider_health())
@@ -252,19 +279,37 @@ class ProviderFailoverBroadFeed:
         for feed, ticker in self._symbol_candidates.get(self._symbol(symbol), []):
             name = self._name(feed)
             try:
-                return str(getattr(feed, "venue", name)).upper(), await feed.candles(symbol), ticker
-            except ProviderRegionBlockedError as exc:
+                candles = await feed.candles(symbol)
+                state = self._provider_states.get(name, {})
+                successes = int(state.get("history_success_count") or 0) + 1
+                failures = int(state.get("history_failure_count") or 0)
                 self._provider_states[name] = {
-                    **self._provider_states.get(name, {}),
+                    **state,
+                    "state": "DEGRADED" if failures else "HEALTHY",
+                    "history_success_count": successes,
+                    "scanner_rest_viable": True,
+                }
+                return str(getattr(feed, "venue", name)).upper(), candles, ticker
+            except ProviderRegionBlockedError as exc:
+                state = self._provider_states.get(name, {})
+                successes = int(state.get("history_success_count") or 0)
+                self._provider_states[name] = {
+                    **state,
                     "state": "REGION_BLOCKED", "last_error": str(exc),
                     "retry_at": getattr(feed, "region_blocked_until_at", None),
+                    "history_failure_count": int(state.get("history_failure_count") or 0) + 1,
+                    "scanner_rest_viable": successes > 0,
                 }
                 errors.append(str(exc))
             except Exception as exc:
+                state = self._provider_states.get(name, {})
+                successes = int(state.get("history_success_count") or 0)
                 self._provider_states[name] = {
-                    **self._provider_states.get(name, {}),
+                    **state,
                     "state": "DEGRADED",
                     "last_error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                    "history_failure_count": int(state.get("history_failure_count") or 0) + 1,
+                    "scanner_rest_viable": successes > 0,
                 }
                 errors.append(f"{name}:{type(exc).__name__}")
         raise RuntimeError(
@@ -645,8 +690,10 @@ class PumpDumpMonitor:
         self._progress("idle")
         return {"status": cycle_status, "reason": cycle_reason,
                 "provider_coverage": provider_coverage,
-                "viable_provider_count": sum(
-                    state.get("state") == "HEALTHY" for state in providers.values()
+                "viable_provider_count": (
+                    self.feed.viable_provider_count()
+                    if callable(getattr(self.feed, "viable_provider_count", None))
+                    else sum(state.get("state") == "HEALTHY" for state in providers.values())
                 ),
                 "providers": providers,
                 "universe": len(universe),
