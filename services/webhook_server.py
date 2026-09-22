@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import os
+import re
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -28,6 +30,7 @@ from services.telegram_webapp import (
 from database.database import connect
 
 _STARTED_AT = datetime.now(timezone.utc)
+_TELEGRAM_WEBHOOK_SECRET = re.compile(r"[A-Za-z0-9_-]{1,256}")
 
 
 def resolve_public_base_url() -> str:
@@ -56,7 +59,14 @@ def resolve_public_base_url() -> str:
 def webhook_secret(bot_token: str) -> str:
     configured = os.getenv("WEBHOOK_SECRET", "").strip()
     if configured:
+        if not _TELEGRAM_WEBHOOK_SECRET.fullmatch(configured):
+            raise RuntimeError(
+                "WEBHOOK_SECRET must contain only A-Z, a-z, 0-9, underscore, or hyphen"
+            )
         return configured
+    seed = os.getenv("WEBHOOK_SECRET_SEED", "").strip()
+    if seed:
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return hashlib.sha256(bot_token.encode("utf-8")).hexdigest()
 
 
@@ -339,7 +349,13 @@ class WebhookServer:
 
     async def webhook_handler(self, request: web.Request) -> web.Response:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if provided != self.secret:
+        if not hmac.compare_digest(provided, self.secret):
+            logging.warning(
+                "WEBHOOK_AUTH_REJECTED header_present=%s header_length=%s expected_length=%s",
+                bool(provided),
+                len(provided),
+                len(self.secret),
+            )
             return web.Response(status=403, text="forbidden")
 
         try:

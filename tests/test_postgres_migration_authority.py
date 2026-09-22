@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -211,6 +212,22 @@ def test_sequential_migration_is_idempotent(monkeypatch, tmp_path: Path) -> None
     assert first.applied_version == second.applied_version == 2
 
 
+def test_worker_default_two_rejects_production_schema_one(monkeypatch, tmp_path: Path) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCHEMA_VERSION", "1")
+    database.create_tables()
+    assert schema.schema_status().ready
+
+    monkeypatch.delenv("SCHEMA_VERSION")
+    mismatched = schema.schema_status()
+    assert mismatched.ready is False
+    assert mismatched.expected_version == 2
+    assert mismatched.reason == "EXPECTED_VERSION_NOT_APPLIED"
+
+    monkeypatch.setenv("SCHEMA_VERSION", "1")
+    assert schema.schema_status().ready
+
+
 def test_render_and_runtime_sources_have_one_ddl_authority() -> None:
     runtime_sources = {
         "web": Path("bot.py").read_text(encoding="utf-8"),
@@ -224,4 +241,15 @@ def test_render_and_runtime_sources_have_one_ddl_authority() -> None:
     blueprint = Path("render.yaml").read_text(encoding="utf-8")
     assert blueprint.count("preDeployCommand: python -m tools.run_product_migrations") == 1
     assert blueprint.count("SCHEMA_STARTUP_MODE") == 3
+    service_sections = re.split(r"(?m)^  - type: ", blueprint)[1:]
+    assert len(service_sections) == 3
+    versions = []
+    for service in service_sections:
+        match = re.search(
+            r'(?m)^      - key: SCHEMA_VERSION\r?\n        value: "([0-9]+)"$',
+            service,
+        )
+        assert match is not None
+        versions.append(match.group(1))
+    assert versions == ["1", "1", "1"]
     assert blueprint.count("healthCheckPath: /health") == 1

@@ -45,12 +45,20 @@ services:
         value: "2"
       - key: BOT_TOKEN
         sync: false
+      # Render preserves this opaque 256-bit seed across ordinary deploys.
+      # The application derives Telegram's restricted-alphabet secret from it.
+      - key: WEBHOOK_SECRET_SEED
+        generateValue: true
       - key: DATABASE_URL
         sync: false
       - key: REQUIRE_PERSISTENT_DB
         value: "true"
       - key: SCHEMA_STARTUP_MODE
         value: wait
+      # The authoritative pre-deploy migration currently records baseline v1.
+      # Pin all three processes to it; the Python fallback is v2.
+      - key: SCHEMA_VERSION
+        value: "1"
       - key: PGSSLMODE
         value: require
       - key: MONITOR_CRON_SECRET
@@ -342,6 +350,8 @@ services:
         value: "true"
       - key: SCHEMA_STARTUP_MODE
         value: wait
+      - key: SCHEMA_VERSION
+        value: "1"
       - key: PGSSLMODE
         value: require
       - key: OPERATIONAL_LEASE_SECONDS
@@ -418,6 +428,8 @@ services:
         value: "true"
       - key: SCHEMA_STARTUP_MODE
         value: wait
+      - key: SCHEMA_VERSION
+        value: "1"
       - key: PGSSLMODE
         value: require
       - key: FORWARD_COLLECTION_ENABLED
