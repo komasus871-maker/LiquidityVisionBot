@@ -594,6 +594,7 @@ class WebhookServer:
                 "telegram_webhook_delivery": (
                     "degraded" if self._registration_state == "AUTH_INVALID"
                     else "ready" if self._registration_state == "REGISTERED"
+                    else "polling" if self._registration_state == "POLLING_MODE"
                     else "not_ready"
                 ),
                 "telegram_webhook_error": self._registration_error,
@@ -613,7 +614,7 @@ class WebhookServer:
     async def root_handler(self, _: web.Request) -> web.Response:
         return web.Response(text="Liquidity Vision Intelligence webhook is online.")
 
-    async def start(self) -> None:
+    async def start(self, *, register_webhook: bool = True) -> None:
         host = os.getenv("HEALTH_HOST", "0.0.0.0")
         try:
             port = int(os.getenv("PORT", os.getenv("HEALTH_PORT", "10000")))
@@ -654,6 +655,13 @@ class WebhookServer:
         # reason to kill and replace this process.
         self._web_ready = True
         self._web_health_reason = "WEB_SERVICEABLE"
+        if not register_webhook:
+            self._registration_state = "POLLING_MODE"
+            logging.info(
+                "WEBHOOK_REGISTRATION_SKIPPED reason=telegram_polling_mode instance=%s pid=%s",
+                self.instance_identity, os.getpid(),
+            )
+            return
         try:
             try:
                 before = await self.bot.get_webhook_info()

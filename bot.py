@@ -38,6 +38,7 @@ from handlers.start import router as start_router
 from handlers.terminal import router as terminal_router
 from handlers.pump_scanner import router as pump_scanner_router
 from services.webhook_server import WebhookServer
+from services.telegram_polling import SingletonTelegramPoller
 from services.ai_operations import AIConfigurationValidator
 from services.ai_intelligence import AIObservationIntelligence
 from services.command_catalog import MAIN_MENU_COMMANDS
@@ -101,6 +102,14 @@ def deployment_mode() -> str:
         or os.getenv("RENDER_EXTERNAL_URL")
     )
     return "webhook" if on_render else "polling"
+
+
+def telegram_delivery_mode() -> str:
+    """Select Telegram transport without changing the Render process profile."""
+    configured = os.getenv("TELEGRAM_DELIVERY_MODE", "webhook").strip().lower()
+    if configured not in {"webhook", "polling"}:
+        raise RuntimeError("TELEGRAM_DELIVERY_MODE must be 'webhook' or 'polling'")
+    return configured
 
 
 def web_background_jobs_enabled(mode: str | None = None) -> bool:
@@ -197,6 +206,7 @@ async def _stop_workers(workers: list[object], tasks: list[asyncio.Task]) -> Non
 async def main() -> None:
     startup_started = time.perf_counter()
     mode = deployment_mode()
+    delivery_mode = telegram_delivery_mode() if mode == "webhook" else mode
     logging.info("Verifying database schema...")
     phase = time.perf_counter()
     initialize_service_database(service_name="web")
@@ -238,19 +248,25 @@ async def main() -> None:
         asyncio.create_task(worker.run_forever(), name=name)
         for name, worker in worker_map.items()
     ]
-    logging.info("Liquidity Vision starting in %s mode", mode)
+    logging.info("Liquidity Vision starting in %s mode delivery=%s", mode, delivery_mode)
 
     webhook_server: WebhookServer | None = None
+    dispatcher_lifecycle_started = False
     try:
-        await dp.emit_startup(bot=bot)
         if mode == "webhook":
+            if delivery_mode == "webhook":
+                # Preserve the established webhook startup ordering.
+                await dp.emit_startup(bot=bot)
+                dispatcher_lifecycle_started = True
             webhook_server = WebhookServer(
                 bot=bot,
                 dispatcher=dp,
                 maintenance_callback=None,
             )
-            await webhook_server.start()
-            logging.info("Liquidity Vision started in webhook mode.")
+            if delivery_mode == "webhook":
+                await webhook_server.start()
+            else:
+                await webhook_server.start(register_webhook=False)
             stop_event = asyncio.Event()
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
@@ -258,10 +274,17 @@ async def main() -> None:
                     loop.add_signal_handler(sig, stop_event.set)
                 except (NotImplementedError, RuntimeError):
                     pass
-            await stop_event.wait()
+            if delivery_mode == "polling":
+                logging.info("Liquidity Vision HTTP service started with Telegram polling delivery.")
+                await SingletonTelegramPoller(bot=bot, dispatcher=dp).run(stop_event)
+            else:
+                logging.info("Liquidity Vision started in webhook delivery mode.")
+                await stop_event.wait()
         else:
             # Local development only. Ensure an old webhook cannot block
             # getUpdates, then use regular long polling.
+            await dp.emit_startup(bot=bot)
+            dispatcher_lifecycle_started = True
             await bot.delete_webhook(drop_pending_updates=False)
             logging.info("Liquidity Vision started in polling mode.")
             await dp.start_polling(
@@ -274,7 +297,8 @@ async def main() -> None:
         await _stop_workers(workers, worker_tasks)
         if webhook_server is not None:
             await webhook_server.stop()
-        await dp.emit_shutdown(bot=bot)
+        if dispatcher_lifecycle_started:
+            await dp.emit_shutdown(bot=bot)
         await bot.session.close()
         logging.info("Liquidity Vision stopped cleanly.")
 

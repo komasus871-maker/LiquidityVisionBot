@@ -27,6 +27,8 @@ services:
         sync: false
       - key: BOT_MODE
         value: webhook
+      - key: TELEGRAM_DELIVERY_MODE
+        value: webhook
       - key: WEB_BACKGROUND_JOBS_ENABLED
         value: "false"
       - key: ENVIRONMENT
