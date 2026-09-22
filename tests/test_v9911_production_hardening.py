@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from database import database as db
 from services.webhook_server import WebhookServer, secret_fingerprint
@@ -80,6 +82,58 @@ async def test_webhook_secret_rejection_logs_only_safe_metadata(caplog):
     assert f"expected_fingerprint={secret_fingerprint(server.secret)}" in caplog.text
     assert supplied_secret not in caplog.text
     assert server.secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_webhook_arrival_is_logged_before_auth_without_secret_leak(caplog):
+    bot = SimpleNamespace(token="123456:abcdefghijklmnopqrstuvwxyzABCDE")
+    server = WebhookServer(bot=bot, dispatcher=SimpleNamespace())
+    supplied_secret = "wrong-secret-must-never-appear-in-arrival-logs"
+    app = web.Application(middlewares=[server.webhook_arrival_middleware])
+    app.router.add_post(server.path, server.webhook_handler)
+
+    async with TestClient(TestServer(app)) as client:
+        with caplog.at_level(logging.INFO):
+            response = await client.post(
+                server.path,
+                headers={
+                    "X-Telegram-Bot-Api-Secret-Token": supplied_secret,
+                    "CF-Ray": "test-ray",
+                },
+                json={},
+            )
+
+    assert response.status == 403
+    assert caplog.text.index("WEBHOOK_REQUEST_ARRIVAL") < caplog.text.index("WEBHOOK_AUTH_REJECTED")
+    assert "header_present=True" in caplog.text
+    assert f"provided_length={len(supplied_secret)}" in caplog.text
+    assert f"provided_fingerprint={secret_fingerprint(supplied_secret)}" in caplog.text
+    assert "cf_ray=test-ray" in caplog.text
+    assert supplied_secret not in caplog.text
+    assert server.secret not in caplog.text
+    assert bot.token not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_correct_webhook_secret_passes_auth_after_arrival_telemetry(caplog):
+    bot = SimpleNamespace(token="123456:abcdefghijklmnopqrstuvwxyzABCDE")
+    server = WebhookServer(bot=bot, dispatcher=SimpleNamespace())
+    app = web.Application(middlewares=[server.webhook_arrival_middleware])
+    app.router.add_post(server.path, server.webhook_handler)
+
+    async with TestClient(TestServer(app)) as client:
+        with caplog.at_level(logging.INFO):
+            response = await client.post(
+                server.path,
+                headers={"X-Telegram-Bot-Api-Secret-Token": server.secret},
+                json={},
+            )
+
+    assert response.status == 400
+    assert "WEBHOOK_REQUEST_ARRIVAL" in caplog.text
+    assert "WEBHOOK_AUTH_REJECTED" not in caplog.text
+    assert server.secret not in caplog.text
+    assert bot.token not in caplog.text
 
 
 def test_webhook_uses_render_managed_secret_when_configured(monkeypatch):
@@ -197,7 +251,7 @@ async def test_webhook_startup_registers_and_accepts_same_derived_secret(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_false_registration_result_is_not_ready(monkeypatch):
+async def test_false_registration_result_is_degraded_but_live(monkeypatch):
     monkeypatch.setenv("PORT", "0")
 
     class Bot:
@@ -215,20 +269,21 @@ async def test_false_registration_result_is_not_ready(monkeypatch):
     server = WebhookServer(
         bot=Bot(), dispatcher=SimpleNamespace(resolve_used_update_types=lambda: ["message"]),
     )
-    with pytest.raises(RuntimeError, match="did not confirm"):
-        await server.start()
+    await server.start()
     try:
         response = await server.health_handler(SimpleNamespace())
         payload = __import__("json").loads(response.text)
-        assert response.status == 503
-        assert payload["reason"] == "WEBHOOK_REGISTRATION_FAILED"
+        assert response.status == 200
+        assert payload["reason"] == "WEB_SERVICEABLE"
         assert payload["checks"]["telegram_webhook_registration"] == "REGISTRATION_REJECTED"
+        assert payload["checks"]["telegram_webhook_delivery"] == "not_ready"
+        assert payload["checks"]["telegram_webhook_error"] == "SET_WEBHOOK_RETURNED_FALSE"
     finally:
         await server.stop()
 
 
 @pytest.mark.asyncio
-async def test_fresh_telegram_403_after_registration_is_not_ready(monkeypatch):
+async def test_fresh_telegram_403_degrades_delivery_without_failing_liveness(monkeypatch):
     monkeypatch.setenv("PORT", "0")
 
     class Bot:
@@ -257,13 +312,15 @@ async def test_fresh_telegram_403_after_registration_is_not_ready(monkeypatch):
     server = WebhookServer(
         bot=Bot(), dispatcher=SimpleNamespace(resolve_used_update_types=lambda: ["message"]),
     )
-    with pytest.raises(RuntimeError, match="rejected.*authentication"):
-        await server.start()
+    await server.start()
     try:
         response = await server.health_handler(SimpleNamespace())
         payload = __import__("json").loads(response.text)
-        assert response.status == 503
-        assert payload["reason"] == "WEBHOOK_AUTH_INVALID"
+        assert response.status == 200
+        assert payload["reason"] == "WEB_SERVICEABLE"
+        assert payload["checks"]["telegram_webhook_registration"] == "AUTH_INVALID"
+        assert payload["checks"]["telegram_webhook_delivery"] == "degraded"
+        assert payload["checks"]["telegram_webhook_error"] == "TELEGRAM_REPORTED_DELIVERY_403"
     finally:
         await server.stop()
 

@@ -43,6 +43,15 @@ def secret_fingerprint(value: str) -> str:
     ).hexdigest()[:12]
 
 
+def _safe_request_log_value(value: str | None, *sensitive_values: str) -> str:
+    """Bound untrusted proxy metadata and redact known authentication material."""
+    sanitized = " ".join(str(value or "").split())[:160]
+    for sensitive in sensitive_values:
+        if sensitive and len(sensitive) >= 8:
+            sanitized = sanitized.replace(sensitive, "[redacted]")
+    return sanitized or "absent"
+
+
 @dataclass(frozen=True)
 class WebhookSecretMaterial:
     value: str
@@ -178,10 +187,11 @@ class WebhookServer:
         self._last_webhook_error_date = max(self._last_webhook_error_date, error_date)
         self._has_webhook_error_baseline = True
         if fresh_auth_failure:
-            self._registration_state = "AUTH_REJECTED_BY_HANDLER"
-            self._registration_error = "TELEGRAM_DELIVERY_AUTH_REJECTED"
-            self._web_ready = False
-            self._web_health_reason = "WEBHOOK_AUTH_INVALID"
+            # getWebhookInfo describes an external delivery attempt; it cannot
+            # prove which upstream component returned the 403. Keep that
+            # diagnostic separate from this process's bounded liveness state.
+            self._registration_state = "AUTH_INVALID"
+            self._registration_error = "TELEGRAM_REPORTED_DELIVERY_403"
         return fresh_auth_failure
 
     async def _monitor_webhook_registration(self) -> None:
@@ -454,6 +464,35 @@ class WebhookServer:
         if exc is not None:
             logging.error("Webhook task failed", exc_info=(type(exc), exc, exc.__traceback__))
 
+    @web.middleware
+    async def webhook_arrival_middleware(
+        self,
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        """Record arrival at this aiohttp process before webhook authentication."""
+        if request.method == "POST" and request.path == self.path:
+            provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            sensitive = (provided, self.secret, str(self.bot.token))
+            logging.info(
+                "WEBHOOK_REQUEST_ARRIVAL instance=%s hostname=%s pid=%s method=%s path=%s "
+                "header_present=%s provided_length=%s provided_fingerprint=%s host=%s "
+                "x_forwarded_for=%s cf_ray=%s user_agent=%s",
+                self.instance_identity,
+                socket.gethostname(),
+                os.getpid(),
+                request.method,
+                request.path,
+                bool(provided),
+                len(provided),
+                secret_fingerprint(provided) if provided else "absent",
+                _safe_request_log_value(request.headers.get("Host"), *sensitive),
+                _safe_request_log_value(request.headers.get("X-Forwarded-For"), *sensitive),
+                _safe_request_log_value(request.headers.get("CF-Ray"), *sensitive),
+                _safe_request_log_value(request.headers.get("User-Agent"), *sensitive),
+            )
+        return await handler(request)
+
     async def webhook_handler(self, request: web.Request) -> web.Response:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not hmac.compare_digest(provided, self.secret):
@@ -470,11 +509,9 @@ class WebhookServer:
             )
             return web.Response(status=403, text="forbidden")
 
-        if self._registration_state == "AUTH_REJECTED_BY_HANDLER":
+        if self._registration_state == "AUTH_INVALID":
             self._registration_state = "REGISTERED"
             self._registration_error = None
-            self._web_ready = True
-            self._web_health_reason = "WEB_SERVICEABLE"
             logging.info(
                 "WEBHOOK_AUTH_RECOVERED handler_fingerprint=%s instance=%s pid=%s",
                 self.secret_material.fingerprint, self.instance_identity, os.getpid(),
@@ -532,12 +569,11 @@ class WebhookServer:
                 return web.json_response({"status": "error", "detail": str(exc)}, status=500)
 
     async def health_handler(self, _: web.Request) -> web.Response:
-        """Return the bounded web-process readiness contract used by Render.
+        """Return the bounded web-process liveness contract used by Render.
 
         Distributed subsystem diagnostics deliberately remain on the Terminal
-        System surfaces. A worker, archive, provider, or research degradation
-        must not prevent an otherwise serviceable Telegram web process from
-        being promoted during a rolling deploy.
+        System surfaces and in this payload's checks. An external Telegram
+        delivery failure must not restart an otherwise serviceable HTTP process.
         """
         started = time.perf_counter()
         ready = self._web_ready
@@ -555,6 +591,12 @@ class WebhookServer:
                 "telegram_webhook_handler": "ready" if ready else "not_ready",
                 "web_local_initialization": "complete" if ready else "incomplete",
                 "telegram_webhook_registration": self._registration_state,
+                "telegram_webhook_delivery": (
+                    "degraded" if self._registration_state == "AUTH_INVALID"
+                    else "ready" if self._registration_state == "REGISTERED"
+                    else "not_ready"
+                ),
+                "telegram_webhook_error": self._registration_error,
             },
             "uptime_seconds": max(0, int((now - _STARTED_AT).total_seconds())),
             "timestamp": now.isoformat(),
@@ -583,7 +625,10 @@ class WebhookServer:
         self._registration_state = "REGISTERING"
         self._registration_error = None
         try:
-            app = web.Application(client_max_size=2 * 1024 * 1024)
+            app = web.Application(
+                client_max_size=2 * 1024 * 1024,
+                middlewares=[self.webhook_arrival_middleware],
+            )
             app.router.add_get("/", self.root_handler)
             app.router.add_get("/health", self.health_handler)
             app.router.add_get("/healthz", self.health_handler)
@@ -598,7 +643,18 @@ class WebhookServer:
             await self.runner.setup()
             await web.TCPSite(self.runner, host=host, port=port).start()
             logging.info("HTTP server listening on http://%s:%s", host, port)
+        except Exception:
+            self._web_ready = False
+            self._web_health_reason = "WEB_INITIALIZATION_FAILED"
+            self._registration_state = "REGISTRATION_NOT_ATTEMPTED"
+            raise
 
+        # Render liveness is local: once the listener and routes exist, a
+        # Telegram control-plane or delivery failure is degraded state, not a
+        # reason to kill and replace this process.
+        self._web_ready = True
+        self._web_health_reason = "WEB_SERVICEABLE"
+        try:
             try:
                 before = await self.bot.get_webhook_info()
                 self._last_webhook_error_date = self._webhook_error_date(before)
@@ -632,27 +688,42 @@ class WebhookServer:
             if registration_result is not True:
                 self._registration_state = "REGISTRATION_REJECTED"
                 self._registration_error = "SET_WEBHOOK_RETURNED_FALSE"
-                self._web_health_reason = "WEBHOOK_REGISTRATION_FAILED"
-                raise RuntimeError("Telegram setWebhook did not confirm registration")
-            info = await self.bot.get_webhook_info()
-            self._log_webhook_info("after_registration", info)
-            if info.url != self.url:
-                self._registration_state = "URL_MISMATCH"
-                self._registration_error = "WEBHOOK_URL_MISMATCH"
-                self._web_health_reason = "WEBHOOK_REGISTRATION_FAILED"
-                raise RuntimeError(f"Telegram webhook mismatch: expected {self.url}, got {info.url}")
-            if self._observe_webhook_info(info):
-                raise RuntimeError("Telegram rejected the newly registered webhook authentication")
-        except Exception:
-            self._web_ready = False
-            if self._web_health_reason == "WEB_INITIALIZATION_IN_PROGRESS":
-                self._web_health_reason = "WEB_INITIALIZATION_FAILED"
-            if self._registration_state == "REGISTERING":
-                self._registration_state = "REGISTRATION_FAILED"
-            raise
-        self._registration_state = "REGISTERED"
-        self._web_ready = True
-        self._web_health_reason = "WEB_SERVICEABLE"
+                logging.error(
+                    "WEBHOOK_REGISTRATION_INVALID reason=set_webhook_returned_false "
+                    "fingerprint=%s instance=%s pid=%s",
+                    self.secret_material.fingerprint, self.instance_identity, os.getpid(),
+                )
+            else:
+                info = await self.bot.get_webhook_info()
+                self._log_webhook_info("after_registration", info)
+                if info.url != self.url:
+                    self._registration_state = "URL_MISMATCH"
+                    self._registration_error = "WEBHOOK_URL_MISMATCH"
+                    logging.error(
+                        "WEBHOOK_REGISTRATION_INVALID reason=webhook_url_mismatch "
+                        "fingerprint=%s instance=%s pid=%s",
+                        self.secret_material.fingerprint, self.instance_identity, os.getpid(),
+                    )
+                elif self._observe_webhook_info(info):
+                    logging.error(
+                        "WEBHOOK_REGISTRATION_INVALID reason=telegram_delivery_auth_invalid "
+                        "fingerprint=%s instance=%s pid=%s",
+                        self.secret_material.fingerprint, self.instance_identity, os.getpid(),
+                    )
+                else:
+                    self._registration_state = "REGISTERED"
+        except Exception as exc:
+            self._registration_state = "REGISTRATION_FAILED"
+            self._registration_error = f"TELEGRAM_REGISTRATION_{type(exc).__name__.upper()}"
+            logging.error(
+                "WEBHOOK_REGISTRATION_INVALID reason=telegram_registration_exception "
+                "error_type=%s fingerprint=%s instance=%s pid=%s",
+                type(exc).__name__, self.secret_material.fingerprint,
+                self.instance_identity, os.getpid(),
+            )
+        if self._registration_state == "REGISTERING":
+            self._registration_state = "REGISTRATION_UNVERIFIED"
+            self._registration_error = "TELEGRAM_REGISTRATION_UNVERIFIED"
         self._registration_monitor_task = asyncio.create_task(
             self._monitor_webhook_registration(), name="webhook-registration-monitor",
         )

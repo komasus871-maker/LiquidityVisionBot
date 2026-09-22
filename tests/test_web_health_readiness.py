@@ -79,6 +79,22 @@ async def test_render_health_is_200_with_r2_degraded(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_render_health_is_200_with_telegram_delivery_auth_degraded() -> None:
+    server = _ready_server()
+    server._registration_state = "AUTH_INVALID"
+    server._registration_error = "TELEGRAM_REPORTED_DELIVERY_403"
+
+    status, payload = await _health(server)
+
+    assert status == 200
+    assert payload["status"] == "ok"
+    assert payload["reason"] == "WEB_SERVICEABLE"
+    assert payload["checks"]["telegram_webhook_registration"] == "AUTH_INVALID"
+    assert payload["checks"]["telegram_webhook_delivery"] == "degraded"
+    assert payload["checks"]["telegram_webhook_error"] == "TELEGRAM_REPORTED_DELIVERY_403"
+
+
+@pytest.mark.asyncio
 async def test_render_health_fails_until_web_initialization_completes(caplog) -> None:
     server = WebhookServer(bot=_Bot(), dispatcher=SimpleNamespace())
 
@@ -94,7 +110,7 @@ async def test_render_health_fails_until_web_initialization_completes(caplog) ->
 
 
 @pytest.mark.asyncio
-async def test_broken_webhook_initialization_keeps_render_health_failed(monkeypatch) -> None:
+async def test_webhook_url_mismatch_is_degraded_but_keeps_local_liveness(monkeypatch) -> None:
     class BrokenBot:
         token = "123456:TEST_WEB_HEALTH_TOKEN"
 
@@ -113,12 +129,14 @@ async def test_broken_webhook_initialization_keeps_render_health_failed(monkeypa
     server = WebhookServer(bot=BrokenBot(), dispatcher=dispatcher)
     monkeypatch.setenv("PORT", "0")
 
-    with pytest.raises(RuntimeError, match="Telegram webhook mismatch"):
-        await server.start()
+    await server.start()
     try:
         status, payload = await _health(server)
-        assert status == 503
-        assert payload["reason"] == "WEBHOOK_REGISTRATION_FAILED"
+        assert status == 200
+        assert payload["reason"] == "WEB_SERVICEABLE"
+        assert payload["checks"]["telegram_webhook_registration"] == "URL_MISMATCH"
+        assert payload["checks"]["telegram_webhook_delivery"] == "not_ready"
+        assert payload["checks"]["telegram_webhook_error"] == "WEBHOOK_URL_MISMATCH"
     finally:
         await server.stop()
 
