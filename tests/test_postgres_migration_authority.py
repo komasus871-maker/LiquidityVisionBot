@@ -6,6 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,6 +120,53 @@ def test_postgres_deadlock_retries_with_fresh_locked_attempt(monkeypatch) -> Non
     assert not advisory_lock.locked()
 
 
+def test_postgres_statement_timeout_is_not_retried(monkeypatch) -> None:
+    class StatementTimeout(RuntimeError):
+        pgcode = "57014"
+
+    monkeypatch.setattr(database, "USE_POSTGRES", False)
+    attempts = 0
+
+    def ddl() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise StatementTimeout("canceling statement due to statement timeout")
+
+    with pytest.raises(StatementTimeout):
+        schema.migrate_schema(ddl, ready_check=_ready)
+
+    assert attempts == 1
+
+
+def test_connect_accepts_bounded_migration_statement_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class RawConnection:
+        autocommit = True
+
+        def close(self) -> None:
+            pass
+
+    def fake_connect(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return RawConnection()
+
+    monkeypatch.setattr(database, "USE_POSTGRES", True)
+    monkeypatch.setattr(database, "DATABASE_URL", "postgresql://example/test")
+    monkeypatch.setattr(
+        database,
+        "psycopg2",
+        SimpleNamespace(connect=fake_connect),
+        raising=False,
+    )
+
+    connection = database.connect(lock_timeout_ms=15_000, statement_timeout_ms=120_000)
+    connection.close()
+
+    assert "statement_timeout=120000ms" in str(captured["options"])
+    assert "lock_timeout=15000ms" in str(captured["options"])
+
+
 def test_service_waits_while_postgres_migration_lock_is_active(monkeypatch) -> None:
     advisory_lock = threading.Lock()
     advisory_lock.acquire()
@@ -228,6 +276,107 @@ def test_worker_default_two_rejects_production_schema_one(monkeypatch, tmp_path:
     assert schema.schema_status().ready
 
 
+def test_ai_schema_valid_backfill_is_batched_conditional_and_one_time(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    database.create_tables()
+    columns = (
+        "decision_id", "idempotency_key", "correlation_id", "signal_id", "symbol",
+        "timeframe", "market_timestamp", "market_snapshot_checksum",
+        "feature_snapshot_checksum", "provider", "prompt_version", "requested_mode",
+        "regime", "direction", "raw_confidence", "uncertainty", "recommended_action",
+        "recommended_risk_multiplier", "abstention", "supporting_factors_json",
+        "conflicting_factors_json", "invalidation_conditions_json", "explanation",
+        "schema_valid", "validation_code", "validation_stage", "provider_invoked",
+        "legacy_classification", "created_at",
+    )
+    cases = (
+        ("COMPLETE", 0, "CURRENT_IDENTITY", 1, 0),
+        ("PROVIDER_TRANSPORT", 1, "CURRENT_IDENTITY", 1, 0),
+        ("COMPLETE", 1, "CURRENT_IDENTITY", 0, 1),
+        ("COMPLETE", 1, "CURRENT_IDENTITY", 1, 1),
+        ("COMPLETE", 1, "LEGACY_UNSCOPED", 0, 0),
+    )
+    with database.connect() as conn:
+        conn.execute(
+            "DELETE FROM product_data_migrations WHERE name=?",
+            (database._AI_SCHEMA_VALID_MIGRATION,),
+        )
+        for index, (stage, invoked, classification, current, _expected) in enumerate(cases, 1):
+            values = (
+                f"decision-{index}", f"key-{index}", f"correlation-{index}", index,
+                "BTCUSDT", "1h", "2026-09-22T00:00:00+00:00", f"market-{index}",
+                f"features-{index}", "test", "prompt-v1", "AI_OBSERVE", "RANGING",
+                "LONG", 50, 50, "ABSTAIN", 0, 1, "[]", "[]", "[]", "test",
+                current, "TEST", stage, invoked, classification,
+                "2026-09-22T00:00:00+00:00",
+            )
+            conn.execute(
+                f"INSERT INTO ai_decisions({','.join(columns)}) "
+                f"VALUES({','.join('?' for _ in columns)})",
+                values,
+            )
+
+    monkeypatch.setenv("MIGRATION_AI_SCHEMA_VALID_BATCH_SIZE", "2")
+    database.create_tables()
+
+    with database.connect() as conn:
+        actual = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT schema_valid FROM ai_decisions ORDER BY id"
+            ).fetchall()
+        ]
+        marker = conn.execute(
+            "SELECT details_json FROM product_data_migrations WHERE name=?",
+            (database._AI_SCHEMA_VALID_MIGRATION,),
+        ).fetchone()
+        second = database._backfill_ai_decision_schema_valid(conn, batch_size=1)
+
+    assert actual == [case[-1] for case in cases]
+    assert marker is not None
+    assert '"batches": 3' in marker[0]
+    assert '"updated": 3' in marker[0]
+    assert second == {"applied": False, "batches": 0, "scanned": 0, "updated": 0}
+
+
+def test_product_migration_uses_separate_bounded_statement_timeout(monkeypatch) -> None:
+    import tools.run_product_migrations as product_migrations
+
+    captured: dict[str, int] = {}
+
+    def create_tables(**kwargs) -> None:
+        captured.update(kwargs)
+
+    class Historical:
+        def run(self, **_kwargs):
+            return SimpleNamespace(as_dict=lambda: {})
+
+    class Memory:
+        def backfill(self, **_kwargs):
+            return {}
+
+    class Retention:
+        def run(self):
+            return {}
+
+    def authoritative(migration):
+        return _ready(), migration()
+
+    monkeypatch.setenv("MIGRATION_DDL_LOCK_TIMEOUT_SECONDS", "17")
+    monkeypatch.setenv("MIGRATION_STATEMENT_TIMEOUT_SECONDS", "123")
+    monkeypatch.setattr(product_migrations, "create_tables", create_tables)
+    monkeypatch.setattr(product_migrations, "HistoricalExecutionMigrationService", Historical)
+    monkeypatch.setattr(product_migrations, "TradeMemoryService", Memory)
+    monkeypatch.setattr(product_migrations, "OperationalRetentionService", Retention)
+    monkeypatch.setattr(product_migrations, "run_authoritative_migration", authoritative)
+
+    product_migrations.run()
+
+    assert captured == {"lock_timeout_ms": 17_000, "statement_timeout_ms": 123_000}
+
+
 def test_render_and_runtime_sources_have_one_ddl_authority() -> None:
     runtime_sources = {
         "web": Path("bot.py").read_text(encoding="utf-8"),
@@ -252,4 +401,12 @@ def test_render_and_runtime_sources_have_one_ddl_authority() -> None:
         assert match is not None
         versions.append(match.group(1))
     assert versions == ["1", "1", "1"]
+    assert re.search(
+        r'(?m)^      - key: MIGRATION_STATEMENT_TIMEOUT_SECONDS\r?\n        value: "120"$',
+        service_sections[0],
+    )
+    assert re.search(
+        r'(?m)^      - key: MIGRATION_AI_SCHEMA_VALID_BATCH_SIZE\r?\n        value: "500"$',
+        service_sections[0],
+    )
     assert blueprint.count("healthCheckPath: /health") == 1

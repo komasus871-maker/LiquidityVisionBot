@@ -25,7 +25,7 @@ REQUIRED_SCHEMA_TABLES = frozenset({
     "operational_worker_health",
     "scanner_outcome_labels",
 })
-RETRYABLE_POSTGRES_CODES = frozenset({"40001", "40P01", "55P03", "57014"})
+RETRYABLE_POSTGRES_CODES = frozenset({"40001", "40P01", "55P03"})
 _LOCAL_MIGRATION_LOCK = threading.Lock()
 T = TypeVar("T")
 

@@ -59,6 +59,10 @@ services:
       # Pin all three processes to it; the Python fallback is v2.
       - key: SCHEMA_VERSION
         value: "1"
+      - key: MIGRATION_STATEMENT_TIMEOUT_SECONDS
+        value: "120"
+      - key: MIGRATION_AI_SCHEMA_VALID_BATCH_SIZE
+        value: "500"
       - key: PGSSLMODE
         value: require
       - key: MONITOR_CRON_SECRET

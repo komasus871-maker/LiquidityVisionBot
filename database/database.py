@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -101,9 +102,20 @@ class DBConnection:
         return False
 
 
-def connect(*, lock_timeout_ms: int | None = None) -> DBConnection:
+def connect(
+    *,
+    lock_timeout_ms: int | None = None,
+    statement_timeout_ms: int | None = None,
+) -> DBConnection:
     if USE_POSTGRES:
-        statement_timeout_ms = max(1, int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "15000")))
+        effective_statement_timeout_ms = max(
+            1,
+            int(
+                statement_timeout_ms
+                if statement_timeout_ms is not None
+                else os.getenv("DB_STATEMENT_TIMEOUT_MS", "15000")
+            ),
+        )
         effective_lock_timeout_ms = max(
             1, int(lock_timeout_ms if lock_timeout_ms is not None else os.getenv("DB_LOCK_TIMEOUT_MS", "10000")),
         )
@@ -111,7 +123,7 @@ def connect(*, lock_timeout_ms: int | None = None) -> DBConnection:
             "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "15")),
             "application_name": "liquidity-vision-bot",
             "options": (
-                f"-c statement_timeout={statement_timeout_ms}ms "
+                f"-c statement_timeout={effective_statement_timeout_ms}ms "
                 f"-c lock_timeout={effective_lock_timeout_ms}ms "
                 "-c idle_in_transaction_session_timeout=15000ms"
             ),
@@ -183,12 +195,110 @@ def _add_column(conn: DBConnection, table: str, name: str, definition: str) -> N
             conn.execute("RELEASE SAVEPOINT add_column_guard")
 
 
+_AI_SCHEMA_VALID_MIGRATION = "ai_decisions_schema_valid_v1"
+_AI_SCHEMA_INVALID_STAGES = frozenset({
+    "PROVIDER_TRANSPORT",
+    "STRUCTURED_EXTRACTION",
+    "JSON_PARSING",
+    "JSON_SCHEMA_VALIDATION",
+    "HTTP_RESPONSE_SHAPE",
+    "PROVIDER_COMPLETION",
+})
+
+
+def _backfill_ai_decision_schema_valid(
+    conn: DBConnection,
+    *,
+    batch_size: int | None = None,
+) -> dict[str, int | bool]:
+    """Apply the historical schema-valid correction once in bounded ID pages.
+
+    The marker and corrected rows commit in the same create_tables transaction,
+    so a failed deployment remains safely retryable without silently skipping
+    partially completed work.
+    """
+    marker = conn.execute(
+        "SELECT 1 FROM product_data_migrations WHERE name=?",
+        (_AI_SCHEMA_VALID_MIGRATION,),
+    ).fetchone()
+    if marker is not None:
+        return {"applied": False, "batches": 0, "scanned": 0, "updated": 0}
+
+    effective_batch_size = max(
+        1,
+        int(
+            batch_size
+            if batch_size is not None
+            else os.getenv("MIGRATION_AI_SCHEMA_VALID_BATCH_SIZE", "500")
+        ),
+    )
+    last_id = 0
+    batches = 0
+    scanned = 0
+    updated = 0
+    while True:
+        rows = conn.execute(
+            """SELECT id,provider_invoked,validation_stage,legacy_classification,schema_valid
+               FROM ai_decisions WHERE id>? ORDER BY id LIMIT ?""",
+            (last_id, effective_batch_size),
+        ).fetchall()
+        if not rows:
+            break
+        batches += 1
+        scanned += len(rows)
+        updates: dict[int, list[int]] = {0: [], 1: []}
+        for row in rows:
+            last_id = max(last_id, int(row["id"]))
+            stage = row["validation_stage"]
+            if stage is None or row["legacy_classification"] != "CURRENT_IDENTITY":
+                continue
+            desired = int(bool(row["provider_invoked"]) and stage not in _AI_SCHEMA_INVALID_STAGES)
+            if int(row["schema_valid"]) != desired:
+                updates[desired].append(int(row["id"]))
+        for desired, row_ids in updates.items():
+            if not row_ids:
+                continue
+            placeholders = ",".join("?" for _ in row_ids)
+            cursor = conn.execute(
+                f"UPDATE ai_decisions SET schema_valid=? "
+                f"WHERE id IN ({placeholders}) AND schema_valid<>?",
+                (desired, *row_ids, desired),
+            )
+            updated += max(0, cursor.rowcount)
+
+    conn.execute(
+        """INSERT INTO product_data_migrations(name,applied_at,details_json)
+           VALUES(?,?,?) ON CONFLICT(name) DO NOTHING""",
+        (
+            _AI_SCHEMA_VALID_MIGRATION,
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {"batches": batches, "scanned": scanned, "updated": updated},
+                sort_keys=True,
+            ),
+        ),
+    )
+    return {
+        "applied": True,
+        "batches": batches,
+        "scanned": scanned,
+        "updated": updated,
+    }
+
+
 def _id_column() -> str:
     return "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 
-def create_tables(*, lock_timeout_ms: int | None = None) -> None:
-    with connect(lock_timeout_ms=lock_timeout_ms) as conn:
+def create_tables(
+    *,
+    lock_timeout_ms: int | None = None,
+    statement_timeout_ms: int | None = None,
+) -> None:
+    with connect(
+        lock_timeout_ms=lock_timeout_ms,
+        statement_timeout_ms=statement_timeout_ms,
+    ) as conn:
         id_col = _id_column()
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS user_exchange_credentials(
@@ -1306,6 +1416,11 @@ def create_tables(*, lock_timeout_ms: int | None = None) -> None:
                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS product_data_migrations(
+                name TEXT PRIMARY KEY, applied_at TEXT NOT NULL, details_json TEXT NOT NULL
+            )
+        """)
         schema_version = int(os.getenv("SCHEMA_VERSION", "2"))
         conn.execute(
             "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?) ON CONFLICT(version) DO NOTHING",
@@ -1544,12 +1659,13 @@ def create_tables(*, lock_timeout_ms: int | None = None) -> None:
             WHERE EXISTS(SELECT 1 FROM ai_decision_outcomes o
                 WHERE o.decision_id=ai_counterfactual_evaluations.decision_id
                   AND o.intervention_type IS NOT NULL)""")
-        conn.execute("""UPDATE ai_decisions SET schema_valid=CASE
-            WHEN provider_invoked=0 OR validation_stage IN
-                ('PROVIDER_TRANSPORT','STRUCTURED_EXTRACTION','JSON_PARSING',
-                'JSON_SCHEMA_VALIDATION','HTTP_RESPONSE_SHAPE','PROVIDER_COMPLETION') THEN 0
-            ELSE 1 END WHERE validation_stage IS NOT NULL
-                AND legacy_classification='CURRENT_IDENTITY'""")
+        report = _backfill_ai_decision_schema_valid(conn)
+        if report["applied"]:
+            logging.info(
+                "AI_SCHEMA_VALID_BACKFILL_COMPLETE scanned=%s updated=%s",
+                report["scanned"],
+                report["updated"],
+            )
         _add_column(conn, "paper_position_lifecycle_events", "commission_delta", "DOUBLE PRECISION NOT NULL DEFAULT 0")
 
         # Reconcile legacy duplicate open plans before enforcing uniqueness.

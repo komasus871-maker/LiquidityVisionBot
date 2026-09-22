@@ -17,7 +17,14 @@ def run() -> dict[str, object]:
             1000,
             int(float(os.getenv("MIGRATION_DDL_LOCK_TIMEOUT_SECONDS", "15")) * 1000),
         )
-        create_tables(lock_timeout_ms=ddl_lock_timeout_ms)
+        statement_timeout_ms = max(
+            1000,
+            int(float(os.getenv("MIGRATION_STATEMENT_TIMEOUT_SECONDS", "120")) * 1000),
+        )
+        create_tables(
+            lock_timeout_ms=ddl_lock_timeout_ms,
+            statement_timeout_ms=statement_timeout_ms,
+        )
         migration = HistoricalExecutionMigrationService().run(
             batch_size=int(os.getenv("HISTORICAL_MIGRATION_BATCH_SIZE", "500")),
         )
