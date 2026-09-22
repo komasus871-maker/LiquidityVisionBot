@@ -98,8 +98,9 @@ async def test_broken_webhook_initialization_keeps_render_health_failed(monkeypa
     class BrokenBot:
         token = "123456:TEST_WEB_HEALTH_TOKEN"
 
-        async def set_webhook(self, **kwargs) -> None:
+        async def set_webhook(self, **kwargs) -> bool:
             self.requested_url = kwargs["url"]
+            return True
 
         async def get_webhook_info(self):
             return SimpleNamespace(
@@ -117,7 +118,7 @@ async def test_broken_webhook_initialization_keeps_render_health_failed(monkeypa
     try:
         status, payload = await _health(server)
         assert status == 503
-        assert payload["reason"] == "WEB_INITIALIZATION_FAILED"
+        assert payload["reason"] == "WEBHOOK_REGISTRATION_FAILED"
     finally:
         await server.stop()
 

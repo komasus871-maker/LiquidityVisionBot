@@ -2,7 +2,9 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Deployment environment variables are authoritative. Local .env files may
+# fill missing values for development, but can never replace Render values.
+load_dotenv(override=False)
 
 _legacy_bot_token = os.getenv("BOT_TOKEN", "").strip()
 _explicit_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
