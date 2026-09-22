@@ -936,6 +936,8 @@ class ScannerRepository:
         reason = "No scanner runtime checkpoint exists yet."
         runtime_status = str(details.get("status") or "UNKNOWN").upper()
         enrichment_status = str(details.get("enrichment_status") or "UNKNOWN").upper()
+        provider_coverage = str(details.get("provider_coverage") or "UNKNOWN").upper()
+        scanner_providers = details.get("providers") or {}
         if runtime_status == "DISABLED":
             status, reason = "FAILED", "Scanner is disabled in the operational worker."
         elif not runtime:
@@ -944,6 +946,8 @@ class ScannerRepository:
             status, reason = "FAILED", "Operational-worker heartbeat is unavailable or stale."
         elif scanner_heartbeat_age is None or scanner_heartbeat_age > interval * 5:
             status, reason = "FAILED", "Scanner loop has not started within five cycles."
+        elif provider_coverage == "UNAVAILABLE":
+            status, reason = "FAILED", "No viable scanner market-data provider is available."
         elif runtime["last_error"] or scanner_success_age is None:
             status = "WARMING" if scanner_success_age is None and not runtime["last_error"] else "DEGRADED"
             reason = str(runtime["last_error"] or "First broad-radar cycle is still warming.")
@@ -951,6 +955,9 @@ class ScannerRepository:
             status, reason = "FAILED", "No successful broad-radar cycle within five intervals."
         elif scanner_success_age >= interval * 2:
             status, reason = "DEGRADED", "Last successful broad-radar cycle is older than two intervals."
+        elif provider_coverage == "PARTIAL":
+            status = "DEGRADED"
+            reason = "Broad Scanner is current and running with partial provider coverage."
         elif monitored is not None and baseline_ready < int(monitored):
             status, reason = "WARMING", "Some symbols lack the required 1-minute history backfill."
         elif enrichment_status == "DEGRADED":
@@ -981,6 +988,15 @@ class ScannerRepository:
             "successfully_fetched": details.get("successfully_fetched"),
             "failed_symbol_count": failed_count,
             "failed_symbols": details.get("failed_symbols") or {},
+            "provider_coverage": provider_coverage,
+            "provider_operability": (
+                "UNAVAILABLE" if provider_coverage == "UNAVAILABLE"
+                else "RUNNING_PARTIAL" if provider_coverage == "PARTIAL"
+                else "RUNNING_FULL" if provider_coverage == "FULL"
+                else "UNKNOWN"
+            ),
+            "viable_provider_count": int(details.get("viable_provider_count") or 0),
+            "scanner_providers": scanner_providers,
             "baseline_ready_symbols": baseline_ready,
             "baseline_required_minutes": int(details.get("baseline_required_minutes") or 60),
             "baseline_source": details.get("baseline_source"),

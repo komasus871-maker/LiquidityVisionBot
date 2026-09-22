@@ -26,10 +26,13 @@ from services.pump_dump_scanner import (
 )
 from services.user_watchlist import UserWatchlist
 from services.runtime_supervision import ProviderRegionBlockedError, bounded_thread_call
+from services.providers.okx import OKXProvider
 
 
 class BinanceFuturesBroadFeed:
     """REST-only public feed; intentionally never opens full-depth streams."""
+    provider_name = "BINANCE"
+    venue = "BINANCE"
     base_url = "https://fapi.binance.com"
 
     def __init__(self) -> None:
@@ -96,12 +99,191 @@ class BinanceFuturesBroadFeed:
         ) for row in rows]
 
 
+class OKXFuturesBroadFeed:
+    """Adapt the established public OKX provider to the scanner feed contract."""
+
+    provider_name = "OKX"
+    venue = "OKX"
+
+    def __init__(self, provider: OKXProvider | None = None) -> None:
+        self.provider = provider or OKXProvider()
+
+    async def close(self) -> None:
+        return None
+
+    async def instruments(self) -> list[dict[str, Any]]:
+        contracts, ticker_payload = await asyncio.gather(
+            self.provider._load_swap_instruments(),
+            self.provider._request("/api/v5/market/tickers", {"instType": "SWAP"}),
+        )
+        tickers = {
+            str(item.get("instId") or "").upper(): item
+            for item in ticker_payload.get("data", [])
+            if isinstance(item, dict)
+        }
+        result: list[dict[str, Any]] = []
+        for inst_id, contract in contracts.items():
+            ticker = tickers.get(inst_id)
+            if not ticker:
+                continue
+            base = OKXProvider._normalize_base(inst_id)
+            last = float(ticker.get("last") or 0)
+            open_24h = float(ticker.get("open24h") or 0)
+            base_volume = float(ticker.get("volCcy24h") or 0)
+            quote_volume = float(ticker.get("volCcyQuote") or 0) or base_volume * last
+            result.append({
+                "symbol": f"{base}USDT",
+                "status": "TRADING" if contract.get("state") in {"live", "preopen"} else "HALTED",
+                "contract_type": "PERPETUAL",
+                "quote_volume": quote_volume,
+                "change_24h_pct": ((last - open_24h) / open_24h * 100) if open_24h else 0.0,
+            })
+        if not result:
+            raise RuntimeError("OKX returned no scanner-eligible USDT swap tickers")
+        return result
+
+    async def candles(self, symbol: str) -> list[Candle]:
+        frame = await self.provider.get_klines(symbol, interval="1m", limit=241)
+        result: list[Candle] = []
+        for row in frame.itertuples(index=False):
+            close = float(row.close)
+            quote_volume = float(getattr(row, "volCcyQuote", 0) or 0)
+            if quote_volume <= 0:
+                quote_volume = float(row.volume) * close
+            opened_at = row.time.to_pydatetime() if hasattr(row.time, "to_pydatetime") else row.time
+            result.append(Candle(
+                opened_at=opened_at,
+                open=float(row.open), high=float(row.high), low=float(row.low), close=close,
+                quote_volume=quote_volume, trade_count=None,
+            ))
+        return result
+
+
+class ScannerProviderCoverageError(RuntimeError):
+    def __init__(self, provider_states: dict[str, dict[str, Any]]) -> None:
+        self.provider_states = provider_states
+        super().__init__("SCANNER_MINIMUM_PROVIDER_COVERAGE_UNAVAILABLE")
+
+
+class ProviderFailoverBroadFeed:
+    """Isolate provider failures and expose one normalized, deduplicated universe."""
+
+    def __init__(self, feeds: tuple[Any, ...] | None = None) -> None:
+        self.feeds = feeds or (BinanceFuturesBroadFeed(), OKXFuturesBroadFeed())
+        self._provider_states: dict[str, dict[str, Any]] = {}
+        self._symbol_candidates: dict[str, list[tuple[Any, dict[str, Any]]]] = {}
+
+    @staticmethod
+    def _name(feed: Any) -> str:
+        return str(
+            getattr(feed, "provider_name", None) or getattr(feed, "venue", None)
+            or type(feed).__name__
+        ).upper()
+
+    @staticmethod
+    def _symbol(value: Any) -> str:
+        symbol = str(value or "").upper().strip().replace("/", "-").replace("_", "-")
+        if symbol.endswith("-USDT-SWAP"):
+            return f"{symbol[:-len('-USDT-SWAP')]}USDT"
+        if symbol.endswith("-USDT"):
+            return f"{symbol[:-len('-USDT')]}USDT"
+        return symbol.replace("-", "")
+
+    def provider_health(self) -> dict[str, dict[str, Any]]:
+        return {name: dict(state) for name, state in self._provider_states.items()}
+
+    def coverage(self) -> str:
+        healthy = sum(state.get("state") == "HEALTHY" for state in self._provider_states.values())
+        if healthy == 0:
+            return "UNAVAILABLE"
+        return "FULL" if healthy == len(self.feeds) else "PARTIAL"
+
+    async def instruments(self) -> list[dict[str, Any]]:
+        results = await asyncio.gather(
+            *(feed.instruments() for feed in self.feeds), return_exceptions=True,
+        )
+        self._provider_states = {}
+        self._symbol_candidates = {}
+        chosen: dict[str, dict[str, Any]] = {}
+        for feed, result in zip(self.feeds, results):
+            name = self._name(feed)
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, ProviderRegionBlockedError):
+                self._provider_states[name] = {
+                    "state": "REGION_BLOCKED",
+                    "last_error": str(result),
+                    "retry_at": getattr(feed, "region_blocked_until_at", None),
+                    "instrument_count": 0,
+                }
+                continue
+            if isinstance(result, Exception):
+                self._provider_states[name] = {
+                    "state": "DEGRADED",
+                    "last_error": f"{type(result).__name__}: {str(result)[:180]}",
+                    "retry_at": None,
+                    "instrument_count": 0,
+                }
+                continue
+            normalized_rows: list[dict[str, Any]] = []
+            for item in result:
+                symbol = self._symbol(item.get("symbol"))
+                if not symbol:
+                    continue
+                normalized = {**item, "symbol": symbol, "provider": name}
+                normalized_rows.append(normalized)
+                self._symbol_candidates.setdefault(symbol, []).append((feed, normalized))
+                chosen.setdefault(symbol, normalized)
+            state = "HEALTHY" if normalized_rows else "DEGRADED"
+            self._provider_states[name] = {
+                "state": state,
+                "last_error": None if normalized_rows else "NO_USABLE_INSTRUMENTS",
+                "retry_at": None,
+                "instrument_count": len(normalized_rows),
+            }
+        if not chosen:
+            raise ScannerProviderCoverageError(self.provider_health())
+        return list(chosen.values())
+
+    async def candles_with_source(
+        self, symbol: str,
+    ) -> tuple[str, list[Candle], dict[str, Any]]:
+        errors: list[str] = []
+        for feed, ticker in self._symbol_candidates.get(self._symbol(symbol), []):
+            name = self._name(feed)
+            try:
+                return str(getattr(feed, "venue", name)).upper(), await feed.candles(symbol), ticker
+            except ProviderRegionBlockedError as exc:
+                self._provider_states[name] = {
+                    **self._provider_states.get(name, {}),
+                    "state": "REGION_BLOCKED", "last_error": str(exc),
+                    "retry_at": getattr(feed, "region_blocked_until_at", None),
+                }
+                errors.append(str(exc))
+            except Exception as exc:
+                self._provider_states[name] = {
+                    **self._provider_states.get(name, {}),
+                    "state": "DEGRADED",
+                    "last_error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                }
+                errors.append(f"{name}:{type(exc).__name__}")
+        raise RuntimeError(
+            f"NO_PROVIDER_CANDLES:{self._symbol(symbol)}:{','.join(errors) or 'NO_CANDIDATE'}"
+        )
+
+    async def close(self) -> None:
+        await asyncio.gather(
+            *(feed.close() for feed in self.feeds if callable(getattr(feed, "close", None))),
+            return_exceptions=True,
+        )
+
+
 class PumpDumpMonitor:
     worker_name = "pump-dump-market-alert-monitor"
 
-    def __init__(self, bot: Bot | None = None, feed: BinanceFuturesBroadFeed | None = None) -> None:
+    def __init__(self, bot: Bot | None = None, feed: Any | None = None) -> None:
         self.bot = bot
-        self.feed = feed or BinanceFuturesBroadFeed()
+        self.feed = feed or ProviderFailoverBroadFeed()
         self.detector = PumpDumpScanner()
         self.repository = ScannerRepository()
         self.forward = ForwardRuntimeStateRepository()
@@ -208,13 +390,14 @@ class PumpDumpMonitor:
         self._progress("discovering_universe")
         try:
             instruments = await self.feed.instruments()
-        except ProviderRegionBlockedError as exc:
+        except ScannerProviderCoverageError as exc:
             self.last_error = str(exc)
-            self._progress("provider_region_blocked")
+            self._progress("provider_coverage_unavailable")
             return {
                 "status": "degraded", "reason": str(exc),
-                "provider": exc.provider, "provider_state": "REGION_BLOCKED",
-                "provider_retry_at": getattr(self.feed, "region_blocked_until_at", None),
+                "provider_coverage": "UNAVAILABLE",
+                "viable_provider_count": 0,
+                "providers": exc.provider_states,
                 "universe": 0, "snapshots": 0, "successfully_fetched": 0,
                 "failed_symbol_count": 0, "baseline_ready_symbols": 0,
                 "shortlisted_symbols": 0, "deep_enrichment_symbols": 0,
@@ -222,6 +405,39 @@ class PumpDumpMonitor:
                 "cycle_started_at": cycle_started.isoformat(),
                 **resource_budget(),
             }
+        except ProviderRegionBlockedError as exc:
+            self.last_error = str(exc)
+            self._progress("provider_coverage_unavailable")
+            provider_state = {
+                exc.provider: {
+                    "state": "REGION_BLOCKED", "last_error": str(exc),
+                    "retry_at": getattr(self.feed, "region_blocked_until_at", None),
+                    "instrument_count": 0,
+                },
+            }
+            return {
+                "status": "degraded", "reason": str(exc),
+                "provider": exc.provider, "provider_state": "REGION_BLOCKED",
+                "provider_retry_at": getattr(self.feed, "region_blocked_until_at", None),
+                "provider_coverage": "UNAVAILABLE", "viable_provider_count": 0,
+                "providers": provider_state,
+                "universe": 0, "snapshots": 0, "successfully_fetched": 0,
+                "failed_symbol_count": 0, "baseline_ready_symbols": 0,
+                "shortlisted_symbols": 0, "deep_enrichment_symbols": 0,
+                "current_stage": self.current_stage,
+                "cycle_started_at": cycle_started.isoformat(),
+                **resource_budget(),
+            }
+        provider_health = getattr(self.feed, "provider_health", None)
+        providers = provider_health() if callable(provider_health) else {
+            str(getattr(self.feed, "provider_name", None) or getattr(self.feed, "venue", None)
+                or type(self.feed).__name__).upper(): {
+                    "state": "HEALTHY", "last_error": None,
+                    "retry_at": None, "instrument_count": len(instruments),
+                },
+        }
+        coverage_method = getattr(self.feed, "coverage", None)
+        provider_coverage = coverage_method() if callable(coverage_method) else "FULL"
         stages["universe_discovered_at"] = datetime.now(timezone.utc).isoformat()
         # The broad radar is an authoritative product data plane, not a
         # notification side effect.  It must run even before any user has
@@ -239,10 +455,15 @@ class PumpDumpMonitor:
         async def one(symbol: str):
             async with semaphore:
                 try:
-                    candles = await self.feed.candles(symbol)
-                    ticker = ticker_by_symbol[symbol]
+                    fetch_with_source = getattr(self.feed, "candles_with_source", None)
+                    if callable(fetch_with_source):
+                        venue, candles, ticker = await fetch_with_source(symbol)
+                    else:
+                        candles = await self.feed.candles(symbol)
+                        ticker = ticker_by_symbol[symbol]
+                        venue = str(getattr(self.feed, "venue", "BINANCE"))
                     return symbol, build_symbol_snapshot(
-                        symbol=symbol, venue="BINANCE", candles=candles,
+                        symbol=symbol, venue=venue, candles=candles,
                         change_24h_pct=float(ticker.get("change_24h_pct") or 0),
                         quote_volume_24h=float(ticker.get("quote_volume") or 0),
                     ), None
@@ -254,6 +475,8 @@ class PumpDumpMonitor:
         fetched = await asyncio.gather(*(one(symbol) for symbol in universe))
         snapshots = [item for _, item, _ in fetched if item is not None]
         failed_symbols = {symbol: error for symbol, item, error in fetched if item is None}
+        providers = provider_health() if callable(provider_health) else providers
+        provider_coverage = coverage_method() if callable(coverage_method) else provider_coverage
         stages["broad_radar_completed_at"] = datetime.now(timezone.utc).isoformat()
         benchmark_5m = {item.symbol: item.changes_pct.get(5) for item in snapshots}
         market_values = [float(value) for value in benchmark_5m.values() if value is not None]
@@ -412,10 +635,21 @@ class PumpDumpMonitor:
             "NOT_REQUIRED" if not shortlisted else
             "HEALTHY" if len(enriched) == len(shortlisted) else "DEGRADED"
         )
-        self.last_success_at = cycle_completed
-        self.last_error = None
+        cycle_status = "ok" if snapshots else "degraded"
+        cycle_reason = None if snapshots else "SCANNER_NO_PROVIDER_BASELINE_AVAILABLE"
+        if snapshots:
+            self.last_success_at = cycle_completed
+            self.last_error = None
+        else:
+            self.last_error = cycle_reason
         self._progress("idle")
-        return {"status": "ok", "universe": len(universe),
+        return {"status": cycle_status, "reason": cycle_reason,
+                "provider_coverage": provider_coverage,
+                "viable_provider_count": sum(
+                    state.get("state") == "HEALTHY" for state in providers.values()
+                ),
+                "providers": providers,
+                "universe": len(universe),
                 "universe_target": self.universe_limit,
                 "universe_candidates": len(instruments),
                 "eligible_liquid_symbols": len(universe),

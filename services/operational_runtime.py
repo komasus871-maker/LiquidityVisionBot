@@ -119,6 +119,7 @@ def child_runtime_states(
                     "cohorts_sample_ready", "pipeline_timestamps", "current_stage",
                     "cycle_started_at", "cycle_completed_at", "enrichment_status",
                     "forward_microstructure_state", "enrichment_requested_symbols",
+                    "provider_coverage", "viable_provider_count", "providers",
                 )
             }
         result[normalized] = child

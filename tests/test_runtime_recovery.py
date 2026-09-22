@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,10 @@ from services.forward_public_collectors import (
     BinancePublicConnector, BingXPublicConnector, ForwardCollectorSupervisor,
     OKXPublicConnector, PublicConnector,
 )
-from services.pump_dump_monitor import BinanceFuturesBroadFeed, PumpDumpMonitor
+from services.pump_dump_monitor import (
+    BinanceFuturesBroadFeed, OKXFuturesBroadFeed, ProviderFailoverBroadFeed,
+    PumpDumpMonitor,
+)
 from services.pump_dump_scanner import Candle
 from services.runtime_supervision import (
     PeriodicHeartbeatThread, ProviderRegionBlockedError, RestartingTaskSupervisor,
@@ -288,6 +292,165 @@ class _ScannerFeed:
 
     async def close(self) -> None:
         return None
+
+
+class _ScannerProviderFeed:
+    def __init__(
+        self, name: str, *, blocked: bool = False, degraded: bool = False,
+    ) -> None:
+        self.provider_name = name
+        self.venue = name
+        self.blocked = blocked
+        self.degraded = degraded
+        self.instrument_calls = 0
+        self.candle_calls = 0
+        self.candle_symbols: list[str] = []
+        self.region_blocked_until_at = "2099-01-01T00:00:00+00:00" if blocked else None
+        self._candles = _ScannerFeed()
+
+    async def instruments(self):
+        self.instrument_calls += 1
+        if self.blocked:
+            raise ProviderRegionBlockedError(self.provider_name, 451)
+        if self.degraded:
+            raise ConnectionResetError(f"{self.provider_name} transient reset")
+        return [{
+            "symbol": f"R{index}-USDT", "status": "TRADING",
+            "contract_type": "PERPETUAL", "quote_volume": 100_000_000 - index,
+            "change_24h_pct": 8 if index == 0 else 0,
+        } for index in range(5)]
+
+    async def candles(self, symbol: str):
+        self.candle_calls += 1
+        self.candle_symbols.append(symbol)
+        return await self._candles.candles(symbol)
+
+    async def close(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_scanner_binance_451_uses_healthy_okx_universe_and_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    binance = _ScannerProviderFeed("BINANCE", blocked=True)
+    okx = _ScannerProviderFeed("OKX")
+    monitor = PumpDumpMonitor(feed=ProviderFailoverBroadFeed((binance, okx)))
+    monitor.universe_limit = 5
+
+    result = await monitor.check_once()
+
+    assert result["status"] == "ok"
+    assert result["provider_coverage"] == "PARTIAL"
+    assert result["providers"]["BINANCE"]["state"] == "REGION_BLOCKED"
+    assert result["providers"]["OKX"]["state"] == "HEALTHY"
+    assert result["universe"] == result["baseline_ready_symbols"] == 5
+    assert result["successfully_fetched"] == 5 and okx.candle_calls == 5
+    assert result["current_stage"] == "idle"
+    assert set(okx.candle_symbols) == {f"R{index}USDT" for index in range(5)}
+
+    from services.operational_runtime import OperationalHealthRepository
+    OperationalHealthRepository().heartbeat(
+        instance_id="test", state="RUNNING",
+        started_at=datetime.now(timezone.utc).isoformat(), child_states={},
+    )
+    health = monitor.repository.home_stats(telegram_id=0)
+    assert health["scanner_status"] == "DEGRADED"
+    assert health["provider_operability"] == "RUNNING_PARTIAL"
+
+
+@pytest.mark.asyncio
+async def test_scanner_okx_progresses_when_binance_blocked_and_bingx_degraded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    binance = _ScannerProviderFeed("BINANCE", blocked=True)
+    okx = _ScannerProviderFeed("OKX")
+    bingx = _ScannerProviderFeed("BINGX", degraded=True)
+    monitor = PumpDumpMonitor(feed=ProviderFailoverBroadFeed((binance, okx, bingx)))
+    monitor.universe_limit = 5
+
+    result = await monitor.check_once()
+
+    assert result["status"] == "ok" and result["successfully_fetched"] == 5
+    assert okx.candle_calls == 5
+    assert result["providers"]["BINANCE"]["state"] == "REGION_BLOCKED"
+    assert result["providers"]["BINGX"]["state"] == "DEGRADED"
+    assert result["providers"]["OKX"]["state"] == "HEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_scanner_reports_unavailable_only_when_all_viable_providers_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    binance = _ScannerProviderFeed("BINANCE", blocked=True)
+    okx = _ScannerProviderFeed("OKX", degraded=True)
+    monitor = PumpDumpMonitor(feed=ProviderFailoverBroadFeed((binance, okx)))
+
+    result = await monitor.check_once()
+
+    assert result["status"] == "degraded"
+    assert result["reason"] == "SCANNER_MINIMUM_PROVIDER_COVERAGE_UNAVAILABLE"
+    assert result["provider_coverage"] == "UNAVAILABLE"
+    assert result["current_stage"] == "provider_coverage_unavailable"
+    assert result["universe"] == result["baseline_ready_symbols"] == 0
+    assert result["providers"]["BINANCE"]["state"] == "REGION_BLOCKED"
+    assert result["providers"]["OKX"]["state"] == "DEGRADED"
+
+    from services.operational_runtime import OperationalHealthRepository
+    OperationalHealthRepository().heartbeat(
+        instance_id="test", state="RUNNING",
+        started_at=datetime.now(timezone.utc).isoformat(), child_states={},
+    )
+    health = monitor.repository.home_stats(telegram_id=0)
+    assert health["scanner_status"] == "FAILED"
+    assert health["provider_operability"] == "UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_okx_scanner_feed_normalizes_universe_and_one_minute_history() -> None:
+    class Provider:
+        async def _load_swap_instruments(self):
+            return {"BTC-USDT-SWAP": {"state": "live"}}
+
+        async def _request(self, path, params):
+            assert path == "/api/v5/market/tickers" and params == {"instType": "SWAP"}
+            return {"data": [{
+                "instId": "BTC-USDT-SWAP", "last": "50000", "open24h": "49000",
+                "volCcy24h": "1000", "volCcyQuote": "50000000",
+            }]}
+
+        async def get_klines(self, symbol, interval, limit):
+            assert (symbol, interval, limit) == ("BTCUSDT", "1m", 241)
+            start = datetime.now(timezone.utc) - timedelta(minutes=240)
+            rows = [SimpleNamespace(
+                time=start + timedelta(minutes=index), open=100 + index,
+                high=101 + index, low=99 + index, close=100.5 + index,
+                volume=10, volCcyQuote=1005 + index,
+            ) for index in range(241)]
+
+            class Frame:
+                def itertuples(self, index=False):
+                    assert index is False
+                    return iter(rows)
+
+            return Frame()
+
+    feed = OKXFuturesBroadFeed(provider=Provider())
+    instruments = await feed.instruments()
+    candles = await feed.candles("BTCUSDT")
+
+    assert len(instruments) == 1
+    assert instruments[0]["symbol"] == "BTCUSDT"
+    assert instruments[0]["status"] == "TRADING"
+    assert instruments[0]["contract_type"] == "PERPETUAL"
+    assert instruments[0]["quote_volume"] == 50_000_000.0
+    assert instruments[0]["change_24h_pct"] == pytest.approx(2.0408163265306123)
+    assert len(candles) == 241
+    assert candles[-1].quote_volume == 1245
+    assert candles[-1].trade_count is None
 
 
 @pytest.mark.asyncio
