@@ -22,7 +22,9 @@ from services.forward_public_collectors import (
     OKXPublicConnector,
 )
 from services.forward_runtime_state import ForwardRuntimeStateRepository, utc_now
-from services.runtime_supervision import PeriodicHeartbeatThread, bounded_thread_call
+from services.runtime_supervision import (
+    PeriodicHeartbeatThread, bounded_thread_call, wait_for_authoritative_lease,
+)
 
 
 CONNECTORS = {
@@ -35,6 +37,38 @@ LEASE_NAME = "forward-microstructure-production-v1"
 
 class LeaseLostError(RuntimeError):
     pass
+
+
+class _SingleFlightThreadCall:
+    """Bound a synchronous archive call without starting an overlapping retry."""
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task[Any] | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def run(
+        self, function: Any, *args: Any, timeout_seconds: float, **kwargs: Any,
+    ) -> Any:
+        if self._task is not None:
+            if not self._task.done():
+                raise asyncio.TimeoutError("previous archive operation is still running")
+            completed = self._task
+            self._task = None
+            completed.result()
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        self._task = task
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(task), timeout=max(0.01, timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            raise
+        else:
+            self._task = None
+            return result
 
 
 def _storage_root() -> Path:
@@ -108,6 +142,63 @@ def _record_startup_gaps(
     return migration_boundary
 
 
+async def _run_archive_maintenance_cycle(
+    archive: ForwardEvidenceArchive, store: AppendOnlyEventStore,
+    storage_runtime: dict[str, Any], *, last_compaction: float,
+    last_remote_audit: float, call_runner: _SingleFlightThreadCall | None = None,
+) -> tuple[float, float, bool]:
+    """Run one bounded archive cycle without allowing storage failure to stop collection."""
+    timeout = max(
+        0.01, float(os.getenv("FORWARD_ARCHIVE_OPERATION_TIMEOUT_SECONDS", "120")),
+    )
+    runner = call_runner or _SingleFlightThreadCall()
+    storage_runtime["task_state"] = "RUNNING"
+    try:
+        store.raw_ledger.seal_completed()
+        await runner.run(archive.process_pending, timeout_seconds=timeout)
+        await runner.run(
+            archive.evict_verified, force_to_cache_limit=True, timeout_seconds=timeout,
+        )
+        if time.monotonic() - last_remote_audit >= int(
+            os.getenv("FORWARD_REMOTE_AUDIT_INTERVAL_SECONDS", "3600")
+        ):
+            await runner.run(archive.audit_remote, limit=20, timeout_seconds=timeout)
+            last_remote_audit = time.monotonic()
+        archive_health = archive.health()
+        now_monotonic = time.monotonic()
+        if (
+            archive_health["pending_partitions"] == 0
+            and archive_health["checksum_failures"] == 0
+            and archive_health["last_successful_upload_at"]
+            and now_monotonic - last_compaction >= int(
+                os.getenv("FORWARD_METADATA_COMPACT_INTERVAL_SECONDS", "3600")
+            )
+        ):
+            retain_ms = int(os.getenv("FORWARD_METADATA_RETENTION_SECONDS", "7200")) * 1_000
+            await runner.run(
+                store.compact_rebuildable_metadata,
+                retain_after_ts_ms=time.time_ns() // 1_000_000 - retain_ms,
+                remote_verified_through_ts_ms=int(
+                    archive_health["newest_evidence_ts_ms"] or 0
+                ),
+                timeout_seconds=timeout,
+            )
+            last_compaction = now_monotonic
+        storage_runtime.update({
+            "task_state": "RUNNING", "last_success_at": utc_now(), "last_error": None,
+            "health": archive_health,
+        })
+        return last_compaction, last_remote_audit, True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        storage_runtime["task_state"] = "DEGRADED"
+        storage_runtime["restart_count"] += 1
+        storage_runtime["last_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+        logging.exception("Forward archive maintenance failed")
+        return last_compaction, last_remote_audit, False
+
+
 async def collect(args: argparse.Namespace) -> dict[str, Any]:
     venues = tuple(dict.fromkeys(value.strip().upper() for value in args.venues.split(",") if value.strip()))
     symbols = tuple(dict.fromkeys(value.strip().upper().replace("-", "") for value in args.symbols.split(",") if value.strip()))
@@ -129,37 +220,54 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
     initialize_service_database(service_name="forward-worker")
     shared = ForwardRuntimeStateRepository()
     identity_hash = shared.register_identity()
-    instance_id = (
-        os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or
-        f"{socket.gethostname()}-{os.getpid()}"
-    )
+    process_identity = os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or "local"
+    instance_id = f"{process_identity}:{socket.gethostname()}:{os.getpid()}"
     lease_seconds = max(60, int(os.getenv("FORWARD_LEASE_SECONDS", "120")))
-    if not acquire_lease(LEASE_NAME, instance_id, lease_seconds):
-        raise RuntimeError("authoritative forward collector lease is already held")
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(signum, shutdown_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    acquired = await wait_for_authoritative_lease(
+        acquire_lease, LEASE_NAME, instance_id, lease_seconds, shutdown=shutdown_event,
+        base_backoff_seconds=float(os.getenv("FORWARD_LEASE_WAIT_BASE_SECONDS", "1")),
+        max_backoff_seconds=float(os.getenv("FORWARD_LEASE_WAIT_MAX_SECONDS", "30")),
+    )
+    if not acquired:
+        return {"status": "stopped_before_lease", "execution_authority": False}
 
     started_at = utc_now()
-    store = AppendOnlyEventStore(
-        Path(args.database), raw_partition_root=Path(args.raw_partitions),
-        minimum_free_bytes=args.minimum_free_bytes,
-        program_identity=f"forward-microstructure-alpha-v1:{identity_hash}",
-        max_segment_seconds=int(os.getenv("FORWARD_PARTITION_SECONDS", "300")),
-    )
-    archive: ForwardEvidenceArchive | None = None
-    if _enabled("FORWARD_OBJECT_STORAGE_ENABLED"):
-        archive = ForwardEvidenceArchive(
-            Path(args.raw_partitions), S3CompatibleObjectStorage.from_environment(),
-            prefix=os.getenv("FORWARD_OBJECT_PREFIX", "forward-evidence/schema-v2"),
-            local_cache_bytes=int(os.getenv("FORWARD_LOCAL_CACHE_BYTES", str(5 * 1024**3))),
+    store: AppendOnlyEventStore | None = None
+    try:
+        store = AppendOnlyEventStore(
+            Path(args.database), raw_partition_root=Path(args.raw_partitions),
             minimum_free_bytes=args.minimum_free_bytes,
-            registry_sink=shared.register_partition,
+            program_identity=f"forward-microstructure-alpha-v1:{identity_hash}",
+            max_segment_seconds=int(os.getenv("FORWARD_PARTITION_SECONDS", "300")),
         )
-    migration_boundary = _record_startup_gaps(
-        store, shared, venues, symbols, time.time_ns() // 1_000_000,
-    )
-    supervisor = ForwardCollectorSupervisor(
-        store=store, connectors=connectors, feature_interval_ms=args.feature_interval_ms,
-        snapshot_sink=shared.publish_snapshot,
-    )
+        archive: ForwardEvidenceArchive | None = None
+        if _enabled("FORWARD_OBJECT_STORAGE_ENABLED"):
+            archive = ForwardEvidenceArchive(
+                Path(args.raw_partitions), S3CompatibleObjectStorage.from_environment(),
+                prefix=os.getenv("FORWARD_OBJECT_PREFIX", "forward-evidence/schema-v2"),
+                local_cache_bytes=int(os.getenv("FORWARD_LOCAL_CACHE_BYTES", str(5 * 1024**3))),
+                minimum_free_bytes=args.minimum_free_bytes,
+                registry_sink=shared.register_partition,
+            )
+        migration_boundary = _record_startup_gaps(
+            store, shared, venues, symbols, time.time_ns() // 1_000_000,
+        )
+        supervisor = ForwardCollectorSupervisor(
+            store=store, connectors=connectors, feature_interval_ms=args.feature_interval_ms,
+            snapshot_sink=shared.publish_snapshot,
+        )
+    except BaseException:
+        if store is not None:
+            store.close()
+        release_lease(LEASE_NAME, instance_id)
+        raise
 
     collector_runtime: dict[str, Any] = {
         "task_state": "STARTING", "restart_count": 0,
@@ -169,57 +277,17 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
         "task_state": "DISABLED" if archive is None else "STARTING",
         "restart_count": 0, "last_error": None, "last_success_at": None,
     }
-    shutdown_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
+    archive_calls = _SingleFlightThreadCall()
 
     async def archive_maintenance() -> None:
         last_compaction = 0.0
         last_remote_audit = 0.0
         interval = max(15, int(os.getenv("FORWARD_ARCHIVE_INTERVAL_SECONDS", "30")))
         while not shutdown_event.is_set() and archive and store.raw_ledger:
-            storage_runtime["task_state"] = "RUNNING"
-            try:
-                store.raw_ledger.seal_completed()
-                await bounded_thread_call(archive.process_pending, timeout_seconds=120)
-                await bounded_thread_call(
-                    archive.evict_verified, force_to_cache_limit=True, timeout_seconds=120,
-                )
-                if time.monotonic() - last_remote_audit >= int(
-                    os.getenv("FORWARD_REMOTE_AUDIT_INTERVAL_SECONDS", "3600")
-                ):
-                    await bounded_thread_call(archive.audit_remote, limit=20, timeout_seconds=120)
-                    last_remote_audit = time.monotonic()
-                archive_health = archive.health()
-                now_monotonic = time.monotonic()
-                if (
-                    archive_health["pending_partitions"] == 0
-                    and archive_health["checksum_failures"] == 0
-                    and archive_health["last_successful_upload_at"]
-                    and now_monotonic - last_compaction >= int(
-                        os.getenv("FORWARD_METADATA_COMPACT_INTERVAL_SECONDS", "3600")
-                    )
-                ):
-                    retain_ms = int(os.getenv("FORWARD_METADATA_RETENTION_SECONDS", "7200")) * 1_000
-                    await bounded_thread_call(
-                        store.compact_rebuildable_metadata,
-                        retain_after_ts_ms=time.time_ns() // 1_000_000 - retain_ms,
-                        remote_verified_through_ts_ms=int(
-                            archive_health["newest_evidence_ts_ms"] or 0
-                        ),
-                        timeout_seconds=120,
-                    )
-                    last_compaction = now_monotonic
-                storage_runtime.update({
-                    "last_success_at": utc_now(), "last_error": None,
-                    "health": archive_health,
-                })
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                storage_runtime["task_state"] = "DEGRADED"
-                storage_runtime["restart_count"] += 1
-                storage_runtime["last_error"] = f"{type(exc).__name__}: {exc}"[:1000]
-                logging.exception("Forward archive maintenance failed")
+            last_compaction, last_remote_audit, _ = await _run_archive_maintenance_cycle(
+                archive, store, storage_runtime, last_compaction=last_compaction,
+                last_remote_audit=last_remote_audit, call_runner=archive_calls,
+            )
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -295,11 +363,6 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
 
     collector_task = asyncio.create_task(collector_loop(), name="forward-collector-supervisor")
     archive_task = asyncio.create_task(archive_maintenance(), name="forward-archive-maintenance")
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(signum, shutdown_event.set)
-        except (NotImplementedError, RuntimeError):
-            pass
     shutdown_task = asyncio.create_task(shutdown_event.wait(), name="forward-shutdown")
     heartbeat_failure_task = asyncio.create_task(
         heartbeat_failed.wait(), name="forward-heartbeat-failed",
@@ -351,12 +414,12 @@ async def collect(args: argparse.Namespace) -> dict[str, Any]:
             return_exceptions=True,
         )
         store.close()
-        if archive:
+        if archive and not archive_calls.busy:
             try:
-                await bounded_thread_call(
+                await archive_calls.run(
                     archive.process_pending, force=True, timeout_seconds=120,
                 )
-                await bounded_thread_call(
+                await archive_calls.run(
                     archive.evict_verified, force_to_cache_limit=True, timeout_seconds=120,
                 )
             except Exception:

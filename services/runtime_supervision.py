@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import threading
 import time
@@ -11,6 +12,53 @@ from typing import Any, Callable
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class ProviderRegionBlockedError(RuntimeError):
+    """A public provider has rejected this deployment region."""
+
+    def __init__(self, provider: str, status: int = 451) -> None:
+        self.provider = provider.upper()
+        self.status = int(status)
+        super().__init__(f"PROVIDER_REGION_BLOCKED:{self.provider}:HTTP_{self.status}")
+
+
+async def wait_for_authoritative_lease(
+    acquire: Callable[[str, str, int], bool], lease_name: str, owner_id: str,
+    ttl_seconds: int, *, shutdown: asyncio.Event,
+    base_backoff_seconds: float = 1.0, max_backoff_seconds: float = 30.0,
+) -> bool:
+    """Wait for a live owner to release a singleton lease; expired rows are reclaimed atomically."""
+    attempts = 0
+    while not shutdown.is_set():
+        acquire_error: str | None = None
+        try:
+            acquired = await bounded_thread_call(
+                acquire, lease_name, owner_id, ttl_seconds,
+                timeout_seconds=min(max(10.0, float(ttl_seconds)), 30.0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            acquired = False
+            acquire_error = type(exc).__name__
+        if acquired:
+            return True
+        attempts += 1
+        ceiling = min(
+            max_backoff_seconds,
+            max(0.05, base_backoff_seconds) * (2 ** min(attempts - 1, 5)),
+        )
+        delay = ceiling * random.uniform(0.8, 1.2)
+        logging.warning(
+            "authoritative_lease_wait lease=%s attempt=%s retry_seconds=%.2f error_type=%s",
+            lease_name, attempts, delay, acquire_error,
+        )
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+    return False
 
 
 class RestartingTaskSupervisor:
@@ -43,7 +91,7 @@ class RestartingTaskSupervisor:
             "current_stage": getattr(worker, "current_stage", self.current_stage),
             "last_progress_at": getattr(worker, "last_progress_at", self.last_progress_at),
             "last_success_at": getattr(worker, "last_success_at", self.last_success_at),
-            "last_error": self.last_error,
+            "last_error": getattr(worker, "last_error", None) or self.last_error,
             "restart_count": self.restart_count,
             "last_restart_reason": self.last_restart_reason,
         }

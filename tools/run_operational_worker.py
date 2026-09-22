@@ -17,6 +17,7 @@ from services.operational_runtime import (
 )
 from services.runtime_supervision import (
     PeriodicHeartbeatThread, RestartingTaskSupervisor, bounded_thread_call,
+    wait_for_authoritative_lease,
 )
 
 
@@ -82,19 +83,9 @@ async def run() -> dict[str, Any]:
     from config import BOT_TOKEN
 
     initialize_service_database(service_name="operational-worker")
-    instance_id = (
-        os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or
-        f"{socket.gethostname()}-{os.getpid()}"
-    )
+    process_identity = os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or "local"
+    instance_id = f"{process_identity}:{socket.gethostname()}:{os.getpid()}"
     lease_seconds = max(60, int(os.getenv("OPERATIONAL_LEASE_SECONDS", "120")))
-    if not acquire_lease(LEASE_NAME, instance_id, lease_seconds):
-        raise RuntimeError("authoritative operational worker lease is already held")
-
-    started_at = utc_now()
-    health = OperationalHealthRepository()
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    factories = build_worker_factories(bot)
-    tasks: dict[str, asyncio.Task[Any]] = {}
     shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -102,7 +93,19 @@ async def run() -> dict[str, Any]:
             loop.add_signal_handler(signum, shutdown.set)
         except (NotImplementedError, RuntimeError):
             pass
+    acquired = await wait_for_authoritative_lease(
+        acquire_lease, LEASE_NAME, instance_id, lease_seconds, shutdown=shutdown,
+        base_backoff_seconds=float(os.getenv("OPERATIONAL_LEASE_WAIT_BASE_SECONDS", "1")),
+        max_backoff_seconds=float(os.getenv("OPERATIONAL_LEASE_WAIT_MAX_SECONDS", "30")),
+    )
+    if not acquired:
+        return {"status": "stopped_before_lease", **capabilities()}
 
+    started_at = utc_now()
+    health = OperationalHealthRepository()
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    factories = build_worker_factories(bot)
+    tasks: dict[str, asyncio.Task[Any]] = {}
     supervisors = {
         name: RestartingTaskSupervisor(
             name, factory, shutdown=shutdown,
@@ -140,6 +143,7 @@ async def run() -> dict[str, Any]:
         states = child_runtime_states(supervisor_states())
         degraded = any(
             value.get("task_state") not in {"RUNNING", "STARTING"}
+            or bool(value.get("last_error"))
             for value in supervisor_states().values()
         )
         publication_error = heartbeat_thread.last_error

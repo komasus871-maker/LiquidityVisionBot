@@ -142,6 +142,40 @@ def test_legacy_exporter_uses_immutable_snapshot_rows_when_available(research_db
     assert legacy["snapshot_safety"] == "NOT_VERIFIED_FUTURE_SAFE"
 
 
+def test_nonfinite_research_values_become_explicit_missing_and_do_not_abort_batch(research_db):
+    from database.database import connect
+    from services.research_engine import ResearchEngine
+
+    _insert_signal(1821, features={
+        "market_regime": "trend", "atr_pct": float("nan"),
+        "nested": {"positive_infinity": float("inf")},
+        "items": [1, float("-inf")],
+    })
+    _insert_signal(1822, status="STOP", realized_r=-1)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE signals SET entry=?,rr=? WHERE id=?",
+            (float("inf"), float("-inf"), 1821),
+        )
+
+    result = ResearchEngine().run_cycle(10)
+    assert result["captured"] == 2
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT signal_id,snapshot_json,source_checksum FROM research_signal_snapshots "
+            "WHERE signal_id IN (?,?) ORDER BY signal_id", (1821, 1822),
+        ).fetchall()
+    assert len(rows) == 2
+    snapshot = json.loads(rows[0]["snapshot_json"])
+    assert snapshot["features"]["atr_pct"] is None
+    assert snapshot["features"]["nested"]["positive_infinity"] is None
+    assert snapshot["features"]["items"] == [1, None]
+    assert snapshot["entry"] is None and snapshot["rr"] is None
+    assert "NaN" not in rows[0]["snapshot_json"] and "Infinity" not in rows[0]["snapshot_json"]
+    replay = ResearchEngine().capture_signal(1821)
+    assert replay["source_checksum"] == rows[0]["source_checksum"]
+
+
 @pytest.mark.asyncio
 async def test_research_worker_is_lease_protected_and_bounded(research_db, monkeypatch):
     from services.research_worker import ResearchWorker

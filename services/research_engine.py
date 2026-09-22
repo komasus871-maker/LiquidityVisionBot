@@ -48,6 +48,36 @@ def _checksum(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
 
 
+def _sanitize_nonfinite(value: Any) -> tuple[Any, int]:
+    """Replace non-finite JSON numbers with explicit missing values."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None, 1
+    if isinstance(value, dict):
+        result: dict[Any, Any] = {}
+        count = 0
+        for key, item in value.items():
+            result[key], found = _sanitize_nonfinite(item)
+            count += found
+        return result, count
+    if isinstance(value, (list, tuple)):
+        result = []
+        count = 0
+        for item in value:
+            cleaned, found = _sanitize_nonfinite(item)
+            result.append(cleaned)
+            count += found
+        return result, count
+    return value, 0
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _loads(value: Any, default: Any) -> Any:
     if isinstance(value, (dict, list)):
         return value
@@ -151,7 +181,9 @@ class ResearchEngine:
         return "OFF_HOURS"
 
     @staticmethod
-    def _confidence_bucket(confidence: float) -> str:
+    def _confidence_bucket(confidence: float | None) -> str:
+        if confidence is None:
+            return "UNKNOWN"
         floor = int(max(0, min(99, confidence)) // 10 * 10)
         return f"{floor:02d}-{floor + 9:02d}"
 
@@ -164,6 +196,7 @@ class ResearchEngine:
         features = _loads(signal.get("trade_dna_json") or signal.get("features_json"), {})
         if not isinstance(features, dict):
             features = {}
+        features, nonfinite_features = _sanitize_nonfinite(features)
         decision_at = str(signal.get("created_at") or signal.get("activated_at") or datetime.now(timezone.utc).isoformat())
         regimes = self.classify_regimes(features, str(signal.get("side") or ""))
         capture_quality = ("LATE_TERMINAL_BACKFILL" if str(signal.get("status") or "").upper() in TERMINAL
@@ -175,15 +208,25 @@ class ResearchEngine:
             "side": str(signal.get("side") or "").upper(),
             "setup_family": str(signal.get("setup_key") or "UNKNOWN"),
             "decision_at": decision_at, "session": self._session(decision_at),
-            "confidence": _number(signal.get("dynamic_confidence") if signal.get("dynamic_confidence") is not None
-                                   else signal.get("confidence")),
-            "bull_score": _number(signal.get("bull_score")), "bear_score": _number(signal.get("bear_score")),
+            "confidence": _optional_number(
+                signal.get("dynamic_confidence") if signal.get("dynamic_confidence") is not None
+                else signal.get("confidence")
+            ),
+            "bull_score": _optional_number(signal.get("bull_score")),
+            "bear_score": _optional_number(signal.get("bear_score")),
             "recommendation": signal.get("recommendation"),
             "entry": signal.get("entry"), "stop": signal.get("stop"),
             "take_profits": [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")],
             "rr": signal.get("rr"), "regimes": list(regimes), "primary_regime": self._primary(regimes),
             "features": features, "feature_version": FEATURE_VERSION,
         }
+        snapshot, nonfinite_snapshot = _sanitize_nonfinite(snapshot)
+        nonfinite_count = nonfinite_features + nonfinite_snapshot
+        if nonfinite_count:
+            logging.warning(
+                "research_nonfinite_values_sanitized signal_id=%s count=%s",
+                signal_id, nonfinite_count,
+            )
         source_checksum = _checksum(snapshot)
         snapshot_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"research:{signal_id}:{source_checksum}"))
         now = datetime.now(timezone.utc).isoformat()

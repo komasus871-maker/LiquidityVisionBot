@@ -25,7 +25,7 @@ from services.pump_dump_scanner import (
     classify_additional_alerts,
 )
 from services.user_watchlist import UserWatchlist
-from services.runtime_supervision import bounded_thread_call
+from services.runtime_supervision import ProviderRegionBlockedError, bounded_thread_call
 
 
 class BinanceFuturesBroadFeed:
@@ -36,6 +36,15 @@ class BinanceFuturesBroadFeed:
         self._contracts: dict[str, str] = {}
         self._contracts_loaded_at = 0.0
         self._session: aiohttp.ClientSession | None = None
+        self._region_blocked_until = 0.0
+        self._region_blocked_until_at: str | None = None
+        self.region_block_backoff_seconds = max(
+            300.0, float(os.getenv("PROVIDER_REGION_BLOCK_BACKOFF_SECONDS", "3600")),
+        )
+
+    @property
+    def region_blocked_until_at(self) -> str | None:
+        return self._region_blocked_until_at
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
@@ -43,11 +52,20 @@ class BinanceFuturesBroadFeed:
         self._session = None
 
     async def _json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        loop = asyncio.get_running_loop()
+        if loop.time() < self._region_blocked_until:
+            raise ProviderRegionBlockedError("BINANCE")
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=12)
             connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
             self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         async with self._session.get(f"{self.base_url}{path}", params=params) as response:
+            if response.status == 451:
+                self._region_blocked_until = loop.time() + self.region_block_backoff_seconds
+                self._region_blocked_until_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=self.region_block_backoff_seconds)
+                ).isoformat()
+                raise ProviderRegionBlockedError("BINANCE", response.status)
             response.raise_for_status()
             return await response.json()
 
@@ -101,6 +119,7 @@ class PumpDumpMonitor:
         self.last_progress_monotonic = time.monotonic()
         self.last_progress_at = datetime.now(timezone.utc).isoformat()
         self.last_success_at: str | None = None
+        self.last_error: str | None = None
 
     def _progress(self, stage: str) -> None:
         self.current_stage = stage
@@ -187,7 +206,22 @@ class PumpDumpMonitor:
         if not self.enabled:
             return {"status": "disabled", **resource_budget()}
         self._progress("discovering_universe")
-        instruments = await self.feed.instruments()
+        try:
+            instruments = await self.feed.instruments()
+        except ProviderRegionBlockedError as exc:
+            self.last_error = str(exc)
+            self._progress("provider_region_blocked")
+            return {
+                "status": "degraded", "reason": str(exc),
+                "provider": exc.provider, "provider_state": "REGION_BLOCKED",
+                "provider_retry_at": getattr(self.feed, "region_blocked_until_at", None),
+                "universe": 0, "snapshots": 0, "successfully_fetched": 0,
+                "failed_symbol_count": 0, "baseline_ready_symbols": 0,
+                "shortlisted_symbols": 0, "deep_enrichment_symbols": 0,
+                "current_stage": self.current_stage,
+                "cycle_started_at": cycle_started.isoformat(),
+                **resource_budget(),
+            }
         stages["universe_discovered_at"] = datetime.now(timezone.utc).isoformat()
         # The broad radar is an authoritative product data plane, not a
         # notification side effect.  It must run even before any user has
@@ -379,6 +413,7 @@ class PumpDumpMonitor:
             "HEALTHY" if len(enriched) == len(shortlisted) else "DEGRADED"
         )
         self.last_success_at = cycle_completed
+        self.last_error = None
         self._progress("idle")
         return {"status": "ok", "universe": len(universe),
                 "universe_target": self.universe_limit,
@@ -420,10 +455,13 @@ class PumpDumpMonitor:
         await bounded_thread_call(runtime_started, self.worker_name)
         try:
             result = await self._check_once_owned()
+            degraded_error = (
+                str(result.get("reason")) if result.get("status") == "degraded" else None
+            )
             await bounded_thread_call(
                 runtime_finished,
-                self.worker_name, processed=int(result.get("snapshots") or 0), errors=0,
-                details=result,
+                self.worker_name, processed=int(result.get("snapshots") or 0),
+                errors=int(degraded_error is not None), details=result, error=degraded_error,
             )
             return result
         except Exception as exc:

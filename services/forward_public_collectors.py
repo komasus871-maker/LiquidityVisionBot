@@ -19,7 +19,7 @@ from services.forward_event_store import (
 )
 from services.forward_microstructure_engine import CrossVenueState, MicrostructureFeatureEngine
 from services.forward_shadow_lab import ForwardOutcomeLabeler, ForwardShadowEngine
-from services.runtime_supervision import bounded_thread_call
+from services.runtime_supervision import ProviderRegionBlockedError, bounded_thread_call
 
 
 Emit = Callable[[RawMarketEvent], Awaitable[None]]
@@ -236,6 +236,9 @@ class PublicConnector:
         self.base_backoff_seconds = max(
             0.05, float(os.getenv("FORWARD_RECONNECT_BASE_SECONDS", "1")),
         )
+        self.region_block_backoff_seconds = max(
+            300.0, float(os.getenv("PROVIDER_REGION_BLOCK_BACKOFF_SECONDS", "3600")),
+        )
 
     def mark_progress(self, stage: str, *, successful: bool = False) -> None:
         self.current_stage = stage
@@ -272,6 +275,21 @@ class PublicConnector:
             except asyncio.CancelledError:
                 self.task_state = "CANCELLED"
                 raise
+            except ProviderRegionBlockedError as exc:
+                self.last_error = str(exc)
+                self.last_error_at_ms = now_ms()
+                self.last_restart_reason = self.last_error
+                self.task_state = "REGION_BLOCKED"
+                self.current_stage = "region_blocked_backoff"
+                self.next_retry_at_ms = now_ms() + int(self.region_block_backoff_seconds * 1000)
+                logging.error(
+                    "forward_provider_region_blocked venue=%s status=%s retry_seconds=%.0f",
+                    self.venue.value, exc.status, self.region_block_backoff_seconds,
+                )
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=self.region_block_backoff_seconds)
+                except asyncio.TimeoutError:
+                    pass
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}:{str(exc)[:180]}"
                 self.last_error_at_ms = now_ms()
@@ -310,6 +328,8 @@ class BinancePublicConnector(PublicConnector):
     async def _snapshot(self, session: aiohttp.ClientSession, symbol: str, emit: Emit, connection_id: str) -> None:
         received = now_ms()
         async with session.get(f"{self.REST}/fapi/v1/depth", params={"symbol": symbol, "limit": 1000}) as response:
+            if response.status == 451:
+                raise ProviderRegionBlockedError(self.venue.value, response.status)
             response.raise_for_status()
             data = await response.json(content_type=None)
         received = now_ms()
@@ -329,6 +349,8 @@ class BinancePublicConnector(PublicConnector):
             for symbol in self.symbols:
                 try:
                     async with session.get(f"{self.REST}/fapi/v1/openInterest", params={"symbol": symbol}) as response:
+                        if response.status == 451:
+                            raise ProviderRegionBlockedError(self.venue.value, response.status)
                         response.raise_for_status()
                         data = await response.json(content_type=None)
                     received = now_ms()
@@ -339,6 +361,8 @@ class BinancePublicConnector(PublicConnector):
                         quantity=float(data["openInterest"]), payload=data, connection_id=connection_id,
                         metadata={"unit": "CONTRACT_BASE_QUANTITY"},
                     ))
+                except ProviderRegionBlockedError:
+                    raise
                 except Exception as exc:
                     logging.warning("binance_oi_poll_failed symbol=%s error=%s", symbol, type(exc).__name__)
             try:
@@ -362,6 +386,8 @@ class BinancePublicConnector(PublicConnector):
                 poller = asyncio.create_task(self._poll_context(session, emit, connection_id, stop))
                 try:
                     while not stop.is_set():
+                        if poller.done():
+                            await poller
                         for symbol in tuple(self.resync_symbols):
                             await self._snapshot(session, symbol, emit, connection_id)
                             self.resync_symbols.discard(symbol)
@@ -760,8 +786,11 @@ class ForwardCollectorSupervisor:
                 else:
                     state, reason = "DISCONNECTED", "no connection or events"
             elif connector.last_error:
-                state = "DEGRADED" if connector.connection_count > 0 or last_event_ms else "DISCONNECTED"
-                reason = str(connector.last_error)
+                if getattr(connector, "task_state", None) == "REGION_BLOCKED":
+                    state, reason = "REGION_BLOCKED", str(connector.last_error)
+                else:
+                    state = "DEGRADED" if connector.connection_count > 0 or last_event_ms else "DISCONNECTED"
+                    reason = str(connector.last_error)
             elif len(fresh_critical) == len(critical):
                 state = "HEALTHY"
                 reason = "trade, ticker, and book channels fresh across configured symbols"

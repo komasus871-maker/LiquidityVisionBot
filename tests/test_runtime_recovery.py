@@ -14,9 +14,15 @@ from services.forward_public_collectors import (
     BinancePublicConnector, BingXPublicConnector, ForwardCollectorSupervisor,
     OKXPublicConnector, PublicConnector,
 )
-from services.pump_dump_monitor import PumpDumpMonitor
+from services.pump_dump_monitor import BinanceFuturesBroadFeed, PumpDumpMonitor
 from services.pump_dump_scanner import Candle
-from services.runtime_supervision import PeriodicHeartbeatThread, RestartingTaskSupervisor
+from services.runtime_supervision import (
+    PeriodicHeartbeatThread, ProviderRegionBlockedError, RestartingTaskSupervisor,
+    wait_for_authoritative_lease,
+)
+from tools.run_forward_microstructure_collector import (
+    _SingleFlightThreadCall, _run_archive_maintenance_cycle,
+)
 
 
 def _sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -31,6 +37,205 @@ def test_current_public_provider_endpoints_are_pinned() -> None:
     assert BinancePublicConnector.WS == "wss://fstream.binance.com/public/stream?streams="
     assert BingXPublicConnector.WS == "wss://open-api-swap.bingx.com/swap-market"
     assert OKXPublicConnector.WS == "wss://ws.okx.com:8443/ws/v5/public"
+
+
+@pytest.mark.asyncio
+async def test_valid_authoritative_lease_waits_then_acquires_without_crashing() -> None:
+    available = False
+    attempts = 0
+
+    def acquire(_name: str, _owner: str, _ttl: int) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("injected transient lease database outage")
+        return available
+
+    shutdown = asyncio.Event()
+    waiter = asyncio.create_task(wait_for_authoritative_lease(
+        acquire, "forward-test", "new-owner", 60, shutdown=shutdown,
+        base_backoff_seconds=.01, max_backoff_seconds=.01,
+    ))
+    await asyncio.sleep(.08)
+    assert not waiter.done()
+    available = True
+    assert await asyncio.wait_for(waiter, timeout=.2)
+    assert attempts >= 2
+
+
+def test_expired_authoritative_lease_is_atomically_reclaimed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+    expired = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO distributed_leases(lease_name,owner_id,expires_at,updated_at) VALUES(?,?,?,?)",
+            ("forward-stale", "old-owner", expired, expired),
+        )
+    assert database.acquire_lease("forward-stale", "new-owner", 60)
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT owner_id FROM distributed_leases WHERE lease_name=?", ("forward-stale",),
+        ).fetchone()
+    assert row["owner_id"] == "new-owner"
+
+
+@pytest.mark.asyncio
+async def test_binance_451_is_classified_and_suppresses_repeat_rest_requests() -> None:
+    class Response:
+        status = 451
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        closed = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, *_args, **_kwargs):
+            self.calls += 1
+            return Response()
+
+        async def close(self):
+            self.closed = True
+
+    feed = BinanceFuturesBroadFeed()
+    session = Session()
+    feed._session = session
+    with pytest.raises(ProviderRegionBlockedError, match="HTTP_451"):
+        await feed.instruments()
+    with pytest.raises(ProviderRegionBlockedError, match="HTTP_451"):
+        await feed.instruments()
+    assert session.calls == 1
+    assert feed.region_blocked_until_at is not None
+
+
+@pytest.mark.asyncio
+async def test_region_blocked_provider_isolated_while_other_provider_runs(tmp_path: Path) -> None:
+    ticks = {"blocked": 0, "healthy": 0}
+
+    class Blocked(PublicConnector):
+        venue = Venue.BINANCE
+        capabilities = {}
+
+        async def _run_connection(self, _emit, _stop):
+            ticks["blocked"] += 1
+            raise ProviderRegionBlockedError("BINANCE")
+
+    class Healthy(PublicConnector):
+        venue = Venue.OKX
+        capabilities = {}
+
+        async def _run_connection(self, _emit, stop):
+            while not stop.is_set():
+                ticks["healthy"] += 1
+                await asyncio.sleep(.005)
+
+    blocked = Blocked(("BTCUSDT",))
+    blocked.region_block_backoff_seconds = 1
+    supervisor = ForwardCollectorSupervisor(
+        store=AppendOnlyEventStore(tmp_path / "region-isolation.sqlite3"),
+        connectors=[blocked, Healthy(("BTCUSDT",))],
+    )
+    runner = asyncio.create_task(supervisor.run(duration_seconds=.08))
+    await asyncio.sleep(.03)
+    health = supervisor.health()
+    assert health["venues"]["BINANCE"]["state"] == "REGION_BLOCKED"
+    await runner
+    assert ticks["blocked"] == 1
+    assert ticks["healthy"] >= 5
+    assert blocked.task_state in {"REGION_BLOCKED", "CANCELLED"}
+    assert blocked.last_error == "PROVIDER_REGION_BLOCKED:BINANCE:HTTP_451"
+
+
+@pytest.mark.asyncio
+async def test_scanner_451_reports_degraded_and_loop_stays_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _sqlite(monkeypatch, tmp_path)
+
+    class RegionBlockedFeed:
+        region_blocked_until_at = "2099-01-01T00:00:00+00:00"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def instruments(self):
+            self.calls += 1
+            raise ProviderRegionBlockedError("BINANCE")
+
+        async def close(self):
+            return None
+
+    feed = RegionBlockedFeed()
+    monitor = PumpDumpMonitor(feed=feed)
+    first = await monitor.check_once()
+    assert first["status"] == "degraded"
+    assert first["provider_state"] == "REGION_BLOCKED"
+    assert first["successfully_fetched"] == 0
+    monitor.interval_seconds = .01
+    runner = asyncio.create_task(monitor.run_forever())
+    await asyncio.sleep(.05)
+    assert not runner.done()
+    monitor.stop()
+    await asyncio.wait_for(runner, timeout=1)
+    with database.connect() as connection:
+        state = connection.execute(
+            "SELECT last_error,details_json FROM runtime_state WHERE worker_name=?",
+            (monitor.worker_name,),
+        ).fetchone()
+    assert "PROVIDER_REGION_BLOCKED:BINANCE:HTTP_451" in state["last_error"]
+    assert json.loads(state["details_json"])["provider_state"] == "REGION_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_archive_timeout_degrades_cycle_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FORWARD_ARCHIVE_OPERATION_TIMEOUT_SECONDS", ".01")
+
+    class Ledger:
+        def seal_completed(self):
+            return None
+
+    class Store:
+        raw_ledger = Ledger()
+
+    class Archive:
+        calls = 0
+
+        def process_pending(self):
+            self.calls += 1
+            time.sleep(.04)
+
+        def evict_verified(self, **_kwargs):
+            raise AssertionError("later archive stages must not run after timeout")
+
+    runtime = {
+        "task_state": "STARTING", "restart_count": 0,
+        "last_error": None, "last_success_at": None,
+    }
+    archive = Archive()
+    calls = _SingleFlightThreadCall()
+    _, _, succeeded = await _run_archive_maintenance_cycle(
+        archive, Store(), runtime, last_compaction=0, last_remote_audit=0,
+        call_runner=calls,
+    )
+    assert not succeeded
+    assert runtime["task_state"] == "DEGRADED"
+    assert runtime["restart_count"] == 1
+    assert "TimeoutError" in runtime["last_error"]
+    _, _, retried = await _run_archive_maintenance_cycle(
+        archive, Store(), runtime, last_compaction=0, last_remote_audit=0,
+        call_runner=calls,
+    )
+    assert not retried and archive.calls == 1
 
 
 def test_heartbeat_thread_survives_event_loop_stall_and_transient_publication_failure() -> None:
